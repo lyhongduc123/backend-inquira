@@ -1,0 +1,29 @@
+[project]
+name = "exegent"
+version = "1.0.0"
+description = "A backend service for AI research agent."
+readme = "README.md"
+authors = [
+    { name = "Duc", email = "duc@exmaple.com" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi[standard]>=0.95.0",
+    "pydantic_settings>=2.0.0",
+    "sqlalchemy>=2.0.0",
+    "asyncpg>=0.25.0",
+    "colorama>=0.4.4",
+    "requests>=2.28.0"
+]
+
+
+
+[project.scripts]
+run = "app.main:start"
+
+[tool.setuptools]
+packages = ["app"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
