@@ -22,7 +22,7 @@ class RetrieverService:
             RetrievalServiceType.OPENALEX: OpenAlexRetrievalService(api_url=settings.OPENALEX_URL)
         }
 
-    def search(self, search_services: List[RetrievalServiceType], query: str) -> List[Dict[str, Any]]:
+    async def search(self, search_services: List[RetrievalServiceType], query: str) -> List[Dict[str, Any]]:
         """Search for papers using the specified retrieval services.
 
         Args:
