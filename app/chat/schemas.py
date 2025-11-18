@@ -7,6 +7,7 @@ class ChatMessageRequest(BaseModel):
     """Request model for sending a chat message"""
     query: str = Field(..., min_length=1, max_length=5000, description="User's message/question")
     conversation_id: Optional[int] = Field(None, description="ID of existing conversation")
+    filter: Optional[Dict[str, Any]] = Field(None, description="Optional filters for retrieval")
     model: Optional[str] = Field(None, description="Optional model override")
     stream: bool = Field(True, description="Whether to stream the response")
 

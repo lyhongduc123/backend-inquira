@@ -3,7 +3,7 @@ Utility functions for working with LLM schemas and responses
 """
 from typing import Dict, Any, List, Optional, Type, TypeVar, Union, cast
 from datetime import datetime
-from .schemas import (
+from app.llm.schemas import (
     PaperAnalysisResponse,
     KeywordExtractionResponse,
     PaperComparisonResponse,
@@ -20,9 +20,13 @@ from .schemas import (
     ExecutiveSummaryResponse,
     SummaryWithQuestionsResponse,
     ProgressiveSummaryResponse,
-    SearchResultsSummaryResponse,
-    PaperContentAnalysisResponse,
-    ResearchQuestionsResponse,
+    SearchSummaryResponse,
+    QuestionBreakdownResponse,
+    ChatResponse,
+    RelatedTopicsResponse,
+    CitationBasedResponse,
+    Citation,
+    ThoughtStep
 )
 
 T = TypeVar('T')
@@ -145,25 +149,29 @@ class ResponseConverter:
         return dict_to_model(data, ProgressiveSummaryResponse)
     
     @staticmethod
-    def to_search_summary(data: Dict[str, Any]) -> SearchResultsSummaryResponse:
-        """Convert dict to SearchResultsSummaryResponse"""
-        return dict_to_model(data, SearchResultsSummaryResponse)
+    def to_search_summary(data: Dict[str, Any]) -> SearchSummaryResponse:
+        """Convert dict to SearchSummaryResponse"""
+        return dict_to_model(data, SearchSummaryResponse)
     
     @staticmethod
-    def to_paper_content_analysis(data: Dict[str, Any]) -> PaperContentAnalysisResponse:
-        """Convert dict to PaperContentAnalysisResponse"""
-        return dict_to_model(data, PaperContentAnalysisResponse)
+    def to_question_breakdown(data: Dict[str, Any]) -> QuestionBreakdownResponse:
+        """Convert dict to QuestionBreakdownResponse"""
+        return dict_to_model(data, QuestionBreakdownResponse)
     
     @staticmethod
-    def to_research_questions(questions: List[str], topic: str, 
-                              model_used: str) -> ResearchQuestionsResponse:
-        """Convert research questions to ResearchQuestionsResponse"""
-        return ResearchQuestionsResponse(
-            questions=questions,
-            topic=topic,
-            num_questions=len(questions),
-            model_used=model_used
-        )
+    def to_chat_response(data: Dict[str, Any]) -> ChatResponse:
+        """Convert dict to ChatResponse"""
+        return dict_to_model(data, ChatResponse)
+    
+    @staticmethod
+    def to_related_topics(data: Dict[str, Any]) -> RelatedTopicsResponse:
+        """Convert dict to RelatedTopicsResponse"""
+        return dict_to_model(data, RelatedTopicsResponse)
+    
+    @staticmethod
+    def to_citation_based_response(data: Dict[str, Any]) -> CitationBasedResponse:
+        """Convert dict to CitationBasedResponse"""
+        return dict_to_model(data, CitationBasedResponse)
 
 
 def validate_response(response: Any, expected_fields: Optional[List[str]] = None) -> bool:
