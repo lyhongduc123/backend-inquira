@@ -2,7 +2,7 @@
 Academic paper and content analysis module
 """
 from typing import Optional, Dict, Any, List
-from .base import BaseLLMClient
+from .base_client import BaseLLMClient
 from .prompts import AnalysisPrompts
 
 

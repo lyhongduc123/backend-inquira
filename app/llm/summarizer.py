@@ -2,7 +2,7 @@
 Text summarization module using LLM
 """
 from typing import Optional, Dict, Any, List
-from .base import BaseLLMClient
+from .base_client import BaseLLMClient
 from .prompts import SummaryPrompts
 
 class Summarizer:

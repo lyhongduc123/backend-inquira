@@ -327,6 +327,7 @@ class CitationBasedResponse(BaseModel):
     thought_process: List[ThoughtStep] = Field(..., description="Step-by-step thought process")
     final_answer: str = Field(..., description="Final synthesized answer")
     all_citations: List[Citation] = Field(..., description="All citations used in response")
+    sources: List[Dict[str, Any]] = Field(default_factory=list, description="Full metadata of all source papers")
     sources_count: int = Field(..., description="Number of unique sources cited")
     model_used: str = Field(..., description="Model used for generation")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")

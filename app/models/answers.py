@@ -1,8 +1,7 @@
 from sqlalchemy import Boolean, Column, DateTime, Enum, Integer, String, func
-from sqlalchemy.ext.declarative import declarative_base
-Base = declarative_base()
+from app.models.base import DatabaseBase as Base
 
-class DBAnswers(Base):
+class DBAnswer(Base):
     __tablename__ = "answers"
 
     id = Column(Integer, primary_key=True, index=True)

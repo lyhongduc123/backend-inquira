@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     OPENALEX_URL: str
 
     OPENAI_API_KEY: str
+    
+    # Ollama settings
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.2"
+    OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"
+    LLM_PROVIDER: str = "ollama"
+    EMBEDDING_PROVIDER: str = "ollama" 
 
     LOG_DIR: str = "logs"
     LOG_TO_CONSOLE: bool = True

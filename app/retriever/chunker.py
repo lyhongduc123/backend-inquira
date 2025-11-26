@@ -1,0 +1,192 @@
+import re
+import tiktoken
+from typing import List, Optional, Tuple
+from app.extensions.logger import create_logger
+
+logger = create_logger(__name__)
+
+
+class TextChunker:
+    """Chunk text into smaller pieces for embedding"""
+    
+    def __init__(
+        self,
+        min_tokens: int = 600,
+        max_tokens: int = 1200,
+        overlap_tokens: int = 100,
+        model: str = "gpt-4"
+    ):
+        """
+        Initialize text chunker
+        
+        Args:
+            min_tokens: Minimum tokens per chunk
+            max_tokens: Maximum tokens per chunk
+            overlap_tokens: Number of tokens to overlap between chunks
+            model: Model name for tokenization
+        """
+        self.min_tokens = min_tokens
+        self.max_tokens = max_tokens
+        self.overlap_tokens = overlap_tokens
+        self.encoding = tiktoken.encoding_for_model(model)
+    
+    def count_tokens(self, text: str) -> int:
+        """Count tokens in text"""
+        return len(self.encoding.encode(text))
+    
+    def split_into_sentences(self, text: str) -> List[str]:
+        """Split text into sentences"""
+        # Simple sentence splitting (can be improved with spaCy or NLTK)
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        return [s.strip() for s in sentences if s.strip()]
+    
+    def chunk_text(
+        self,
+        text: str,
+        paper_id: str,
+        preserve_sections: bool = True
+    ) -> List[Tuple[str, int, Optional[str]]]:
+        """
+        Chunk text into overlapping pieces
+        
+        Args:
+            text: Full text to chunk
+            paper_id: Paper ID for logging
+            preserve_sections: Try to preserve section boundaries
+            
+        Returns:
+            List of (chunk_text, token_count, section_title) tuples
+        """
+        chunks = []
+        
+        # Try to split by sections first
+        if preserve_sections:
+            sections = self._split_into_sections(text)
+        else:
+            sections = [(text, None)]
+        
+        chunk_index = 0
+        for section_text, section_title in sections:
+            section_chunks = self._chunk_section(section_text, section_title)
+            chunks.extend(section_chunks)
+        
+        logger.info(f"Chunked paper {paper_id} into {len(chunks)} chunks")
+        return chunks
+    
+    def _split_into_sections(self, text: str) -> List[Tuple[str, Optional[str]]]:
+        """
+        Split text into sections based on headings
+        
+        Returns:
+            List of (section_text, section_title) tuples
+        """
+        sections: List[Tuple[str, Optional[str]]] = []
+        
+        # Pattern to match section headings (e.g., "1. Introduction", "Abstract", etc.)
+        heading_pattern = r'^(?:\d+\.?\s+)?([A-Z][A-Za-z\s]+)$'
+        
+        lines = text.split('\n')
+        current_section = []
+        current_title: Optional[str] = None
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Check if line is a heading
+            if len(stripped) < 100 and re.match(heading_pattern, stripped):
+                # Save previous section
+                if current_section:
+                    section_text = '\n'.join(current_section)
+                    sections.append((section_text, current_title))
+                
+                # Start new section
+                current_title = stripped
+                current_section = []
+            else:
+                current_section.append(line)
+        
+        # Add last section
+        if current_section:
+            section_text = '\n'.join(current_section)
+            sections.append((section_text, current_title))
+        
+        # If no sections found, return entire text
+        if not sections:
+            sections = [(text, None)]
+        
+        return sections
+    
+    def _chunk_section(
+        self,
+        section_text: str,
+        section_title: Optional[str]
+    ) -> List[Tuple[str, int, Optional[str]]]:
+        """
+        Chunk a single section into overlapping pieces
+        
+        Returns:
+            List of (chunk_text, token_count, section_title) tuples
+        """
+        chunks = []
+        sentences = self.split_into_sentences(section_text)
+        
+        current_chunk = []
+        current_tokens = 0
+        
+        for sentence in sentences:
+            sentence_tokens = self.count_tokens(sentence)
+            
+            # If adding this sentence exceeds max_tokens, save current chunk
+            if current_tokens + sentence_tokens > self.max_tokens and current_chunk:
+                chunk_text = ' '.join(current_chunk)
+                chunks.append((chunk_text, current_tokens, section_title))
+                
+                # Start new chunk with overlap
+                overlap_chunk = []
+                overlap_tokens = 0
+                
+                # Add sentences from end of previous chunk for overlap
+                for prev_sentence in reversed(current_chunk):
+                    prev_tokens = self.count_tokens(prev_sentence)
+                    if overlap_tokens + prev_tokens <= self.overlap_tokens:
+                        overlap_chunk.insert(0, prev_sentence)
+                        overlap_tokens += prev_tokens
+                    else:
+                        break
+                
+                current_chunk = overlap_chunk
+                current_tokens = overlap_tokens
+            
+            current_chunk.append(sentence)
+            current_tokens += sentence_tokens
+        
+        # Add final chunk if it meets minimum size
+        if current_chunk and current_tokens >= self.min_tokens:
+            chunk_text = ' '.join(current_chunk)
+            chunks.append((chunk_text, current_tokens, section_title))
+        elif current_chunk and chunks:
+            # If final chunk is too small, append to last chunk
+            chunk_text = ' '.join(current_chunk)
+            last_chunk, last_tokens, last_title = chunks[-1]
+            combined_text = last_chunk + ' ' + chunk_text
+            combined_tokens = self.count_tokens(combined_text)
+            chunks[-1] = (combined_text, combined_tokens, last_title or section_title)
+        elif current_chunk:
+            # If only one small chunk, keep it anyway
+            chunk_text = ' '.join(current_chunk)
+            chunks.append((chunk_text, current_tokens, section_title))
+        
+        return chunks
+    
+    def create_chunk_id(self, paper_id: str, chunk_index: int) -> str:
+        """
+        Create chunk ID in format P12345::C7
+        
+        Args:
+            paper_id: Paper ID (e.g., P12345)
+            chunk_index: 0-based chunk index
+            
+        Returns:
+            Chunk ID (e.g., P12345::C7)
+        """
+        return f"{paper_id}::C{chunk_index}"

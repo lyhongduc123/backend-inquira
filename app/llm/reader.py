@@ -2,7 +2,7 @@
 Content reading and comprehension module
 """
 from typing import Optional, Dict, Any, List, Generator
-from .base import BaseLLMClient
+from .base_client import BaseLLMClient
 from .prompts import ReadingPrompts
 
 class Reader:

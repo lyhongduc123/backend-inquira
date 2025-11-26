@@ -24,7 +24,7 @@ class Message(BaseModel):
 
 class ConversationDetail(BaseModel):
     """Detailed conversation with messages"""
-    id: int
+    id: str  # UUID string
     title: Optional[str]
     created_at: datetime
     updated_at: datetime
@@ -35,11 +35,10 @@ class ConversationDetail(BaseModel):
 
 class ConversationSummary(BaseModel):
     """Summary of a conversation for list view"""
-    id: int
+    id: str  # UUID string
     title: Optional[str]
-    preview: Optional[str]  # First message or summary
-    created_at: datetime
-    updated_at: datetime
+    preview: Optional[str] = None  # First message or summary
+    last_updated: datetime
     message_count: int
     is_archived: bool
 

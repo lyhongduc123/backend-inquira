@@ -16,18 +16,30 @@ from app.llm.schemas import (
     ThoughtStep
 )
 from app.core.config import settings
+from app.extensions.logger import create_logger
 import json
 import re
+
+logger = create_logger(__name__)
 
 
 class LLMService():
     """Service class that provides LLM functionality for the application"""
     
     def __init__(self):
-        self.llm_provider = LLMProvider(
-            api_key=settings.OPENAI_API_KEY,
-            default_model=ModelType.GPT_4O_MINI.value
-        )
+        # Determine which provider to use based on settings
+        provider_type = getattr(settings, 'LLM_PROVIDER', 'openai').lower()
+        
+        if provider_type == 'ollama':
+            self.llm_provider = LLMProvider(
+                provider='ollama'
+            )
+        else:  # default to openai
+            self.llm_provider = LLMProvider(
+                api_key=settings.OPENAI_API_KEY,
+                default_model=ModelType.GPT_4O_MINI.value,
+                provider='openai'
+            )
         self.prompts = SummaryPrompts
     
     def summarize_search_results(
@@ -155,44 +167,36 @@ class LLMService():
             }
         """
         
-        # Let LLM decide if parameters are None
-        subtopic_instruction = f"exactly {num_subtopics} sub-topics" if num_subtopics else "an appropriate number of sub-topics (between 1-3 based on question complexity, no more than 3)"
-        
-        explanation_instruction = ""
-        if include_explanation is True:
-            explanation_instruction = """
-            For each sub-topic, provide a brief one-line explanation in the format:
-            Sub-topic | Brief explanation
+        # Generate exactly 1-2 focused subtopics that stay close to the user's query
+        subtopic_instruction = f"exactly {num_subtopics} sub-topics" if num_subtopics else "1-2 focused sub-topics (no more than 2)"
 
-            Example:
-            Definition of machine learning | Understanding what ML is and its core principles
-            """
-        elif include_explanation is None:
-            explanation_instruction = """
-            If the question is complex or technical, provide brief explanations for each sub-topic in the format:
-            Sub-topic | Brief explanation
-
-            For simple questions, just list the sub-topics without explanations.
-            """
-
-        prompt = f"""Analyze this user question and break it down into focused sub-topics that would help answer it comprehensively:
+        prompt = f"""Analyze this user question and create focused search queries that would help find relevant research papers:
 
             User Question: "{user_question}"
 
             Please provide:
-            1. A clarified/refined version of the question
-            2. {subtopic_instruction}
-            3. Assess the complexity level (simple/intermediate/advanced)
+            1. A clarified/refined version of the question that captures the core intent
+            2. {subtopic_instruction} for searching academic papers
 
-            The sub-topics should:
-            - Cover different aspects needed to fully answer the question
-            - Progress logically (from basic to advanced concepts)
-            - Be specific and actionable for research
-            - Help structure a comprehensive answer
-            - Avoid redundancy
-            - Match the depth needed for the question's complexity
+            IMPORTANT RULES FOR SUBTOPICS:
+            - Stay VERY CLOSE to the original question's terminology and focus
+            - Each subtopic should be a searchable query that directly relates to the user's question
+            - Use the same technical terms, product names, and concepts from the original question
+            - DO NOT expand into tangential areas or general background topics
+            - Keep subtopics specific and targeted to what the user asked
+            - Maximum 2 subtopics to maintain focus
 
-            {explanation_instruction}
+            Examples:
+            Question: "How does Walrus Sui decentralized storage work?"
+            → Subtopic 1: "Walrus Sui decentralized storage architecture and mechanisms"
+            → Subtopic 2: "Walrus Sui storage implementation and protocols"
+
+            Question: "What are the benefits of transformer models?"
+            → Subtopic 1: "transformer model advantages and performance benefits"
+            → Subtopic 2: "transformer architecture computational efficiency"
+
+            Question: "Explain quantum entanglement"
+            → Subtopic 1: "quantum entanglement phenomena and mechanisms"
 
             Format your response as:
             COMPLEXITY: [simple/intermediate/advanced]
@@ -200,26 +204,30 @@ class LLMService():
             SUBTOPICS:
             1. [subtopic 1]
             2. [subtopic 2]
-            ...
             """
 
-        system_message = """You are an expert at analyzing questions and breaking them down into clear, focused sub-topics. 
-            Your goal is to help users understand complex questions by identifying the key components they need to explore.
+        system_message = """You are an expert at converting user questions into effective academic search queries.
 
             Guidelines:
-            - Simple questions (e.g., "What is X?"): 1-2 subtopics, no explanations needed
-            - Intermediate questions (e.g., "How does X work?"): 1-2 subtopics, brief explanations helpful
-            - Advanced questions (e.g., "Compare X and Y in context Z"): 2-3 subtopics, detailed explanations needed
+            - PRESERVE the exact terminology from the user's question (product names, technical terms, specific concepts)
+            - Generate 1-2 focused subtopics maximum
+            - Each subtopic should be a direct search query for finding relevant papers
+            - Stay laser-focused on what the user specifically asked about
+            - Avoid generic background topics or tangential areas
+            - Simple "What is X?" questions: 1 subtopic focused on X
+            - "How does X work?" questions: 1-2 subtopics about X's mechanisms/implementation
+            - Comparison questions: 1-2 subtopics comparing the specific items mentioned
 
-            Adapt the number and depth of subtopics based on the question's complexity. Though never exceed 3 sub-topics."""
+            NEVER exceed 2 subtopics. Quality over quantity."""
 
         response = self.llm_provider.simple_prompt(
             prompt=prompt,
             system_message=system_message,
             temperature=0.3
         )
+        logger.info(f"LLM response for question breakdown: {response}")
         
-        # Parse the response
+        # Parse the response with robust handling for different formats
         lines = response.split('\n')
         clarified_question = ""
         subtopics = []
@@ -233,32 +241,74 @@ class LLMService():
             if not line:
                 continue
             
+            # Extract complexity (handles both "COMPLEXITY: intermediate" and "intermediate")
             if line.startswith('COMPLEXITY:'):
-                complexity = line.replace('COMPLEXITY:', '').strip().lower()
+                complexity_text = line.replace('COMPLEXITY:', '').strip().lower()
+                # Extract first word if there's extra text
+                complexity = complexity_text.split()[0] if complexity_text else "intermediate"
             
+            # Extract clarified question (handles quotes and extra formatting)
             elif line.startswith('CLARIFIED:'):
-                clarified_question = line.replace('CLARIFIED:', '').strip()
+                clarified_text = line.replace('CLARIFIED:', '').strip()
+                # Remove quotes if present
+                clarified_question = clarified_text.strip('"').strip()
             
-            elif 'SUBTOPICS:' in line.upper():
+            # Detect SUBTOPICS section (case-insensitive, handles variations)
+            elif 'SUBTOPICS:' in line.upper() or 'SUBTOPIC' in line.upper():
                 parsing_subtopics = True
                 continue
             
             # Parse subtopics
             if parsing_subtopics and line:
-                # Remove numbering, bullets, etc.
+                # Skip lines that are just headers or explanations
+                if line.upper().startswith('THESE') or line.upper().startswith('THE SUB'):
+                    continue
+                
+                # Remove various prefix formats
                 clean_line = line
-                for prefix in ['1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.', '10.', '•', '-', '*']:
+                
+                # Remove numbered prefixes (1., 2., 3., etc.)
+                if re.match(r'^\d+\.', clean_line):
+                    clean_line = re.sub(r'^\d+\.\s*', '', clean_line)
+                
+                # Remove bullet points and asterisks
+                for prefix in ['•', '-', '*', '>', '○', '▪']:
                     if clean_line.startswith(prefix):
                         clean_line = clean_line[len(prefix):].strip()
                         break
                 
-                # Check for explanation (format: "subtopic | explanation")
+                # Remove markdown bold markers
+                clean_line = clean_line.replace('**', '').strip()
+                
+                # Remove surrounding quotes (both single and double)
+                clean_line = clean_line.strip('"').strip("'").strip()
+                
+                # Skip if line is too short or looks like a header
+                if len(clean_line) < 5:
+                    continue
+                
+                # Check for explanation (format: "subtopic | explanation" or "subtopic: explanation")
                 if '|' in clean_line:
                     parts = clean_line.split('|', 1)
-                    subtopics.append(parts[0].strip())
-                    explanations.append(parts[1].strip())
+                    topic = parts[0].strip().strip('"').strip("'").strip()
+                    explanation = parts[1].strip().strip('"').strip("'").strip()
+                    subtopics.append(topic)
+                    explanations.append(explanation)
+                elif ':' in clean_line and not clean_line.startswith('COMPLEXITY:'):
+                    # Handle "Subtopic: explanation" format
+                    parts = clean_line.split(':', 1)
+                    topic = parts[0].strip().strip('"').strip("'").strip()
+                    subtopics.append(topic)
+                    if len(parts) > 1:
+                        explanation = parts[1].strip().strip('"').strip("'").strip()
+                        explanations.append(explanation)
                 elif clean_line:
+                    # Plain subtopic without explanation
+                    clean_line = clean_line.strip('"').strip("'").strip()
                     subtopics.append(clean_line)
+        
+        # Filter out empty subtopics and limit to maximum 2
+        subtopics = [s.strip() for s in subtopics if s.strip() and len(s.strip()) > 5][:2]
         
         # Validate complexity to match Literal type
         valid_complexity = complexity if complexity in ["simple", "intermediate", "advanced"] else "intermediate"
@@ -444,35 +494,33 @@ class LLMService():
         
         context_text = "\n".join(formatted_context)
         
-        system_message = """You are a research assistant that provides answers based strictly on provided research papers.
+        system_message = """You are an expert research assistant with deep knowledge across scientific domains. Your role is to synthesize information from academic papers into natural, engaging, and well-cited responses.
 
-CRITICAL INSTRUCTIONS:
-1. Show your thought process step by step
-2. For EACH thought step, cite the specific papers that support it using [1], [2], etc.
-3. Include direct quotes when making specific claims
-4. Only use information from the provided papers
-5. If the papers don't contain enough information, explicitly state this
+CRITICAL GUIDELINES:
+1. Write in a natural, conversational academic style - avoid robotic formats
+2. Synthesize a consensus view from multiple papers when possible
+3. Use inline citations [1], [2], [3] to support every claim, fact, or finding
+4. Structure your response logically with clear sections when appropriate
+5. Base EVERY statement on the provided papers - do not add external knowledge
+6. If papers lack sufficient information, state this clearly
 
-Format your response as:
-THOUGHT PROCESS:
-Step 1: [Your reasoning]
-Citations: [1], [2]
-Quote: "relevant quote from paper"
+RESPONSE STYLE:
+- Start with a direct answer or overview
+- Organize information hierarchically (overview → details → implications)
+- Use evidence-based language: "Research shows..." "Studies indicate..." "According to [1][2]..."
+- End with a brief synthesis or conclusion when appropriate
 
-Step 2: [Your reasoning]
-Citations: [3]
-Quote: "relevant quote from paper"
-
-FINAL ANSWER:
-[Your synthesized answer with inline citations like [1][2]]
-"""
+CITATION RULES:
+- Cite papers using [1], [2], etc. matching the numbered papers provided
+- Multiple citations for the same claim: [1][2][5]
+- Always cite when stating facts, statistics, definitions, or findings"""
 
         prompt = f"""Question: {query}
 
 Available Research Papers:
 {context_text}
 
-Please provide a comprehensive answer following the format specified."""
+Please provide a comprehensive, naturally-written answer that synthesizes information from these papers with proper inline citations."""
 
         response = self.llm_provider.simple_prompt(
             prompt=prompt,
@@ -480,71 +528,33 @@ Please provide a comprehensive answer following the format specified."""
             temperature=0.3
         )
         
-        # Parse the response
-        thought_steps = []
-        final_answer = ""
+        # Extract all citations from the response
         all_citations = []
+        citation_refs = re.findall(r'\[(\d+)\]', response)
+        seen_citations = set()
         
-        # Split response into sections
-        sections = response.split('FINAL ANSWER:')
-        thought_section = sections[0].replace('THOUGHT PROCESS:', '').strip()
-        final_answer = sections[1].strip() if len(sections) > 1 else response
-        
-        # Parse thought steps
-        step_pattern = re.compile(r'Step (\d+):', re.IGNORECASE)
-        steps_text = step_pattern.split(thought_section)
-        
-        for i in range(1, len(steps_text), 2):
-            if i + 1 < len(steps_text):
-                step_num = int(steps_text[i])
-                step_content = steps_text[i + 1].strip()
-                
-                # Extract citations
-                citation_refs = re.findall(r'\[(\d+)\]', step_content)
-                step_citations = []
-                
-                for ref in citation_refs:
-                    paper_id = f"paper_{ref}"
-                    if paper_id in citation_map:
-                        citation_info = citation_map[paper_id]
-                        
-                        # Extract quote if present
-                        quote_match = re.search(r'Quote: ["\'](.+?)["\']', step_content, re.DOTALL)
-                        quote = quote_match.group(1) if quote_match else None
-                        
-                        citation = Citation(
-                            paper_id=citation_info["paper_id"],
-                            page=None,
-                            title=citation_info["title"],
-                            authors=citation_info["authors"],
-                            year=citation_info["year"],
-                            quote=quote,
-                            relevance=f"Supports step {step_num}"
-                        )
-                        step_citations.append(citation)
-                        
-                        # Add to all citations if not duplicate
-                        if not any(c.paper_id == citation.paper_id for c in all_citations):
-                            all_citations.append(citation)
-                
-                # Extract the main thought (remove citations and quotes)
-                thought = re.sub(r'Citations?:.*?(?=\n|$)', '', step_content, flags=re.DOTALL)
-                thought = re.sub(r'Quote:.*?(?=\n|$)', '', thought, flags=re.DOTALL)
-                thought = thought.strip()
-                
-                thought_step = ThoughtStep(
-                    step_number=step_num,
-                    thought=thought,
-                    citations=step_citations,
-                    confidence=None
+        for ref in citation_refs:
+            paper_id = f"paper_{ref}"
+            if paper_id in citation_map and paper_id not in seen_citations:
+                citation_info = citation_map[paper_id]
+                citation = Citation(
+                    paper_id=citation_info["paper_id"],
+                    page=None,
+                    title=citation_info["title"],
+                    authors=citation_info["authors"],
+                    year=citation_info["year"],
+                    quote=None,
+                    relevance="Referenced in response"
                 )
-                thought_steps.append(thought_step)
+                all_citations.append(citation)
+                seen_citations.add(paper_id)
         
         return CitationBasedResponse(
             query=query,
-            thought_process=thought_steps,
-            final_answer=final_answer,
+            thought_process=[],  # Natural response doesn't have structured thought steps
+            final_answer=response,  # The entire response is the answer
             all_citations=all_citations,
+            sources=context,  # Include full paper metadata for frontend
             sources_count=len(all_citations),
             model_used=self.llm_provider.get_model(),
             metadata={}
@@ -566,13 +576,30 @@ Please provide a comprehensive answer following the format specified."""
             Formatted chunks including thought steps and citations
         """
         # Format context with citation info
+        # Context now includes chunk_text from vector search for more relevant content
         formatted_context = []
         
         for i, doc in enumerate(context, 1):
             title = doc.get('title', 'Untitled')
             authors = doc.get('authors', [])
             year = doc.get('year', None)
-            content = doc.get('abstract', doc.get('content', ''))
+            paper_id = doc.get('paper_id', doc.get('id', f'paper_{i}'))
+            pdf_url = doc.get('pdf_url', '')
+            
+            
+            # Prefer chunk_text (from vector search) over abstract
+            # chunk_text is the most relevant section of the paper for the query
+            chunk_text = doc.get('chunk_text')
+            section = doc.get('section')
+            
+            if chunk_text:
+                # Use the actual relevant chunk from the paper
+                content = chunk_text
+                if section:
+                    content = f"[Section: {section}]\n{content}"
+            else:
+                # Fallback to abstract if no chunks available
+                content = doc.get('abstract', doc.get('content', ''))
             
             # Handle authors in various formats (list of dicts, list of strings, or string)
             if isinstance(authors, list):
@@ -589,41 +616,71 @@ Please provide a comprehensive answer following the format specified."""
             else:
                 authors_str = 'Unknown'
             
-            formatted_context.append(
-                f"[{i}] {title}\n"
-                f"Authors: {authors_str}\n"
-                f"Year: {year if year else 'N/A'}\n"
-                f"Content: {content}\n"
-            )
+            # Build formatted context with paper metadata
+            context_entry = f"[{i}] {title}\n"
+            context_entry += f"Paper ID: {paper_id}\n"
+            context_entry += f"Authors: {authors_str}\n"
+            context_entry += f"Year: {year if year else 'N/A'}\n"
+            context_entry += f"PDF URL: {pdf_url}\n"
+            context_entry += f"Content: {content}\n"
+            
+            formatted_context.append(context_entry)
         
         context_text = "\n".join(formatted_context)
         
-        system_message = """
-            You are a research assistant that provides answers based strictly on provided research papers.
+        system_message = """You are an expert research assistant with deep knowledge across scientific domains. Your role is to synthesize information from academic papers into natural, engaging, and well-cited responses.
 
-            Stream your response in this format:
-            1. Show reasoning steps prefixed with "💭 " 
-            2. After each reasoning step, cite papers with "[1]", "[2]", etc.
-            3. End with "📝 Final Answer:" followed by your synthesized answer
-            4. Use inline citations in the final answer
+        CRITICAL GUIDELINES:
+        1. Write in a natural, conversational academic style - avoid robotic formats or emoji markers
+        2. Synthesize a consensus view from multiple papers when possible
+        3. Use inline citations [1](paper_id1), [2](paper_id2), [3](paper_id3) to support every claim, fact, or finding
+        4. Structure your response logically with clear sections when appropriate (use headers, lists, tables if helpful)
+        5. Highlight key definitions, types, causes, mechanisms, or applications based on the question
+        6. When papers disagree or show different perspectives, acknowledge this explicitly
+        7. If the question is vague or could benefit from clarification, briefly ask what aspect the user is most interested in
+        8. Base EVERY statement on the provided papers - do not add external knowledge
+        9. If papers lack sufficient information, state this clearly and suggest what additional research might help
+        10. If unsure about a claim, avoid making definitive statements.
+        11. If only abstracts are provided, you may answer based on your own general knowledge, but you MUST clearly notify the user when doing so. Distinguish between claims supported by the abstract and those based on your own knowledge. For any information not present in the abstract, explicitly state: "This information is not available in the abstract; the following is based on general knowledge and may not be accurate for this specific paper."
 
-            Example:
-            💭 First, let's understand the core concept...
-            [1] According to Smith et al., "machine learning is..."
+        MARKDOWN FORMATTING (REQUIRED):
+        - Use # for main headers, ## for subheaders, ### for sub-sections
+        - Use **bold** for emphasis on key terms
+        - Use bullet points with - or * for lists
+        - Use numbered lists 1. 2. 3. when showing steps or rankings
+        - Use > for important quotes or highlights
+        - Use tables when comparing multiple items
+        - Use code blocks with ``` when showing technical terms or formulas
+        - Format your entire response in proper Markdown
 
-            💭 Next, we need to consider the implementation...
-            [2][3] Multiple studies show that...
+        RESPONSE STYLE:
+        - Start with a direct answer or overview (use a header if appropriate)
+        - Organize information hierarchically with proper Markdown headers
+        - Use evidence-based language such as: "Research shows that..." "Multiple studies indicate..." "According to [1][2]..."
+        - Include direct quotes sparingly when they add significant value
+        - End with a brief synthesis or conclusion when appropriate
 
-            📝 Final Answer:
-            Machine learning works by [1][2]...
-            """
+        CITATION RULES (CRITICAL):
+        - Cite papers INLINE ONLY using [1](paper_id1), [2](paper_id2), etc. where paper_id is the Paper ID provided
+        - Multiple citations for the same claim: [1](paper_id1)[2](paper_id2)[5](paper_id5)
+        - Always cite when stating facts, statistics, definitions, or findings
+        - Group related citations together naturally in the text
+        - DO NOT create a separate "References" section at the end
+        - DO NOT list references separately - ALL citations must be inline only
+        - Use the exact Paper ID from the context (e.g., if Paper ID is "arxiv_2301.12345", cite as [1](arxiv_2301.12345))
+        
+        FORBIDDEN:
+        - DO NOT add a "References:" section at the end
+        - DO NOT list citations separately from the text
+        - DO NOT use plain text without Markdown formatting
+        """
 
         prompt = f"""Question: {query}
 
         Available Research Papers:
         {context_text}
 
-        Please provide a comprehensive answer with citations."""
+        Please provide a comprehensive, naturally-written answer that synthesizes information from these papers with proper inline citations."""
 
         messages = [
             {"role": "system", "content": system_message},
@@ -631,7 +688,6 @@ Please provide a comprehensive answer following the format specified."""
         ]
         
         print(f"[DEBUG] Starting to stream completion...")
-        # Stream the response
         chunk_count = 0
         for chunk in self.llm_provider.stream_completion(messages=messages):
             chunk_count += 1

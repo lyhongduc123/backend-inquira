@@ -1,4 +1,5 @@
-from .base import BaseLLMClient, ModelType
+from .openai_client import OpenaiClient, ModelType
+from .ollama_client import OllamaClient
 from .provider import LLMProvider
 from .summarizer import Summarizer
 from .analyzer import Analyzer
@@ -58,7 +59,7 @@ from .schema_utils import (
 
 __all__ = [
     # Core Classes
-    "BaseLLMClient", 
+    "OpenaiClient", 
     "ModelType", 
     "LLMProvider", 
     "Summarizer", 

@@ -1,0 +1,11 @@
+fastapi[standard]
+pydantic_settings
+sqlalchemy
+asyncpg
+colorama
+requests
+openai
+beautifulsoup4
+pgvector
+PyPDF2
+tiktoken

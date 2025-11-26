@@ -1,8 +1,11 @@
 """
 Conversation router for managing chat conversations
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.database import get_db_session
+from app.conversations.service import ConversationService
 from app.conversations.schemas import (
     ConversationCreate,
     ConversationUpdate,
@@ -14,11 +17,16 @@ from app.conversations.schemas import (
 router = APIRouter()
 
 
+# Temporary: Default user_id until auth is implemented
+DEFAULT_USER_ID = 1
+
+
 @router.get("", response_model=ConversationListResponse)
 async def list_conversations(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     archived: Optional[bool] = Query(None, description="Filter by archive status"),
+    db: AsyncSession = Depends(get_db_session),
     # user_id: int = Depends(get_current_user)  # TODO: Add auth
 ):
     """
@@ -28,10 +36,19 @@ async def list_conversations(
     - **page_size**: Number of items per page
     - **archived**: Filter archived/active conversations
     """
-    # TODO: Implement database query
+    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    service = ConversationService(db)
+    
+    conversations, total = await service.list_conversations(
+        user_id=user_id,
+        page=page,
+        page_size=page_size,
+        archived=archived
+    )
+    
     return ConversationListResponse(
-        conversations=[],
-        total=0,
+        conversations=conversations,
+        total=total,
         page=page,
         page_size=page_size
     )
@@ -40,6 +57,7 @@ async def list_conversations(
 @router.post("", response_model=ConversationDetail)
 async def create_conversation(
     request: ConversationCreate,
+    db: AsyncSession = Depends(get_db_session),
     # user_id: int = Depends(get_current_user)  # TODO: Add auth
 ):
     """
@@ -47,13 +65,21 @@ async def create_conversation(
     
     - **title**: Optional conversation title
     """
-    # TODO: Implement database creation
-    raise HTTPException(status_code=501, detail="Not implemented")
+    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    service = ConversationService(db)
+    
+    conversation = await service.create_conversation(
+        user_id=user_id,
+        title=request.title
+    )
+    
+    return conversation
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation(
-    conversation_id: int,
+    conversation_id: str,
+    db: AsyncSession = Depends(get_db_session),
     # user_id: int = Depends(get_current_user)  # TODO: Add auth
 ):
     """
@@ -61,14 +87,21 @@ async def get_conversation(
     
     - **conversation_id**: ID of the conversation
     """
-    # TODO: Implement database query
-    raise HTTPException(status_code=404, detail="Conversation not found")
+    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    service = ConversationService(db)
+    
+    conversation = await service.get_conversation(conversation_id, user_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    return conversation
 
 
 @router.patch("/{conversation_id}", response_model=ConversationDetail)
 async def update_conversation(
-    conversation_id: int,
+    conversation_id: str,
     request: ConversationUpdate,
+    db: AsyncSession = Depends(get_db_session),
     # user_id: int = Depends(get_current_user)  # TODO: Add auth
 ):
     """
@@ -78,13 +111,25 @@ async def update_conversation(
     - **title**: New title
     - **is_archived**: Archive status
     """
-    # TODO: Implement database update
-    raise HTTPException(status_code=404, detail="Conversation not found")
+    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    service = ConversationService(db)
+    
+    conversation = await service.update_conversation(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        update_data=request
+    )
+    
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    return conversation
 
 
 @router.delete("/{conversation_id}")
 async def delete_conversation(
-    conversation_id: int,
+    conversation_id: str,
+    db: AsyncSession = Depends(get_db_session),
     # user_id: int = Depends(get_current_user)  # TODO: Add auth
 ):
     """
@@ -92,5 +137,11 @@ async def delete_conversation(
     
     - **conversation_id**: ID of the conversation
     """
-    # TODO: Implement database deletion
+    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    service = ConversationService(db)
+    
+    success = await service.delete_conversation(conversation_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
     return {"success": True, "message": "Conversation deleted"}

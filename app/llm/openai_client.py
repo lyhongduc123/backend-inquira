@@ -5,19 +5,26 @@ from typing import List, Dict, Any, Optional, Generator, Union, Iterable, cast
 from openai import OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam
 from enum import Enum
-import logging
+from .base_client import BaseLLMClient
 
-logger = logging.getLogger(__name__)
+from app.extensions.logger import create_logger
+
+logger = create_logger(__name__)
 
 
 class ModelType(Enum):
-    """Available OpenAI model types"""
+    """Available model types"""
+    # OpenAI models
     GPT_4O = "gpt-4o"
     GPT_4O_MINI = "gpt-4o-mini"
     GPT_4_TURBO = "gpt-4-turbo"
     GPT_3_5_TURBO = "gpt-3.5-turbo"
+    # Ollama models
+    LLAMA3_2 = "llama3.2"
+    LLAMA3_2_1B = "llama3.2:1b"
+    LLAMA3_2_3B = "llama3.2:3b"
 
-class BaseLLMClient:
+class OpenaiClient(BaseLLMClient):
     """Base client for OpenAI API interactions"""
     
     def __init__(self, api_key: str, default_model: str = ModelType.GPT_4O_MINI.value):
@@ -77,7 +84,8 @@ class BaseLLMClient:
         system_message: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        **kwargs
     ) -> str:
         """
         Simple prompt completion with optional system message
@@ -88,6 +96,7 @@ class BaseLLMClient:
             model: Model to use
             temperature: Randomness in response
             max_tokens: Maximum tokens in response
+            **kwargs: Additional parameters
         
         Returns:
             Generated text response
@@ -103,7 +112,8 @@ class BaseLLMClient:
             messages=messages,
             model=model,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            **kwargs
         )
         
         if isinstance(response, dict):
@@ -150,8 +160,8 @@ class BaseLLMClient:
                 if hasattr(chunk, 'choices') and len(chunk.choices) > 0: # type: ignore
                     delta_content = chunk.choices[0].delta.content # type: ignore
                     if delta_content is not None:
-                        if chunk_num <= 3:  # Only log first few chunks
-                            print(f"[DEBUG] Yielding chunk {chunk_num}: {delta_content[:50] if len(delta_content) > 50 else delta_content}")
+                        if chunk_num <= 10:  # Log first 10 chunks to see newlines
+                            print(f"[DEBUG] Chunk {chunk_num}: {repr(delta_content)}")
                         yield delta_content
             print(f"[DEBUG] Stream completed. Total chunks with content: {chunk_num}")
         except Exception as e:

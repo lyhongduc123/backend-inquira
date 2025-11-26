@@ -10,6 +10,7 @@ import colorama
 colorama.just_fix_windows_console()
 
 from app.db.database import init_db
+import app.models
 
 # Import routers
 from app.chat import router as chat_router
@@ -32,7 +33,8 @@ app.add_middleware(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # await init_db()
+    # Initialize database tables on startup
+    await init_db()
     yield
 
 app.router.lifespan_context = lifespan
