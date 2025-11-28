@@ -1,4 +1,16 @@
-from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, ARRAY, Date, Index, ForeignKey
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Text,
+    Float,
+    Boolean,
+    DateTime,
+    ARRAY,
+    Date,
+    Index,
+    ForeignKey,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -42,12 +54,28 @@ class DBPaper(Base):
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
     last_accessed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    chunks = relationship("DBPaperChunk", back_populates="paper", cascade="all, delete-orphan")
-    citations = relationship("DBCitationMap", back_populates="paper", cascade="all, delete-orphan")
+    chunks = relationship(
+        "DBPaperChunk", back_populates="paper", cascade="all, delete-orphan"
+    )
+    citations = relationship(
+        "DBCitationMap", back_populates="paper", cascade="all, delete-orphan"
+    )
+    message_papers = relationship(
+        "DBMessagePaper",
+        back_populates="paper",
+        cascade="all, delete-orphan"
+    )
+    messages = relationship(
+        "DBMessage",
+        secondary="message_papers",
+        back_populates="papers"
+    )
 
 
 class DBPaperChunk(Base):
@@ -55,7 +83,9 @@ class DBPaperChunk(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     chunk_id = Column(String(150), unique=True, nullable=False, index=True)
-    paper_id = Column(String(100), ForeignKey("papers.paper_id"), nullable=False, index=True)
+    paper_id = Column(
+        String(100), ForeignKey("papers.paper_id"), nullable=False, index=True
+    )
 
     # Chunk content
     text = Column(Text, nullable=False)
@@ -68,7 +98,7 @@ class DBPaperChunk(Base):
 
     # Vector embedding (768-dim for Ollama nomic-embed-text)
     embedding = Column(Vector(768), nullable=True)
-    
+
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -83,7 +113,9 @@ class DBCitationMap(Base):
     query_id = Column(String(100))
     claim_text = Column(Text, nullable=False)
     chunk_id = Column(String(150), nullable=False, index=True)
-    paper_id = Column(String(100), ForeignKey("papers.paper_id"), nullable=False, index=True)
+    paper_id = Column(
+        String(100), ForeignKey("papers.paper_id"), nullable=False, index=True
+    )
     confidence = Column(Float)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

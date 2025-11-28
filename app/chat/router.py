@@ -11,37 +11,10 @@ from app.chat.schemas import (
     FeedbackResponse
 )
 from app.llm.schemas import CitationBasedResponse
-from app.chat.services import chat_service
+from app.chat.services import ChatService
 from app.db.database import get_db_session
 
 router = APIRouter()
-
-
-@router.post("/message", response_model=CitationBasedResponse)
-async def send_message(
-    request: ChatMessageRequest,
-    # user_id: int = Depends(get_current_user)  # TODO: Add auth dependency
-):
-    """
-    Send a chat message and get AI response with thought process and citations
-    
-    - **query**: User's message/question
-    - **conversation_id**: Optional ID of existing conversation
-    - **stream**: Whether to stream the response (use /stream endpoint instead)
-    
-    Returns response with:
-    - Thought process steps showing reasoning
-    - Citations from research papers
-    - Final synthesized answer
-    """
-    try:
-        response = await chat_service.process_message(
-            request=request,
-            user_id=None  # TODO: Use actual user_id from auth
-        )
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/stream")
@@ -66,6 +39,7 @@ async def stream_message(
     - **query**: User's message/question
     - **conversation_id**: Optional ID of existing conversation
     """
+    chat_service = ChatService(db_session=db)
     try:
         print(f"[DEBUG] Stream endpoint called with query: {request.query[:50]}...")
         return StreamingResponse(
@@ -85,6 +59,7 @@ async def stream_message(
 async def submit_feedback(
     request: FeedbackRequest,
     # user_id: int = Depends(get_current_user)  # TODO: Add auth dependency
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Submit feedback/rating for a chat message
@@ -94,6 +69,7 @@ async def submit_feedback(
     - **comment**: Optional feedback comment
     """
     try:
+        chat_service = ChatService(db_session=db)  # TODO: Pass actual db_session if needed
         success = await chat_service.save_feedback(
             message_id=request.message_id,
             rating=request.rating,

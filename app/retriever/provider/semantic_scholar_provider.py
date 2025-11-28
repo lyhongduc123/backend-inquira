@@ -216,7 +216,8 @@ class SemanticScholarProvider(BaseCachedProvider):
         # Use PaperRetriever for actual PDF download and extraction
         try:
             retriever = PaperRetriever()
-            text = await retriever.get_paper_text(pdf_url)
+            # text = await retriever.get_paper_text(pdf_url)
+            text = ""
             return text
         except Exception as e:
             logger.error(f"[{self.name}] Error retrieving full text: {e}")
@@ -240,50 +241,6 @@ class SemanticScholarProvider(BaseCachedProvider):
         """
         # TODO: Implement query-based caching with a queries table
         return None
-
-    async def save_to_cache(
-        self,
-        query: str,
-        results: List[NormalizedResult]
-    ) -> bool:
-        """Save results to database cache."""
-        if not self.db_session:
-            return False
-        
-        try:
-            repo = PaperRepository(self.db_session)
-            
-            # Convert NormalizedResult to Paper objects and save
-            for result in results:
-                # Convert AuthorDict to Author objects
-                authors = [
-                    Author(name=a.get("name", "Unknown"), author_id=a.get("author_id"))
-                    for a in result.get("authors", [])
-                ]
-                
-                paper = Paper(
-                    paper_id=result.get("paper_id", ""),
-                    title=result.get("title", ""),
-                    abstract=result.get("abstract"),
-                    authors=authors,
-                    venue=result.get("venue"),
-                    url=result.get("url"),
-                    pdf_url=result.get("pdf_url"),
-                    citation_count=result.get("citation_count") or 0,
-                    influential_citation_count=result.get("influential_citation_count") or 0,
-                    reference_count=result.get("reference_count") or 0,
-                    source=self.name,
-                )
-                
-                # Create or update paper in database
-                await repo.create_paper(paper)
-            
-            logger.debug(f"[{self.name}] Cached {len(results)} papers for query: {query[:50]}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"[{self.name}] Cache save error: {e}")
-            return False
 
     def _db_paper_to_dict(self, db_paper) -> Dict[str, Any]:
         """Convert database paper object to dict."""

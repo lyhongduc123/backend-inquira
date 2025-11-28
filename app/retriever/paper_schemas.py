@@ -7,31 +7,40 @@ class Author(BaseModel):
     """Author information"""
     name: str
     author_id: Optional[str] = None
+    citation_count: Optional[int] = None
+    h_index: Optional[int] = None
 
 
 class Paper(BaseModel):
-    """Paper metadata from Semantic Scholar"""
-    paper_id: str = Field(..., description="Internal paper ID (e.g., P12345)")
+    """Paper metadata compatible with normalized provider result and DB"""
+    paper_id: str = Field(..., description="Unique paper ID (internal or from provider)")
     title: str
-    authors: List[Author] = []
     abstract: Optional[str] = None
+    authors: List[Author] = []
     publication_date: Optional[datetime] = None
     venue: Optional[str] = None
     url: Optional[str] = None
     pdf_url: Optional[str] = None
     is_open_access: bool = False
     open_access_pdf: Optional[Dict[str, Any]] = None  # {"url": str, "status": str, "license": str}
-    
-    source: str = "semantic_scholar"
-    external_id: Optional[str] = None
-    
-    relevance_score: Optional[float] = None
-    citation_count: int = 0
+
+    # Citation and reference counts
+    citation_count: Optional[int] = 0
     influential_citation_count: Optional[int] = 0
-    reference_count: int = 0
-    
+    reference_count: Optional[int] = 0
+
+    # Source metadata
+    source: str
+    external_ids: str
+    relevance_score: Optional[float] = None
+
+    # Processing metadata
     is_processed: bool = False
     processing_status: str = "pending"
+
+    class Config:
+        from_attributes = True
+    
 
 
 class PaperChunk(BaseModel):

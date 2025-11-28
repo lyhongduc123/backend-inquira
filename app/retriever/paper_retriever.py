@@ -1,5 +1,6 @@
 import httpx
 import io
+import unicodedata
 import re
 from typing import Optional, Dict, Any
 from PyPDF2 import PdfReader
@@ -121,100 +122,99 @@ class PaperRetriever:
             logger.error(f"Error downloading PDF from {pdf_url}: {e}")
             return None
     
-    def extract_text_from_pdf(self, pdf_content: bytes) -> Optional[str]:
-        """
-        Extract text from PDF content with encoding fixes
+    # def extract_text_from_pdf(self, pdf_content: bytes) -> Optional[str]:
+    #     """
+    #     Extract text from PDF content with encoding fixes
         
-        Args:
-            pdf_content: PDF file as bytes
+    #     Args:
+    #         pdf_content: PDF file as bytes
             
-        Returns:
-            Extracted text, or None if failed
-        """
-        try:
-            pdf_file = io.BytesIO(pdf_content)
-            reader = PdfReader(pdf_file)
+    #     Returns:
+    #         Extracted text, or None if failed
+    #     """
+    #     try:
+    #         pdf_file = io.BytesIO(pdf_content)
+    #         reader = PdfReader(pdf_file)
             
-            text_parts = []
-            for page_num, page in enumerate(reader.pages):
-                try:
-                    text = page.extract_text()
-                    if text:
-                        # Fix common PDF encoding issues
-                        text = self._fix_text_encoding(text)
-                        text_parts.append(text)
-                except Exception as e:
-                    logger.warning(f"Error extracting text from page {page_num}: {e}")
+    #         text_parts = []
+    #         for page_num, page in enumerate(reader.pages):
+    #             try:
+    #                 text = page.extract_text()
+    #                 if text:
+    #                     # Fix common PDF encoding issues
+    #                     text = self._fix_text_encoding(text)
+    #                     text_parts.append(text)
+    #             except Exception as e:
+    #                 logger.warning(f"Error extracting text from page {page_num}: {e}")
             
-            full_text = "\n\n".join(text_parts)
-            logger.info(f"Extracted {len(full_text)} characters from {len(reader.pages)} pages")
+    #         full_text = "\n\n".join(text_parts)
+    #         logger.info(f"Extracted {len(full_text)} characters from {len(reader.pages)} pages")
             
-            return full_text if full_text.strip() else None
+    #         return full_text if full_text.strip() else None
             
-        except Exception as e:
-            logger.error(f"Error extracting text from PDF: {e}")
-            return None
+    #     except Exception as e:
+    #         logger.error(f"Error extracting text from PDF: {e}")
+    #         return None
     
-    def _fix_text_encoding(self, text: str) -> str:
-        """
-        Fix common PDF text encoding issues
+    # def _fix_text_encoding(self, text: str) -> str:
+    #     """
+    #     Fix common PDF text encoding issues
         
-        Args:
-            text: Raw extracted text
+    #     Args:
+    #         text: Raw extracted text
             
-        Returns:
-            Cleaned text
-        """
-        import unicodedata
-        import re
+    #     Returns:
+    #         Cleaned text
+    #     """
+
         
-        # Normalize unicode characters
-        text = unicodedata.normalize('NFKD', text)
+    #     # Normalize unicode characters
+    #     text = unicodedata.normalize('NFKD', text)
         
-        # Remove non-printable characters except newlines/tabs
-        text = ''.join(char for char in text if char.isprintable() or char in '\n\t')
+    #     # Remove non-printable characters except newlines/tabs
+    #     text = ''.join(char for char in text if char.isprintable() or char in '\n\t')
         
-        # Fix common ligatures that get mangled
-        ligature_map = {
-            'ﬁ': 'fi',
-            'ﬂ': 'fl',
-            'ﬀ': 'ff',
-            'ﬃ': 'ffi',
-            'ﬄ': 'ffl',
-            'ﬅ': 'ft',
-            'ﬆ': 'st',
-            '€': 'e',  # Common encoding error
-            '�': '',   # Replacement character - remove it
-        }
+    #     # Fix common ligatures that get mangled
+    #     ligature_map = {
+    #         'ﬁ': 'fi',
+    #         'ﬂ': 'fl',
+    #         'ﬀ': 'ff',
+    #         'ﬃ': 'ffi',
+    #         'ﬄ': 'ffl',
+    #         'ﬅ': 'ft',
+    #         'ﬆ': 'st',
+    #         '€': 'e',  # Common encoding error
+    #         '�': '',   # Replacement character - remove it
+    #     }
         
-        for bad, good in ligature_map.items():
-            text = text.replace(bad, good)
+    #     for bad, good in ligature_map.items():
+    #         text = text.replace(bad, good)
         
-        # Fix multiple spaces
-        text = re.sub(r' +', ' ', text)
+    #     # Fix multiple spaces
+    #     text = re.sub(r' +', ' ', text)
         
-        # Fix multiple newlines (keep max 2)
-        text = re.sub(r'\n{3,}', '\n\n', text)
+    #     # Fix multiple newlines (keep max 2)
+    #     text = re.sub(r'\n{3,}', '\n\n', text)
         
-        return text.strip()
+    #     return text.strip()
     
-    async def get_paper_text(self, pdf_url: str, check_open_access: bool = True) -> Optional[str]:
-        """
-        Download PDF and extract text
+    # async def get_paper_text(self, pdf_url: str, check_open_access: bool = True) -> Optional[bytes]:
+    #     """
+    #     Download PDF and extract text
         
-        Args:
-            pdf_url: URL to PDF file
-            check_open_access: If True, only download from known OA sources
+    #     Args:
+    #         pdf_url: URL to PDF file
+    #         check_open_access: If True, only download from known OA sources
             
-        Returns:
-            Extracted text, or None if failed/paywalled
-        """
-        pdf_content = await self.download_pdf(pdf_url, check_open_access)
-        if not pdf_content:
-            return None
+    #     Returns:
+    #         Extracted text, or None if failed/paywalled
+    #     """
+    #     pdf_content = await self.download_pdf(pdf_url, check_open_access)
+    #     if not pdf_content:
+    #         return None
         
-        text = self.extract_text_from_pdf(pdf_content)
-        return text
+    #     # text = self.extract_text_from_pdf(pdf_content)
+    #     return pdf_content
     
     async def try_multiple_sources(self, paper_data: Dict[str, Any]) -> Optional[str]:
         """
@@ -254,14 +254,14 @@ class PaperRetriever:
                 sources.append(('bioRxiv', biorxiv_url))
         
         # Try each source in priority order
-        for source_name, url in sources:
-            logger.info(f"Trying to retrieve paper from {source_name}: {url}")
-            text = await self.get_paper_text(url, check_open_access=True)
-            if text:
-                logger.info(f"Successfully retrieved paper from {source_name}")
-                return text
-            else:
-                logger.debug(f"Failed to retrieve from {source_name}")
+        # for source_name, url in sources:
+        #     logger.info(f"Trying to retrieve paper from {source_name}: {url}")
+        #     text = await self.get_paper_text(url, check_open_access=True)
+        #     if text:
+        #         logger.info(f"Successfully retrieved paper from {source_name}")
+        #         return text
+        #     else:
+        #         logger.debug(f"Failed to retrieve from {source_name}")
         
         logger.warning(f"Could not retrieve full-text from any source. Paper may be paywalled.")
         return None

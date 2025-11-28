@@ -1,6 +1,7 @@
 from .openai_client import OpenaiClient, ModelType
 from .ollama_client import OllamaClient
 from .provider import LLMProvider
+from .lite_llm_provider import LiteLLMProvider
 from .summarizer import Summarizer
 from .analyzer import Analyzer
 from .reader import Reader
@@ -62,6 +63,7 @@ __all__ = [
     "OpenaiClient", 
     "ModelType", 
     "LLMProvider", 
+    "LiteLLMProvider",
     "Summarizer", 
     "Analyzer", 
     "Reader", 

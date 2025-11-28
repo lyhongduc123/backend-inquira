@@ -2,7 +2,8 @@
 LLM Service that integrates with the retriever services
 """
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from app.llm import LLMProvider, ModelType
+from app.extensions.stream import get_simple_response_content
+from app.llm import LLMProvider, ModelType, LiteLLMProvider
 from app.llm.prompts import SummaryPrompts
 from app.llm.schemas import (
     SearchSummaryResponse,
@@ -30,67 +31,21 @@ class LLMService():
         # Determine which provider to use based on settings
         provider_type = getattr(settings, 'LLM_PROVIDER', 'openai').lower()
         
-        if provider_type == 'ollama':
-            self.llm_provider = LLMProvider(
-                provider='ollama'
-            )
-        else:  # default to openai
-            self.llm_provider = LLMProvider(
-                api_key=settings.OPENAI_API_KEY,
-                default_model=ModelType.GPT_4O_MINI.value,
-                provider='openai'
-            )
+        # if provider_type == 'ollama':
+        #     self.llm_provider = LLMProvider(
+        #         provider='ollama'
+        #     )
+        # else:  # default to openai
+        #     self.llm_provider = LLMProvider(
+        #         api_key=settings.OPENAI_API_KEY,
+        #         default_model=ModelType.GPT_4O_MINI.value,
+        #         provider='openai'
+        #     )
+        self.llm_provider = LiteLLMProvider(
+            model="gemini/gemini-2.5-pro",
+            api_key=settings.GEMINI_API_KEY
+        )
         self.prompts = SummaryPrompts
-    
-    def summarize_search_results(
-        self, 
-        search_results: List[Dict[str, Any]], 
-        query: str,
-        max_results: int = 5
-    ) -> SearchSummaryResponse:
-        """
-        Summarize and synthesize search results from retrieval services
-        
-        Args:
-            search_results: Results from semantic/arxiv search
-            query: Original search query
-            max_results: Maximum number of results to include in summary
-        
-        Returns:
-            Synthesized summary with key insights
-        """
-        # Limit results to process
-        limited_results = search_results[:max_results]
-        
-        # Format results for LLM processing
-        formatted_results = []
-        for i, result in enumerate(limited_results, 1):
-            title = result.get('title', 'Untitled')
-            content = result.get('abstract', result.get('content', 'No content available'))
-            
-            formatted_results.append(f"{i}. {title}\n{content}\n")
-        
-        results_text = "\n".join(formatted_results)
-        
-        system_message = self.prompts.get_research_summary_prompt(query, max_results)
-        
-        summary_generator = self.llm_provider.stream_completion(
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": results_text}
-            ]
-        )
-        
-        # Collect the streamed response into a single string
-        summary = "".join(summary_generator)
-        
-        return SearchSummaryResponse(
-            query=query,
-            results_processed=len(limited_results),
-            total_results=len(search_results),
-            summary=summary,
-            model_used=self.llm_provider.get_model()
-        )
     
     def analyze_paper_content(
         self, 
@@ -220,15 +175,18 @@ class LLMService():
 
             NEVER exceed 2 subtopics. Quality over quantity."""
 
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
+        ]
         response = self.llm_provider.simple_prompt(
-            prompt=prompt,
-            system_message=system_message,
+            messages=messages,
             temperature=0.3
         )
         logger.info(f"LLM response for question breakdown: {response}")
         
         # Parse the response with robust handling for different formats
-        lines = response.split('\n')
+        lines = get_simple_response_content(response).split('\n')
         clarified_question = ""
         subtopics = []
         explanations = []
@@ -324,56 +282,6 @@ class LLMService():
             model_used=self.llm_provider.get_model()
         )
     
-    def compare_papers(
-        self, 
-        papers: List[Dict[str, Any]],
-        comparison_aspects: Optional[List[str]] = None
-    ) -> PaperComparisonResponse:
-        """
-        Compare multiple papers and identify similarities/differences
-        
-        Args:
-            papers: List of paper data dictionaries
-            comparison_aspects: Specific aspects to compare
-        
-        Returns:
-            Comparison analysis
-        """
-        if not comparison_aspects:
-            comparison_aspects = ["methodology", "findings", "limitations", "future work"]
-        
-        # Format papers for comparison
-        papers_text = []
-        for i, paper in enumerate(papers, 1):
-            title = paper.get('title', f'Paper {i}')
-            abstract = paper.get('abstract', 'No abstract available')
-            papers_text.append(f"Paper {i}: {title}\nAbstract: {abstract}\n")
-        
-        combined_text = "\n".join(papers_text)
-        aspects_text = ", ".join(comparison_aspects)
-        
-        system_message = f"""Compare the following papers focusing on: {aspects_text}
-        
-        Provide a structured comparison that identifies:
-        1. Common themes and approaches
-        2. Key differences in methodology or findings
-        3. Complementary insights
-        4. Gaps or contradictions
-        5. Overall synthesis of the research area"""
-        
-        comparison = self.llm_provider.simple_prompt(
-            prompt=combined_text,
-            system_message=system_message,
-            temperature=0.4
-        )
-        
-        return PaperComparisonResponse(
-            papers_compared=len(papers),
-            comparison_aspects=comparison_aspects,
-            comparison=comparison,
-            model_used=self.llm_provider.get_model()
-        )
-    
     def suggest_related_topics(
         self, 
         current_topic: str, 
@@ -406,15 +314,18 @@ class LLMService():
         
         Return only the topic suggestions, one per line."""
         
+        messages = [
+            {"role": "system", "content": "You are a research strategist who identifies promising research directions."},
+            {"role": "user", "content": prompt}
+        ]
         response = self.llm_provider.simple_prompt(
-            prompt=prompt,
-            system_message="You are a research strategist who identifies promising research directions.",
+            messages=messages,
             temperature=0.8
         )
         
         # Parse suggestions
         suggestions = []
-        for line in response.split('\n'):
+        for line in get_simple_response_content(response).split('\n'):
             line = line.strip()
             if line:
                 # Check for bullet points or numbering
@@ -435,136 +346,11 @@ class LLMService():
             model_used=self.llm_provider.get_model()
         )
     
-    def generate_citation_based_response(
-        self,
-        query: str,
-        context: List[Dict[str, Any]],
-        show_thought_process: bool = True
-    ) -> CitationBasedResponse:
-        """
-        Generate a response with thought process and citations from papers
-        
-        Args:
-            query: User's question
-            context: Retrieved papers/documents
-            show_thought_process: Whether to show reasoning steps
-            
-        Returns:
-            Citation-based response with thought process
-        """
-        # Format context with citation info
-        formatted_context = []
-        citation_map = {}
-        
-        for i, doc in enumerate(context, 1):
-            paper_id = f"paper_{i}"
-            title = doc.get('title', 'Untitled')
-            authors = doc.get('authors', [])
-            year = doc.get('year', None)
-            content = doc.get('abstract', doc.get('content', ''))
-            
-            # Handle authors in various formats (list of dicts, list of strings, or string)
-            if isinstance(authors, list):
-                if authors and isinstance(authors[0], dict):
-                    # List of author objects
-                    authors_str = ', '.join(a.get('name', str(a)) for a in authors)
-                elif authors:
-                    # List of strings
-                    authors_str = ', '.join(str(a) for a in authors)
-                else:
-                    authors_str = 'Unknown'
-            elif isinstance(authors, str):
-                authors_str = authors if authors else 'Unknown'
-            else:
-                authors_str = 'Unknown'
-            
-            formatted_context.append(
-                f"[{i}] {title}\n"
-                f"Authors: {authors_str}\n"
-                f"Year: {year if year else 'N/A'}\n"
-                f"Content: {content}\n"
-            )
-            
-            citation_map[paper_id] = {
-                "title": title,
-                "authors": authors,
-                "year": year,
-                "paper_id": paper_id
-            }
-        
-        context_text = "\n".join(formatted_context)
-        
-        system_message = """You are an expert research assistant with deep knowledge across scientific domains. Your role is to synthesize information from academic papers into natural, engaging, and well-cited responses.
-
-CRITICAL GUIDELINES:
-1. Write in a natural, conversational academic style - avoid robotic formats
-2. Synthesize a consensus view from multiple papers when possible
-3. Use inline citations [1], [2], [3] to support every claim, fact, or finding
-4. Structure your response logically with clear sections when appropriate
-5. Base EVERY statement on the provided papers - do not add external knowledge
-6. If papers lack sufficient information, state this clearly
-
-RESPONSE STYLE:
-- Start with a direct answer or overview
-- Organize information hierarchically (overview → details → implications)
-- Use evidence-based language: "Research shows..." "Studies indicate..." "According to [1][2]..."
-- End with a brief synthesis or conclusion when appropriate
-
-CITATION RULES:
-- Cite papers using [1], [2], etc. matching the numbered papers provided
-- Multiple citations for the same claim: [1][2][5]
-- Always cite when stating facts, statistics, definitions, or findings"""
-
-        prompt = f"""Question: {query}
-
-Available Research Papers:
-{context_text}
-
-Please provide a comprehensive, naturally-written answer that synthesizes information from these papers with proper inline citations."""
-
-        response = self.llm_provider.simple_prompt(
-            prompt=prompt,
-            system_message=system_message,
-            temperature=0.3
-        )
-        
-        # Extract all citations from the response
-        all_citations = []
-        citation_refs = re.findall(r'\[(\d+)\]', response)
-        seen_citations = set()
-        
-        for ref in citation_refs:
-            paper_id = f"paper_{ref}"
-            if paper_id in citation_map and paper_id not in seen_citations:
-                citation_info = citation_map[paper_id]
-                citation = Citation(
-                    paper_id=citation_info["paper_id"],
-                    page=None,
-                    title=citation_info["title"],
-                    authors=citation_info["authors"],
-                    year=citation_info["year"],
-                    quote=None,
-                    relevance="Referenced in response"
-                )
-                all_citations.append(citation)
-                seen_citations.add(paper_id)
-        
-        return CitationBasedResponse(
-            query=query,
-            thought_process=[],  # Natural response doesn't have structured thought steps
-            final_answer=response,  # The entire response is the answer
-            all_citations=all_citations,
-            sources=context,  # Include full paper metadata for frontend
-            sources_count=len(all_citations),
-            model_used=self.llm_provider.get_model(),
-            metadata={}
-        )
-    
     async def stream_citation_based_response(
         self,
         query: str,
         context: List[Dict[str, Any]]
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Any, None]:
         """
         Stream a citation-based response with thought process
         
@@ -681,14 +467,13 @@ Please provide a comprehensive, naturally-written answer that synthesizes inform
         {context_text}
 
         Please provide a comprehensive, naturally-written answer that synthesizes information from these papers with proper inline citations."""
-
+        
+        print(f"[DEBUG] Starting to stream completion...")
+        chunk_count = 0
         messages = [
             {"role": "system", "content": system_message},
             {"role": "user", "content": prompt}
         ]
-        
-        print(f"[DEBUG] Starting to stream completion...")
-        chunk_count = 0
         for chunk in self.llm_provider.stream_completion(messages=messages):
             chunk_count += 1
             if chunk_count % 10 == 0:

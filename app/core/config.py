@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     OPENALEX_URL: str
 
     OPENAI_API_KEY: str
+    GEMINI_API_KEY: str
     
     # Ollama settings
     OLLAMA_BASE_URL: str = "http://localhost:11434"

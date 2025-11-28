@@ -1,7 +1,7 @@
 import time
 from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
-from app.retriever import RetrievalServiceType, retriever
+
 from app.llm import llm_service
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,10 +59,6 @@ app.include_router(
     prefix="/api/v1/conversations", 
     tags=["conversations"]
 )
-
-@app.get("/test")
-async def test_endpoint():
-    return await retriever.search(search_services=[RetrievalServiceType.SEMANTIC], query="machine learning")
 
 def start():
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

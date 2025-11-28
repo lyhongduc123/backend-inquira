@@ -19,6 +19,7 @@ class Message(BaseModel):
     id: int
     role: str  # "user" or "assistant"
     content: str
+    sources: Optional[List[str]] = None  # List of paper IDs
     created_at: datetime
 
 

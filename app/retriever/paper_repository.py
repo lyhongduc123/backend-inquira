@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, and_
 from datetime import datetime
 from app.models.papers import DBPaper, DBPaperChunk, DBResearchQuery
-from app.retriever.paper_schemas import Paper, PaperChunk, Author
+from app.retriever.paper_schemas import Paper
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
@@ -40,7 +40,7 @@ class PaperRepository:
             url=paper.url,
             pdf_url=paper.pdf_url,
             source=paper.source,
-            external_id=paper.external_id,
+            external_id=paper.external_ids,
             relevance_score=paper.relevance_score,
             citation_count=paper.citation_count,
             influential_citation_count=paper.influential_citation_count,
@@ -128,7 +128,6 @@ class PaperRepository:
         embedding: List[float],
         section_title: Optional[str] = None,
         page_number: Optional[int] = None,
-        embedding_dimension: Optional[int] = None
     ) -> DBPaperChunk:
         """Create a paper chunk"""
         db_chunk = DBPaperChunk(
@@ -140,7 +139,6 @@ class PaperRepository:
             section_title=section_title,
             page_number=page_number,
             embedding=embedding,
-            embedding_dimension=embedding_dimension
         )
         
         self.db.add(db_chunk)
@@ -175,7 +173,6 @@ class PaperRepository:
         Returns:
             List of similar chunks ordered by similarity
         """
-        # Build query with cosine similarity
         query = select(DBPaperChunk).order_by(
             DBPaperChunk.embedding.cosine_distance(query_embedding)
         ).limit(limit)

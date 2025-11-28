@@ -1,5 +1,6 @@
-from sqlalchemy import Boolean, Column, Integer, String, DateTime, Enum
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime, Enum
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from app.models.base import DatabaseBase as Base
 
@@ -12,3 +13,6 @@ class DBQuery(Base):
     is_active = Column(Boolean, default=True)
     status = Column(Enum("pending", "processing", "completed", "failed", name="query_status"), default="pending")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, index=True)
+    
+    messages = relationship("DBMessage", back_populates="queries")

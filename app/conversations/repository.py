@@ -3,6 +3,7 @@ Repository for conversation database operations
 """
 from typing import Optional, List
 from sqlalchemy import desc, select
+from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.conversations import DBConversation
 from app.models.messages import DBMessage
@@ -203,7 +204,26 @@ class ConversationRepository:
             .where(DBMessage.conversation_id == conversation_id)
             .where(DBMessage.is_active == True)
             .order_by(DBMessage.created_at)
+            .options(joinedload(DBMessage.papers))
             .offset(skip)
             .limit(limit)
         )
-        return list(result.scalars().all())
+        return list(result.unique().scalars().all())
+    
+    async def link_papers_to_message(
+        self,
+        message_id: int,
+        paper_ids: List[str]
+    ):
+        """Link papers to a message using DBMessagePaper join table. Accepts paper_id (string) and finds DBPaper.id."""
+        from app.models.papers import DBPaper
+        from app.models.message_papers import DBMessagePaper
+        for paper_id in paper_ids:
+            result = await self.db.execute(
+                select(DBPaper).where(DBPaper.paper_id == paper_id)
+            )
+            db_paper = result.scalar_one_or_none()
+            if db_paper:
+                link = DBMessagePaper(message_id=message_id, paper_id=db_paper.id)
+                self.db.add(link)
+        await self.db.commit()
