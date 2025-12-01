@@ -155,7 +155,6 @@ class ChatService:
                 user_id=user_id,
                 message_text=request.query,
                 role="user",
-                paper_ids=[str(p.paper_id) for p in results.papers],
                 auto_title=True
             ) 
             logger.info(f"User message added to conversation {conversation.id}")
@@ -188,6 +187,7 @@ class ChatService:
                 message_text=full_response,
                 role="assistant",
                 auto_title=False,
+                paper_ids=[str(p.paper_id) for p in results.papers],
             )
             logger.info(f"Assistant message added to conversation {conversation.id}")
         except Exception as e:

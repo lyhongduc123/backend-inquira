@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from datetime import datetime
 
 
@@ -19,7 +19,7 @@ class Message(BaseModel):
     id: int
     role: str  # "user" or "assistant"
     content: str
-    sources: Optional[List[str]] = None  # List of paper IDs
+    sources: Optional[List[Dict[str, Any]]] = None  # List of paper IDs
     created_at: datetime
 
 

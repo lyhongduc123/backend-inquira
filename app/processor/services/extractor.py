@@ -1,7 +1,7 @@
 import io
 import re
 import unicodedata
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
@@ -12,18 +12,70 @@ class ExtractorService:
         Extract text from PDF bytes.
         Args:
             pdf_bytes (bytes): The PDF file content in bytes.
-            
         Returns:
             Extracted text as a string.
         """
         pdf_file = io.BytesIO(pdf_bytes)
         reader = PdfReader(pdf_file)
         text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
+        for page_number, page in enumerate(reader.pages, start=1):
+            page_text = page.extract_text() or ""
+            page_text = self._remove_header_footer(page_text, page_number)
+            text += page_text + "\n"
+        text = self._fix_text_encoding(text)
         return text
-    
-    import re
+
+    def _remove_header_footer(self, text: str, page_number: int) -> str:
+        """
+        Remove common headers/footers and page numbers.
+        This is heuristic-based.
+
+        Args:
+            text: The page text
+            page_number: Current page number
+        Returns:
+            Cleaned text
+        """
+        lines = text.splitlines()
+        cleaned_lines = []
+
+        # Simple heuristics:
+        # - Remove first/last line if it matches page number or repeated header/footer
+        # - Remove lines that are too short (1-2 chars) if they appear at top/bottom
+
+        if lines:
+            # Check top lines
+            for i, line in enumerate(lines[:3]):  # first 3 lines
+                if self._is_header_footer(line, page_number):
+                    lines[i] = ""  # blank out header
+
+            # Check bottom lines
+            for i, line in enumerate(lines[-3:]):  # last 3 lines
+                if self._is_header_footer(line, page_number):
+                    lines[-(i + 1)] = ""  # blank out footer
+
+            # Remove empty lines after header/footer removal
+            cleaned_lines = [l.strip() for l in lines if l.strip()]
+        return "\n".join(cleaned_lines)
+
+    def _is_header_footer(self, line: str, page_number: int) -> bool:
+        """
+        Heuristic to detect headers/footers:
+        - Page numbers
+        - Repeated short lines (author names, journal titles)
+        """
+        line_strip = line.strip()
+        # Remove lines that are just the page number
+        if line_strip.isdigit() and int(line_strip) == page_number:
+            return True
+        # Remove very short lines
+        if len(line_strip) < 5:
+            return True
+        # Remove common repeated patterns (e.g., 'Journal of ...')
+        # This can be extended with regex for your specific corpus
+        if re.match(r'^(©|All rights reserved|Journal|Proceedings)', line_strip, re.I):
+            return True
+        return False
 
     def split_sections(self, text: str) -> dict:
         pattern = r"(Results|Discussion|Conclusion|Findings)"
@@ -47,11 +99,9 @@ class ExtractorService:
                 result_text += sections[key] + "\n"
         return result_text.strip()
     
-    # TODO: Implement a more advanced keyword extraction method
     def extract_keywords(self, text: str) -> list:
         """
         Extract keywords from the text using a simple regex approach.
-        
         Args:
             text (str): The input text from which to extract keywords.
         Returns:
@@ -64,15 +114,11 @@ class ExtractorService:
     def _fix_text_encoding(self, text: str) -> str:
         """
         Fix common PDF text encoding issues
-        
         Args:
             text: Raw extracted text
-            
         Returns:
             Cleaned text
         """
-
-        
         # Normalize unicode characters
         text = unicodedata.normalize('NFKD', text)
         
@@ -88,8 +134,8 @@ class ExtractorService:
             'ﬄ': 'ffl',
             'ﬅ': 'ft',
             'ﬆ': 'st',
-            '€': 'e',  # Common encoding error
-            '�': '',   # Replacement character - remove it
+            '€': 'e',
+            '�': '',
         }
         
         for bad, good in ligature_map.items():

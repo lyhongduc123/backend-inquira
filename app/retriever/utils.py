@@ -1,4 +1,5 @@
 from typing import Dict, Any, List, Optional
+from app.models.papers import DBPaper
 from app.retriever.paper_schemas import Paper, Author
 from app.retriever.provider.base_schemas import NormalizedResult
 from datetime import datetime
@@ -37,9 +38,9 @@ def normalized_to_paper(result: NormalizedResult) -> Paper:
 
     pub_date_str = result.get("publication_date")
     publication_date = parse_date(pub_date_str) if pub_date_str else None
-    
+
     external_ids = result.get("external_ids") or {}
-    external_id = external_ids.get('DOI') or result.get('paper_id', '')
+    external_id = external_ids.get("DOI") or result.get("paper_id", "")
 
     return Paper(
         paper_id=result.get("paper_id", ""),
@@ -86,14 +87,24 @@ def dbpaper_to_paper(db_paper) -> Paper:
     authors = []
     if hasattr(db_paper, "authors") and db_paper.authors:
         for author in db_paper.authors:
-            authors.append(
-                Author(
-                    name=author.name,
-                    author_id=author.author_id,
-                    citation_count=author.citation_count,
-                    h_index=author.h_index,
+            if isinstance(author, dict):
+                authors.append(
+                    Author(
+                        name=author.get("name", ""),
+                        author_id=author.get("author_id"),
+                        citation_count=author.get("citation_count"),
+                        h_index=author.get("h_index"),
+                    )
                 )
-            )
+            else:
+                authors.append(
+                    Author(
+                        name=author.name,
+                        author_id=author.author_id,
+                        citation_count=author.citation_count,
+                        h_index=author.h_index,
+                    )
+                )
 
     publication_date = None
     if hasattr(db_paper, "publication_date") and db_paper.publication_date:
@@ -114,12 +125,13 @@ def dbpaper_to_paper(db_paper) -> Paper:
         influential_citation_count=db_paper.influential_citation_count,
         reference_count=db_paper.reference_count,
         source=db_paper.source,
-        external_ids=db_paper.external_ids,
+        external_ids=db_paper.external_id,
         is_processed=db_paper.is_processed,
         processing_status=db_paper.processing_status,
     )
-    
-def batch_dbpaper_to_papers(db_papers: List[Any]) -> List[Paper]:
+
+
+def batch_dbpaper_to_papers(db_papers: List[DBPaper]) -> List[Paper]:
     """
     Convert a list of database paper ORM objects to a list of Paper Pydantic models.
     """
@@ -134,11 +146,13 @@ def batch_dbpaper_to_papers(db_papers: List[Any]) -> List[Paper]:
             continue
     return papers
 
+
 def paper_to_dict(paper: Paper) -> Dict[str, Any]:
     """
     Convert a Paper Pydantic model to a dictionary suitable for database insertion.
     """
     return paper.model_dump()
+
 
 def batch_paper_to_dicts(papers: List[Paper]) -> List[Dict[str, Any]]:
     """

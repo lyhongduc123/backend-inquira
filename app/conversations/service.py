@@ -14,6 +14,11 @@ from app.conversations.schemas import (
 )
 from app.models.conversations import DBConversation
 from app.models.messages import DBMessage
+from app.retriever.utils import batch_dbpaper_to_papers, batch_paper_to_dicts
+
+from app.extensions.logger import create_logger
+
+logger = create_logger(__name__)
 
 
 class ConversationService:
@@ -115,7 +120,10 @@ class ConversationService:
 
         if paper_ids:
             print("[DEBUG] Linking papers to message:", paper_ids)
-            await self.repo.link_papers_to_message(message.id, paper_ids)  # type: ignore
+            if message.role != "assistant":
+                logger.warning("Linking papers to a non-assistant message, this may be unintended - Skipping linking.")
+            else:
+                await self.repo.link_papers_to_message(message.id, paper_ids)
 
         await self.repo.increment_message_count(conversation_id)
 
@@ -128,20 +136,22 @@ class ConversationService:
         self, db_conversation: DBConversation, messages: Optional[List[DBMessage]] = None
     ) -> ConversationDetail:
         """Convert DB model to detail schema"""
+        print("[DEBUG] Converting conversation to detail:", db_conversation.conversation_id)
+        print("[DEBUG] Messages:", messages)
         message_list = []
         if messages:
-            message_list = [
-                Message(
-                    id=msg.id,
-                    role=msg.role,
-                    content=msg.content,
-                    sources=(
-                        [paper.model_dump_json() for paper in getattr(msg, "papers", [])]
-                    ),
-                    created_at=msg.created_at,
-                )
-                for msg in messages
-            ]
+            message_list = []
+            for msg in messages:
+                sources = batch_paper_to_dicts(batch_dbpaper_to_papers(msg.papers))
+                msg_dict = {
+                    "id": msg.id,
+                    "role": msg.role,
+                    "content": msg.content,
+                    "sources": sources,
+                    "created_at": msg.created_at,
+                }
+                message_list.append(msg_dict)
+                
 
         return ConversationDetail(
             id=db_conversation.conversation_id,

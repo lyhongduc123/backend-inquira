@@ -1,10 +1,11 @@
-from sqlalchemy import Boolean, Column, Integer, String
-from sqlalchemy.ext.declarative import declarative_base
+
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Boolean, String, Integer
 from app.models.base import DatabaseBase as Base
 
 class DBUser(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    created_at = Column(String, nullable=False)
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)

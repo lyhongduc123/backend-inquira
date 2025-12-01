@@ -1,6 +1,7 @@
 fastapi[standard]
 pydantic_settings
 sqlalchemy
+alembic
 asyncpg
 colorama
 requests
@@ -9,3 +10,6 @@ beautifulsoup4
 pgvector
 PyPDF2
 tiktoken
+rich
+ollama
+litellm

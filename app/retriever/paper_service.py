@@ -184,13 +184,14 @@ class PaperRetrievalService:
     async def get_pdf_paper(
         self,
         paper: Paper
-    ) -> Optional[str]:
+    ) -> Optional[bytes]:
         try:
             result = self.paper_retriever.get_access_info(paper.dict())
             if result.get("is_open_access"):
                 pdf_url = result.get("pdf_url")
                 if pdf_url:
-                    await self.paper_retriever.download_pdf(str(pdf_url))
+                    pdfBytes = await self.paper_retriever.download_pdf(str(pdf_url))
+                    return pdfBytes
                 else:
                     logger.warning("Open-access paper has no pdf_url in access info")
             else:

@@ -50,11 +50,17 @@ class PaperProcessor:
             await self.repository.create_paper(paper)
 
         try:
-            full_text = await self.paper_service.get_pdf_paper(paper)
-            if not full_text:
-                full_text = f"Title: {paper.title}\n\nAbstract: {paper.abstract}"
+            pdfBytes = await self.paper_service.get_pdf_paper(paper)
+            if not pdfBytes:
+                logger.warning(
+                    f"Could not retrieve full-text PDF for paper {paper_id_str}, skipping processing."
+                )
+                await self.repository.update_paper_processing_status(
+                    paper_id_str, "failed"
+                )
+                return False
+            full_text = self.extractor_service.extract_pdf_text(pdfBytes)
             clean_text = self.extractor_service._fix_text_encoding(full_text)
-            sections = self.extractor_service.split_sections(clean_text)
 
             # TODO: Finish implementing section extraction and keyword extraction
             # results_text = self.extractor_service.extract_results_conclusion(sections)

@@ -100,8 +100,6 @@ class RAGPipeline:
         )
         logger.info(f"Found {len(chunks)} relevant chunks")
 
-        papers = batch_dbpaper_to_papers(papers)
-
         yield RAGPipelineEvent(
             type="result", data=RAGResult(papers=papers, chunks=chunks)
         )
