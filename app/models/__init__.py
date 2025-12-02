@@ -12,6 +12,7 @@ from app.models.queries import DBQuery
 from app.models.answers import DBAnswer
 from app.models.messages import DBMessage
 from app.models.conversations import DBConversation
+from app.models.refresh_tokens import DBRefreshToken
 
 __all__ = [
     "DatabaseBase",
@@ -23,4 +24,5 @@ __all__ = [
     "DBAnswer",
     "DBConversation",
     "DBMessage",
+    "DBRefreshToken"
 ]

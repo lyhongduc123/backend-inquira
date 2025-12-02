@@ -1,3 +1,4 @@
+from datetime import timezone
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import Boolean, DateTime, Integer, String, func
 from app.models.base import DatabaseBase as Base

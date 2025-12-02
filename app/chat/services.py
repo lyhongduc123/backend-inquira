@@ -172,9 +172,10 @@ class ChatService:
             query=request.query, context=context
         ):
             text = get_stream_response_content(chunk_text)
-            assistant_response.append(text)
-            async for chunk_event in stream_event(name="chunk", data=text):
-                yield chunk_event
+            if text:  # Only yield and append non-empty chunks
+                assistant_response.append(text)
+                async for chunk_event in stream_event(name="chunk", data=text):
+                    yield chunk_event
 
         try:
             # Filter out None values before joining

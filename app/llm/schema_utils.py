@@ -2,7 +2,7 @@
 Utility functions for working with LLM schemas and responses
 """
 from typing import Dict, Any, List, Optional, Type, TypeVar, Union, cast
-from datetime import datetime
+from datetime import datetime, timezone
 from app.llm.schemas import (
     PaperAnalysisResponse,
     KeywordExtractionResponse,
@@ -45,7 +45,7 @@ def dict_to_model(data: Dict[str, Any], model_class: Type[T]) -> T:
     """
     # Add timestamp if not present
     if 'timestamp' not in data and hasattr(model_class, 'timestamp'):
-        data['timestamp'] = datetime.now()
+        data['timestamp'] = datetime.now(timezone.utc)
     
     return model_class(**data)
 

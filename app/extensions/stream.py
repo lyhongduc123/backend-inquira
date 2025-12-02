@@ -1,6 +1,10 @@
 import json
 from typing import Any
 
+from app.extensions.logger import create_logger
+
+logger = create_logger(__name__)
+
 async def stream_event(name: str, data: Any):
     """Stream event as SSE
 
@@ -13,6 +17,10 @@ async def stream_event(name: str, data: Any):
     """
     if isinstance(data, dict) or isinstance(data, list):
         data = json.dumps(data, default=str)
+    elif data is None:
+        data = ""
+    
+    print("SSE outgoing: event=%s, data=%s", name, data)
     yield f"event: {name}\ndata: {data}\n\n"
     
 def get_simple_response_content(response: Any) -> str:
