@@ -36,12 +36,15 @@ async def get_current_user(
     )
     
     token = credentials.credentials
+    print("Received token:", token)
     token_data = decode_access_token(token)
+    print("Decoded token data:", token_data)
     
     if token_data is None or token_data.user_id is None:
         raise credentials_exception
     
     user = await get_user_by_id(db, user_id=token_data.user_id)
+    print("Authenticated user:", user)
     
     if user is None:
         raise credentials_exception

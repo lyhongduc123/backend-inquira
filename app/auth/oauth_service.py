@@ -13,6 +13,7 @@ from app.models.refresh_tokens import DBRefreshToken
 from app.core.config import settings
 from app.auth.service import create_access_token
 from app.extensions.logger import create_logger
+from urllib.parse import urlencode
 
 logger = create_logger(__name__)
 
@@ -47,7 +48,7 @@ class GoogleOAuthProvider(OAuthProvider):
             "access_type": "offline",
             "prompt": "consent"
         }
-        query = "&".join(f"{k}={v}" for k, v in params.items())
+        query = urlencode(params)
         return f"https://accounts.google.com/o/oauth2/v2/auth?{query}"
     
     async def get_user_info(self, code: str) -> Dict[str, Any]:
@@ -100,7 +101,7 @@ class GitHubOAuthProvider(OAuthProvider):
             "scope": "read:user user:email",
             "state": state
         }
-        query = "&".join(f"{k}={v}" for k, v in params.items())
+        query = urlencode(params)
         return f"https://github.com/login/oauth/authorize?{query}"
     
     async def get_user_info(self, code: str) -> Dict[str, Any]:
@@ -174,9 +175,6 @@ async def get_or_create_user(db: AsyncSession, user_data: Dict[str, Any]) -> DBU
     existing_user = result.scalar_one_or_none()
     
     if existing_user:
-        # Link new provider to existing user
-        # For now, we'll create a separate account
-        # You might want to implement account linking logic here
         logger.warning(f"Email {user_data['email']} exists with different provider")
     
     # Create new user

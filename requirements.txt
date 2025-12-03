@@ -13,3 +13,6 @@ tiktoken
 rich
 ollama
 litellm
+python-jose[cryptography]
+httpx
+python-multipart
