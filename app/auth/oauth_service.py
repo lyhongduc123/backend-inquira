@@ -228,6 +228,10 @@ async def verify_refresh_token(db: AsyncSession, token: str) -> Optional[int]:
     if not db_token:
         return None
     
+    # Ensure expires_at is timezone-aware
+    if db_token.expires_at.tzinfo is None:
+        db_token.expires_at = db_token.expires_at.replace(tzinfo=timezone.utc)
+        
     # Check if token is expired
     if db_token.expires_at < datetime.now(timezone.utc):
         return None

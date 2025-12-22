@@ -20,7 +20,7 @@ async def stream_event(name: str, data: Any):
     elif data is None:
         data = ""
     
-    print("SSE outgoing: event=%s, data=%s", name, data)
+    # print("SSE outgoing: event=%s, data=%s", name, data)
     yield f"event: {name}\ndata: {data}\n\n"
     
 def get_simple_response_content(response: Any) -> str:

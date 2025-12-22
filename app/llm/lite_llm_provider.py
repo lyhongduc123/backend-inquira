@@ -1,6 +1,6 @@
 from litellm import CustomStreamWrapper, completion
 from litellm.files.main import ModelResponse
-from typing import Dict, List, Union, Generator, Any
+from typing import Dict, List, Union, Generator, Any, Optional
 from .summarizer import Summarizer
 from .analyzer import Analyzer
 from .reader import Reader
@@ -15,29 +15,46 @@ class LiteLLMProvider:
         self._analyzer = None
         self._reader = None
     
-    def simple_prompt(self, messages: List[Dict[str, Any]], **kwargs):
+    def simple_prompt(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs):
         """Simple completion without streaming
 
         Args:
-            prompt (str): user prompt
-            system_message (str): system prompt (optional)
+            messages: List of messages for the conversation
+            tools: Optional list of tools in OpenAI format
+            **kwargs: Additional arguments for completion
 
         Returns:
             ModelResponse: completion response
         """
+        params = {**self.kwargs, **kwargs}
+        if tools:
+            params["tools"] = tools
+            params["tool_choice"] = "auto"
         
-        return completion(self.model, messages=messages, **{**self.kwargs, **kwargs})
+        return completion(self.model, messages=messages, **params)
         
-    def stream_completion(self, messages: List[Dict[str, Any]], **kwargs) -> Generator[Union[tuple[str, Any], Any], Any, Any]:
+    def stream_completion(
+        self, 
+        messages: List[Dict[str, Any]], 
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> Generator[Union[tuple[str, Any], Any], Any, Any]:
         """Completion with stream enabled
 
         Args:
-            prompt (str): enter
+            messages: List of messages for the conversation
+            tools: Optional list of tools in OpenAI format
+            **kwargs: Additional arguments for completion
 
         Yields:
             tuple[str, Any] | ModelResponseStream: streamed response chunks
         """
-        for chunk in completion(self.model, messages=messages, stream=True, **{**self.kwargs, **kwargs}):
+        params = {**self.kwargs, **kwargs}
+        if tools:
+            params["tools"] = tools
+            params["tool_choice"] = "auto"
+        
+        for chunk in completion(self.model, messages=messages, stream=True, **params):
             yield chunk
     
     @property

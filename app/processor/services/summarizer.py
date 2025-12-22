@@ -67,19 +67,14 @@ class SummarizerService:
                     Generate the summary:"""
 
         try:
-            # Use synchronous completion for summary
-            # Since stream_completion is a synchronous generator, we'll collect it
-            response_text = ""
-            
-            # stream_completion is synchronous generator
-            for chunk in llm_service.llm_provider.stream_completion(
+            # Use simple_prompt for summary (no streaming needed)
+            summary = llm_service.llm_provider.simple_prompt(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=1000,
                 temperature=0.3
-            ):
-                response_text += get_stream_response_content(chunk)
+            )
             
-            summary = response_text.strip()
+            summary = summary.strip() if summary else ""
             
             # Verify summary length (should be 300-800 tokens)
             summary_tokens = self.chunker.count_tokens(summary)

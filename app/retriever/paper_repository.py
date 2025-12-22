@@ -17,36 +17,80 @@ class PaperRepository:
     
     async def create_paper(self, paper: Paper) -> DBPaper:
         """
-        Create a new paper in database
+        Create a new paper in database with all available attributes.
+        If paper already exists, return the existing record.
         
         Args:
             paper: Paper schema object
             
         Returns:
-            Created DBPaper object
+            Created or existing DBPaper object
         """
+        # Check if paper already exists
+        existing = await self.get_paper_by_id(paper.paper_id)
+        if existing:
+            logger.info(f"Paper {paper.paper_id} already exists in database")
+            return existing
+        
         # Convert authors to JSONB format
         authors_json = [{"name": author.name, "author_id": author.author_id} for author in paper.authors]
         
         db_paper = DBPaper(
+            # Core identifiers and metadata
             paper_id=paper.paper_id,
-            title=paper.title,
+            title=paper.title or "Untitled",
             authors=authors_json,
-            abstract=paper.abstract,
+            abstract=paper.abstract or "Abstract not available",
             publication_date=paper.publication_date,
             venue=paper.venue,
-            is_open_access=paper.is_open_access,
+            
+            # URLs
+            url=paper.url or None,
+            pdf_url=paper.pdf_url or None,
+            is_open_access=paper.is_open_access or False,
             open_access_pdf=paper.open_access_pdf,
-            url=paper.url,
-            pdf_url=paper.pdf_url,
-            source=paper.source,
-            external_id=paper.external_ids,
+            
+            # Source and identifiers
+            source=paper.source or "SemanticScholar",
+            external_ids=paper.external_ids or {},
+            
+            # Summary and embeddings (populated during processing)
+            summary=paper.summary,
+            summary_embedding=paper.summary_embedding,
+            
+            # Relevance and citation metrics
             relevance_score=paper.relevance_score,
-            citation_count=paper.citation_count,
-            influential_citation_count=paper.influential_citation_count,
-            reference_count=paper.reference_count,
-            is_processed=paper.is_processed,
-            processing_status=paper.processing_status
+            citation_count=paper.citation_count or 0,
+            influential_citation_count=paper.influential_citation_count or 0,
+            reference_count=paper.reference_count or 0,
+            
+            # Rich metadata (OpenAlex specific) - only set if not None
+            topics=paper.topics if paper.topics else None,
+            keywords=paper.keywords if paper.keywords else None,
+            concepts=paper.concepts if paper.concepts else None,
+            mesh_terms=paper.mesh_terms if paper.mesh_terms else None,
+            
+            # Citation quality metrics
+            citation_percentile=paper.citation_percentile if paper.citation_percentile else None,
+            fwci=paper.fwci,
+            
+            # Paper quality indicators
+            is_retracted=paper.is_retracted or False,
+            language=paper.language,
+            
+            # Bibliographic information - only set if not None
+            biblio=paper.biblio if paper.biblio else None,
+            primary_location=paper.primary_location if paper.primary_location else None,
+            locations=paper.locations if paper.locations else None,
+            
+            # Author collaboration metadata
+            corresponding_author_ids=paper.corresponding_author_ids if paper.corresponding_author_ids else None,
+            countries_distinct_count=paper.countries_distinct_count,
+            
+            # Processing status
+            is_processed=paper.is_processed or False,
+            processing_status=paper.processing_status or "pending",
+            processing_error=None
         )
         
         self.db.add(db_paper)
@@ -63,17 +107,39 @@ class PaperRepository:
         )
         return result.scalar_one_or_none()
     
-    async def get_paper_by_external_id(self, external_id: str, source: str) -> Optional[DBPaper]:
-        """Get paper by external ID and source"""
-        result = await self.db.execute(
-            select(DBPaper).where(
-                and_(
-                    DBPaper.external_id == external_id,
-                    DBPaper.source == source
+    async def get_paper_by_external_ids(self, external_ids: Dict[str, str], source: str) -> Optional[DBPaper]:
+        """Get paper by external IDs and source"""
+        # Try to find by DOI first, then other IDs
+        doi = external_ids.get('DOI')
+        if doi:
+            result = await self.db.execute(
+                select(DBPaper).where(
+                    and_(
+                        DBPaper.external_ids['DOI'].astext == doi,
+                        DBPaper.source == source
+                    )
                 )
             )
-        )
-        return result.scalar_one_or_none()
+            paper = result.scalar_one_or_none()
+            if paper:
+                return paper
+        
+        # Fallback to other IDs
+        for key, value in external_ids.items():
+            if value:
+                result = await self.db.execute(
+                    select(DBPaper).where(
+                        and_(
+                            DBPaper.external_ids[key].astext == value,
+                            DBPaper.source == source
+                        )
+                    )
+                )
+                paper = result.scalar_one_or_none()
+                if paper:
+                    return paper
+        
+        return None
     
     async def update_paper_processing_status(
         self,

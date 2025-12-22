@@ -1,4 +1,4 @@
-from typing import List, TypedDict, Dict, Optional
+from typing import List, TypedDict, Dict, Optional, Any
 
 
 class AuthorDict(TypedDict, total=False):
@@ -7,6 +7,10 @@ class AuthorDict(TypedDict, total=False):
     author_id: Optional[str]     # Unique author identifier
     citation_count: Optional[int]  # Number of citations
     h_index: Optional[int]       # Author h-index
+    # OpenAlex-specific fields
+    orcid: Optional[str]         # ORCID identifier
+    institutions: Optional[List[Dict[str, Any]]]  # Author's institutions
+    affiliations: Optional[List[Dict[str, Any]]]  # Raw affiliation strings
 
 
 class NormalizedResult(TypedDict, total=False):
@@ -22,7 +26,25 @@ class NormalizedResult(TypedDict, total=False):
     is_open_access: bool         # Whether paper is open access
     open_access_pdf: Optional[Dict[str, str]]  # Open access PDF metadata {"url": str, "status": str, "license": str}
     citation_count: Optional[int]  # Citation count
-    influential_citation_count: Optional[int]  # Influential citation count
+    influential_citation_count: Optional[int]  # Influential citation count (Semantic Scholar only)
     reference_count: Optional[int]  # Number of references cited
     external_ids: Optional[Dict[str, str]]  # {"DOI": str, "ArXiv": str, ...}
-    source: str                  # Provider name (e.g., "semantic_scholar")
+    source: str                  # Provider name (e.g., "semantic_scholar", "openalex")
+    
+    # OpenAlex-specific fields
+    topics: Optional[List[Dict[str, Any]]]  # Research topics with scores
+    keywords: Optional[List[Dict[str, Any]]]  # Keywords with scores
+    concepts: Optional[List[Dict[str, Any]]]  # Concepts with scores and levels
+    mesh_terms: Optional[List[Dict[str, Any]]]  # MeSH terms for biomedical papers
+    citation_percentile: Optional[Dict[str, Any]]  # Citation percentile rankings
+    fwci: Optional[float]        # Field-weighted citation impact
+    is_retracted: Optional[bool]  # Retraction status
+    language: Optional[str]       # Paper language code
+    biblio: Optional[Dict[str, str]]  # Bibliographic info (volume, issue, pages)
+    primary_location: Optional[Dict[str, Any]]  # Primary publication location
+    locations: Optional[List[Dict[str, Any]]]  # All publication locations
+    
+    # Author reputation fields (for project requirements)
+    corresponding_author_ids: Optional[List[str]]  # IDs of corresponding authors
+    institutions_distinct_count: Optional[int]  # Number of unique institutions
+    countries_distinct_count: Optional[int]  # Number of unique countries

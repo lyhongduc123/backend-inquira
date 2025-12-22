@@ -42,9 +42,13 @@ class LLMService():
         #         provider='openai'
         #     )
         self.llm_provider = LiteLLMProvider(
-            model="gemini/gemini-2.5-pro",
-            api_key=settings.GEMINI_API_KEY
+            model="openrouter/meta-llama/llama-3.3-70b-instruct:free",
+            api_key=settings.OPENROUTER_API_KEY
         )
+        # self.llm_provider = LiteLLMProvider(
+        #     api_key=settings.OPENAI_API_KEY,
+        #     model="openai/gpt-4.1"
+        # )
         self.prompts = SummaryPrompts
     
     def analyze_paper_content(
@@ -121,59 +125,47 @@ class LLMService():
                 "complexity": "intermediate"
             }
         """
+
+        prompt = f"""
+        User Question: "{user_question}
+        Required Subtopics: {num_subtopics or "1-2"}
+        """
+
+        system_message = """You are an expert at converting user questions into HIGH-PRECISION academic search queries optimized for Semantic Scholar and Consensus-style retrieval.
+
+        CORE OBJECTIVE:
+        Generate search queries that closely resemble academic paper titles or abstract phrases, not explanatory sentences.
+
+        STRICT RULES:
+        - Preserve the exact terminology from the user's question (product names, technical terms, proper nouns)
+        - Generate 1-2 subtopics MAXIMUM
+        - Each subtopic MUST be a direct search query suitable for Semantic Scholar
+        - Phrase subtopics like paper titles or abstract fragments
+        - Avoid conversational phrasing ("how", "what are", "benefits of", "does X")
+        - Avoid background or introductory topics
+        - Do NOT add new concepts not present in the user's question
+
+        QUERY OPTIMIZATION RULES:
+        - Prefer nouns and technical phrases over verbs
+        - Include method, mechanism, evaluation, performance, or outcome terms when appropriate
+        - Remove filler words ("and", "of", "for", "with") unless essential
+        - Each subtopic should target ONE research dimension only
         
-        # Generate exactly 1-2 focused subtopics that stay close to the user's query
-        subtopic_instruction = f"exactly {num_subtopics} sub-topics" if num_subtopics else "1-2 focused sub-topics (no more than 2)"
+        QUERY STYLE EXAMPLES:
+        "How does transformer attention work?"
+        "transformer self-attention mechanism"
 
-        prompt = f"""Analyze this user question and create focused search queries that would help find relevant research papers:
+        "What are the benefits of Walrus Sui storage?"
+        "Walrus Sui decentralized storage architecture"
+        "Walrus Sui storage performance evaluation"
 
-            User Question: "{user_question}"
-
-            Please provide:
-            1. A clarified/refined version of the question that captures the core intent
-            2. {subtopic_instruction} for searching academic papers
-
-            IMPORTANT RULES FOR SUBTOPICS:
-            - Stay VERY CLOSE to the original question's terminology and focus
-            - Each subtopic should be a searchable query that directly relates to the user's question
-            - Use the same technical terms, product names, and concepts from the original question
-            - DO NOT expand into tangential areas or general background topics
-            - Keep subtopics specific and targeted to what the user asked
-            - Maximum 2 subtopics to maintain focus
-
-            Examples:
-            Question: "How does Walrus Sui decentralized storage work?"
-            → Subtopic 1: "Walrus Sui decentralized storage architecture and mechanisms"
-            → Subtopic 2: "Walrus Sui storage implementation and protocols"
-
-            Question: "What are the benefits of transformer models?"
-            → Subtopic 1: "transformer model advantages and performance benefits"
-            → Subtopic 2: "transformer architecture computational efficiency"
-
-            Question: "Explain quantum entanglement"
-            → Subtopic 1: "quantum entanglement phenomena and mechanisms"
-
-            Format your response as:
-            COMPLEXITY: [simple/intermediate/advanced]
-            CLARIFIED: [refined question]
-            SUBTOPICS:
-            1. [subtopic 1]
-            2. [subtopic 2]
-            """
-
-        system_message = """You are an expert at converting user questions into effective academic search queries.
-
-            Guidelines:
-            - PRESERVE the exact terminology from the user's question (product names, technical terms, specific concepts)
-            - Generate 1-2 focused subtopics maximum
-            - Each subtopic should be a direct search query for finding relevant papers
-            - Stay laser-focused on what the user specifically asked about
-            - Avoid generic background topics or tangential areas
-            - Simple "What is X?" questions: 1 subtopic focused on X
-            - "How does X work?" questions: 1-2 subtopics about X's mechanisms/implementation
-            - Comparison questions: 1-2 subtopics comparing the specific items mentioned
-
-            NEVER exceed 2 subtopics. Quality over quantity."""
+        OUTPUT FORMAT (STRICT):
+        COMPLEXITY: [simple/intermediate/advanced]
+        CLARIFIED: [one-sentence refined question]
+        SUBTOPICS:
+        1. [Semantic Scholar-optimized query]
+        2. [Semantic Scholar-optimized query]
+"""
 
         messages = [
             {"role": "system", "content": system_message},
@@ -417,17 +409,16 @@ class LLMService():
         system_message = """You are an expert research assistant with deep knowledge across scientific domains. Your role is to synthesize information from academic papers into natural, engaging, and well-cited responses.
 
         CRITICAL GUIDELINES:
-        1. Write in a natural, conversational academic style - avoid robotic formats or emoji markers
+        1. Write in a natural, conversational academic style - avoid robotic formats or emoji markers. Do not use casual, friendly, or first-person phrases.
         2. Synthesize a consensus view from multiple papers when possible
-        3. Use inline citations [1](paper_id1), [2](paper_id2), [3](paper_id3) to support every claim, fact, or finding
+        3. Use inline citations (cite:paper_id1), (cite:paper_id2), (cite:paper_id3) to support every claim, fact, or finding
         4. Structure your response logically with clear sections when appropriate (use headers, lists, tables if helpful)
         5. Highlight key definitions, types, causes, mechanisms, or applications based on the question
         6. When papers disagree or show different perspectives, acknowledge this explicitly
         7. If the question is vague or could benefit from clarification, briefly ask what aspect the user is most interested in
         8. Base EVERY statement on the provided papers - do not add external knowledge
-        9. If papers lack sufficient information, state this clearly and suggest what additional research might help
-        10. If unsure about a claim, avoid making definitive statements.
-        11. If only abstracts are provided, you may answer based on your own general knowledge, but you MUST clearly notify the user when doing so. Distinguish between claims supported by the abstract and those based on your own knowledge. For any information not present in the abstract, explicitly state: "This information is not available in the abstract; the following is based on general knowledge and may not be accurate for this specific paper."
+        9. If unsure about a claim, avoid making definitive statements.
+        10. If only abstracts are provided, you may answer based on your own general knowledge, but you MUST clearly notify the user when doing so. Distinguish between claims supported by the abstract and those based on your own knowledge. For any information not present in the abstract, explicitly state: "This information is not available in the abstract; the following is based on general knowledge and may not be accurate for this specific paper."
 
         MARKDOWN FORMATTING (REQUIRED):
         - Use # for main headers, ## for subheaders, ### for sub-sections
@@ -442,18 +433,21 @@ class LLMService():
         RESPONSE STYLE:
         - Start with a direct answer or overview (use a header if appropriate)
         - Organize information hierarchically with proper Markdown headers
-        - Use evidence-based language such as: "Research shows that..." "Multiple studies indicate..." "According to [1][2]..."
+        - Use evidence-based language such as: "Research shows that..." "Multiple studies indicate..." "According to (cite:paper_id1)(cite:paper_id2)..."
         - Include direct quotes sparingly when they add significant value
         - End with a brief synthesis or conclusion when appropriate
 
         CITATION RULES (CRITICAL):
-        - Cite papers INLINE ONLY using [1](paper_id1), [2](paper_id2), etc. where paper_id is the Paper ID provided
-        - Multiple citations for the same claim: [1](paper_id1)[2](paper_id2)[5](paper_id5)
+        - Cite papers INLINE ONLY using (cite:paper_id1), (cite:paper_id2), etc. where paper_id is the Paper ID provided
+        - Multiple citations for the same claim: (cite:paper_id1)(cite:paper_id2)(cite:paper_id5)
         - Always cite when stating facts, statistics, definitions, or findings
         - Group related citations together naturally in the text
-        - DO NOT create a separate "References" section at the end
         - DO NOT list references separately - ALL citations must be inline only
-        - Use the exact Paper ID from the context (e.g., if Paper ID is "arxiv_2301.12345", cite as [1](arxiv_2301.12345))
+        - Use the exact Paper ID from the context (e.g., if Paper ID is "2912973019920480", cite as (cite:2912973019920480))
+        - You may ONLY use citation IDs that appear in the "Available Research Papers" section.
+        - DO NOT invent, infer, or fabricate paper IDs.
+        - If a claim cannot be supported using the provided papers, explicitly state that it is unsupported by the available sources and do NOT cite it.
+        - If insufficient evidence exists in the provided papers, say so rather than adding citations.
         
         FORBIDDEN:
         - DO NOT add a "References:" section at the end

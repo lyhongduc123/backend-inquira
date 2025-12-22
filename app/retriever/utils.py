@@ -40,7 +40,6 @@ def normalized_to_paper(result: NormalizedResult) -> Paper:
     publication_date = parse_date(pub_date_str) if pub_date_str else None
 
     external_ids = result.get("external_ids") or {}
-    external_id = external_ids.get("DOI") or result.get("paper_id", "")
 
     return Paper(
         paper_id=result.get("paper_id", ""),
@@ -57,7 +56,7 @@ def normalized_to_paper(result: NormalizedResult) -> Paper:
         influential_citation_count=result.get("influential_citation_count", 0),
         reference_count=result.get("reference_count", 0),
         source=result.get("source", ""),
-        external_ids=external_id,
+        external_ids=external_ids,
         is_processed=False,
         processing_status="pending",
     )
@@ -125,7 +124,7 @@ def dbpaper_to_paper(db_paper) -> Paper:
         influential_citation_count=db_paper.influential_citation_count,
         reference_count=db_paper.reference_count,
         source=db_paper.source,
-        external_ids=db_paper.external_id,
+        external_ids=db_paper.external_ids,
         is_processed=db_paper.is_processed,
         processing_status=db_paper.processing_status,
     )

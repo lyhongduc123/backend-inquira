@@ -1,7 +1,9 @@
 # app/rag/pipeline.py
 
 import asyncio
+import datetime
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +18,8 @@ from app.extensions.logger import create_logger
 
 from app.rag_pipeline.utils import deduplicate_papers
 from app.retriever.utils import batch_dbpaper_to_papers
+
+import json
 
 logger = create_logger(__name__)
 
@@ -42,7 +46,7 @@ class RAGPipeline:
         self,
         query: str,
         max_subtopics: int = 3,
-        per_subtopic_limit: int = 3,
+        per_subtopic_limit: int = 5,
         top_chunks: int = 20,
     ):
         """
@@ -63,7 +67,6 @@ class RAGPipeline:
         yield RAGPipelineEvent(type="subtopics", data={"subtopics": subtopics})
 
         yield RAGPipelineEvent(type="step", data=f"Searching for relevant papers...")
-        paper_service = PaperRetrievalService(self.db_session)
         all_papers = []
 
         for idx, subtopic in enumerate(subtopics, 1):
@@ -87,15 +90,23 @@ class RAGPipeline:
         if not papers:
             yield RAGPipelineEvent(type="result", data=RAGResult(papers=[], chunks=[]))
             return
-
+        
+        # Process papers (PDF → chunk → embed)
         processed_papers = await self.processor.process_papers(papers)
         paper_ids = [
             str(p.paper_id)
             for p in papers
             if processed_papers.get(str(p.paper_id), False)
         ]
+        
+        output = {
+            "original": all_papers,
+            "deduplicated": papers,
+            "processed": paper_ids,
+        }
+        self._write_log(output)
 
-        chunks = await paper_service.get_relevant_chunks(
+        chunks = await self.retriever.get_relevant_chunks(
             query=query, paper_ids=paper_ids, limit=top_chunks
         )
         logger.info(f"Found {len(chunks)} relevant chunks")
@@ -103,3 +114,19 @@ class RAGPipeline:
         yield RAGPipelineEvent(
             type="result", data=RAGResult(papers=papers, chunks=chunks)
         )
+
+    def _write_log(self, output: dict):
+        """Writing processed datas for debug
+
+        Args:
+            output (dict): A .json files contain the data
+        """
+        base_dir = Path(__file__).parent
+        logs_dir = base_dir / "logs"
+        logs_dir.mkdir(exist_ok=True)
+        
+        timestamp = datetime.datetime.now().isoformat().replace(":", "-")
+        filename = logs_dir / f"processed_papers-{timestamp}.json"
+        
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(output, f, ensure_ascii=False, indent=4, default=str)

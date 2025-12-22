@@ -15,10 +15,12 @@ from app.llm.schemas import CitationBasedResponse
 from app.chat.services import ChatService
 from app.db.database import get_db_session
 from app.extensions.stream import stream_event
+from app.extensions.logger import create_logger
 from app.auth.dependencies import get_current_user
 from app.models.users import DBUser
 
 router = APIRouter()
+logger = create_logger(__name__)
 
 
 @router.post("/stream")
@@ -88,6 +90,56 @@ async def submit_feedback(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/stream-with-tools")
+async def stream_message_with_tools(
+    request: ChatMessageRequest,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: DBUser = Depends(get_current_user)
+):
+    """
+    Stream chat message response with AI tool calling support
+    
+    This endpoint enables the AI to autonomously use tools when needed:
+    - **compare_papers**: Compare research papers when user asks for comparisons
+    - **opinion_meter**: Analyze opinion distribution when user asks about consensus
+    - **citation_analysis**: Analyze paper impact when user asks about influence
+    - **research_trends**: Analyze trends when user asks about temporal patterns
+    
+    Returns Server-Sent Events (SSE) stream with:
+    1. event: conversation - Conversation metadata
+    2. event: phase - Processing phase updates
+    3. event: thought - AI reasoning and analysis
+    4. event: sources - Paper metadata
+    5. event: tool_call - Tool execution events (start, end, error)
+    6. event: chunk - Response text chunks
+    7. event: done - Completion signal
+    
+    Tool events include:
+    - tool_call_start: When AI decides to use a tool
+    - tool_call_end: When tool execution completes with results
+    - tool_call_error: When tool execution fails
+    
+    - **query**: User's message/question
+    - **conversation_id**: Optional ID of existing conversation
+    """
+    chat_service = ChatService(db_session=db)
+    try:
+        logger.info(f"Tool-enabled stream called by user {current_user.id}: {request.query[:50]}...")
+        return StreamingResponse(
+            chat_service.stream_message_with_tools(
+                request=request,
+                user_id=current_user.id,
+                db_session=db,
+                enable_tools=True
+            ),
+            media_type="text/event-stream"
+        )
+    except Exception as e:
+        logger.error(f"Tool-enabled stream error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/test-stream")
 @router.get("/test-stream")
 async def test_stream():
     """

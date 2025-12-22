@@ -25,9 +25,8 @@ class TransformerService:
                 for a in authors_data
             ]
         
-        # Extract DOI from external_ids or use paper_id as fallback
+        # Extract external_ids dict from normalized result
         external_ids = normalized.get('external_ids') or {}
-        external_id = external_ids.get('DOI') or normalized.get('paper_id', '')
         
         print(normalized.get('paper_id', ''), normalized.get('influential_citation_count'))
         
@@ -42,7 +41,7 @@ class TransformerService:
             citation_count=normalized.get('citation_count') or 0,
             influential_citation_count=normalized.get('influential_citation_count') or 0,
             reference_count=normalized.get('reference_count') or 0,
-            external_id=external_id,
+            external_ids=external_ids,
             source=normalized.get('source', 'semantic_scholar'),
             pdf_url=normalized.get('pdf_url'),
             is_open_access=normalized.get('is_open_access', False),

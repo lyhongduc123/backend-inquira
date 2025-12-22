@@ -1,15 +1,16 @@
 import time
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from contextlib import asynccontextmanager
 
-from app.llm import llm_service
-from fastapi.responses import StreamingResponse
+from app.retriever.paper_service import PaperRetrievalService, RetrievalServiceType
+from app.retriever.provider import SemanticScholarProvider
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import colorama
 colorama.just_fix_windows_console()
 
-from app.db.database import init_db
+from app.db.database import get_db_session, init_db
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # For initializing database models
 import app.models
@@ -50,6 +51,17 @@ def read_root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+@app.get("/api/test")
+async def api_test():
+    res = await SemanticScholarProvider("test").get_snippet("Walrus Sui definitions")
+    return res
+
+@app.get("/test")
+async def api_test_retrieval(db: AsyncSession = Depends(get_db_session)):
+    service = PaperRetrievalService(db)
+    papers = await service.search("Blockchain Technology: Core", limit=5, services=[RetrievalServiceType.SEMANTIC])
+    return papers
 
 # API v1 routes
 app.include_router(

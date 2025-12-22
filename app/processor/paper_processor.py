@@ -39,15 +39,21 @@ class PaperProcessor:
         paper_id_str = str(paper.paper_id)
 
         exist = await self.paper_service.get_paper_if_exists(
-            paper.external_ids, paper.source
+            paper.external_ids or {}, paper.source
         )
+        
+        if exist is None:
+            # Ensure we have a valid abstract (database requires NOT NULL)
+            if not paper.abstract or paper.abstract.strip() == "":
+                # Set a fallback abstract for papers without abstracts
+                paper.abstract = "Abstract not available"
+                logger.info(f"Paper {paper_id_str} has no abstract, using fallback")
+            
+            await self.repository.create_paper(paper)
 
-        if exist is not None and getattr(exist, "is_processed", False) is True:
+        if exist is not None and exist.is_processed is True:
             logger.info(f"Paper {paper_id_str} already processed, skipping.")
             return True
-        else:
-            logger.info(f"Processing paper {paper_id_str}")
-            await self.repository.create_paper(paper)
 
         try:
             pdfBytes = await self.paper_service.get_pdf_paper(paper)

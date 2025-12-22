@@ -15,6 +15,7 @@ from .provider.arxiv_provider import ArxivProvider
 from .provider.base import BaseRetrievalProvider
 from .provider.base_schemas import NormalizedResult
 from .utils import batch_normalized_to_papers
+from .result_logger import save_retrieval_results, save_paper_analysis
 
 logger = create_logger(__name__)
 
@@ -67,17 +68,24 @@ class PaperRetrievalService:
         self.embedding_service = EmbeddingService()
         self.repository = PaperRepository(db)
         
-    async def search(self, query: str, limit: int, services: List[RetrievalServiceType]) -> List[Paper]:
+    async def search(
+        self, 
+        query: str, 
+        limit: int, 
+        services: List[RetrievalServiceType],
+        save_results: bool = False
+    ) -> List[Paper]:
         """
         Search for papers across specified services
         
         Args:
-            services: List of retrieval services to use
             query: Search query
-            limit: Number of papers to retrieve
+            limit: Number of papers to retrieve per service
+            services: List of retrieval services to use
+            save_results: If True, save raw retrieval results to JSON for debugging
+            
         Returns:
             List of Paper objects
-        papers: List[Paper] = []
         """
         results: List[NormalizedResult] = []
         for service_type in services:
@@ -92,6 +100,14 @@ class PaperRetrievalService:
                 logger.info(f"Retrieved {len(service_papers)} papers from {service_type}")
             except Exception as e:
                 logger.error(f"Error retrieving papers from {service_type}: {e}")
+        
+        # Optionally save raw results for analysis
+        if save_results and results:
+            try:
+                save_retrieval_results(results, query=query, provider=str(services))
+                save_paper_analysis(results)
+            except Exception as e:
+                logger.warning(f"Failed to save retrieval results: {e}")
         
         papers = batch_normalized_to_papers(results)
         return papers
@@ -167,17 +183,17 @@ class PaperRetrievalService:
         
         # return db_papers
         
-    async def get_paper_if_exists(self, external_id: str, source: str) -> Optional[DBPaper]:
+    async def get_paper_if_exists(self, external_ids: Dict[str, str], source: str) -> Optional[DBPaper]:
         """
-        Check if a paper exists in the database by external ID and source
+        Check if a paper exists in the database by external IDs and source
         
         Args:
-            external_id: External paper ID (e.g., DOI, Semantic Scholar ID)
+            external_ids: External paper IDs dict (e.g., {"DOI": "...", "ArXiv": "..."})
             source: Source/provider name
         Returns:
             DBPaper object if exists, else None
         """
-        paper = await self.repository.get_paper_by_external_id(external_id, source)
+        paper = await self.repository.get_paper_by_external_ids(external_ids, source)
         return paper
     
         
@@ -185,17 +201,45 @@ class PaperRetrievalService:
         self,
         paper: Paper
     ) -> Optional[bytes]:
+        """
+        Get PDF bytes for a paper.
+        
+        First tries the pdf_url from the paper metadata (already extracted from API).
+        Falls back to access_info lookup if needed.
+        
+        Args:
+            paper: Paper object with metadata
+            
+        Returns:
+            PDF content as bytes, or None if not available
+        """
         try:
-            result = self.paper_retriever.get_access_info(paper.dict())
-            if result.get("is_open_access"):
-                pdf_url = result.get("pdf_url")
-                if pdf_url:
-                    pdfBytes = await self.paper_retriever.download_pdf(str(pdf_url))
+            # First, try using the pdf_url already extracted from the API
+            if paper.pdf_url:
+                logger.info(f"Attempting to download PDF from API-provided URL: {paper.pdf_url}")
+                pdfBytes = await self.paper_retriever.download_pdf(paper.pdf_url, check_open_access=False)
+                if pdfBytes:
                     return pdfBytes
                 else:
+                    logger.warning(f"Failed to download from API URL: {paper.pdf_url}")
+            
+            # Fallback: check access info for alternative PDF URLs
+            result = self.paper_retriever.get_access_info(paper.dict())
+            if result.get("is_open_access"):
+                fallback_pdf_url = result.get("pdf_url")
+                if fallback_pdf_url and fallback_pdf_url != paper.pdf_url:
+                    logger.info(f"Trying fallback PDF URL from access_info: {fallback_pdf_url}")
+                    pdfBytes = await self.paper_retriever.download_pdf(str(fallback_pdf_url))
+                    if pdfBytes:
+                        return pdfBytes
+                    else:
+                        logger.warning(f"Failed to download from fallback URL: {fallback_pdf_url}")
+                elif not fallback_pdf_url:
                     logger.warning("Open-access paper has no pdf_url in access info")
             else:
-                logger.info("Paper is not open-access, cannot retrieve full-text")
+                if not paper.pdf_url:
+                    logger.info("Paper is not open-access and has no PDF URL, cannot retrieve full-text")
+            
             return None
         except Exception as e:
             logger.error(f"Error retrieving PDF for paper {paper.paper_id}: {e}")
@@ -260,3 +304,14 @@ class PaperRetrievalService:
         )
         
         return papers
+    
+    def get_provider(self, service_type: RetrievalServiceType) -> Optional[BaseRetrievalProvider]:
+        """
+        Get the provider instance for a given service type
+        
+        Args:
+            service_type: RetrievalServiceType enum value
+        Returns:
+            BaseRetrievalProvider instance or None
+        """
+        return self.providers.get(service_type)

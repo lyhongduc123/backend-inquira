@@ -124,6 +124,50 @@ class SemanticScholarProvider(BaseCachedProvider):
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] Error fetching paper {paper_id}: {e}")
             return None
+        
+    async def get_snippet(
+        self,
+        query: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get a brief snippet for the query from Semantic Scholar.
+        
+        Args:
+            query: Search query 
+        Returns:
+            Snippet text or None
+        """
+        limit = 10
+        
+        params = {
+            "query": query,
+            "limit": limit,
+        }
+        
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}/snippet/search",
+                    params=params,
+                    headers=headers
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                results = data.get("data", [])
+                return results
+                
+        except httpx.HTTPError as e:
+            logger.error(f"[{self.name}] API error: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"[{self.name}] Search error: {e}")
+            return []
+        
 
     def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedResult:
         """
