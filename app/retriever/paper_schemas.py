@@ -74,6 +74,26 @@ class Paper(BaseModel):
     processing_status: str = "pending"
     processing_error: Optional[str] = None
 
+    # External IDs for API lookups
+    openalex_id: Optional[str] = None
+    semantic_scholar_id: Optional[str] = None
+    doi: Optional[str] = None
+    year: Optional[int] = None
+    publication_year: Optional[int] = None
+
+    # Additional OpenAlex fields for ranking
+    authorships: Optional[List[Dict[str, Any]]] = None
+    
+    # Flexible data storage for full API responses
+    openalex_data: Optional[Dict[str, Any]] = None
+    semantic_data: Optional[Dict[str, Any]] = None
+    
+    # Ranking score (attached during ranking)
+    ranking_score: Optional[Dict[str, Any]] = None
+    
+    # Database ID (from DBPaper.id)
+    id: Optional[int] = None
+
     class Config:
         from_attributes = True
     

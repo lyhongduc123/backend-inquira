@@ -58,7 +58,8 @@ class DBPaper(Base):
     locations: Mapped[list] = mapped_column(JSONB, nullable=True)  # All publication locations
     
     # Author collaboration metadata (for author reputation scoring)
-    corresponding_author_ids: Mapped[list] = mapped_column(ARRAY(String), nullable=True)  # Number of unique institutions
+    corresponding_author_ids: Mapped[list] = mapped_column(ARRAY(String), nullable=True)
+    institutions_distinct_count: Mapped[int] = mapped_column(Integer, nullable=True)  # Number of unique institutions
     countries_distinct_count: Mapped[int] = mapped_column(Integer, nullable=True)  # Number of unique countries
 
     # Status tracking
