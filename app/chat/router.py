@@ -2,7 +2,7 @@
 Chat router for handling chatbot interactions
 """
 import asyncio
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,8 @@ from app.extensions.stream import stream_event
 from app.extensions.logger import create_logger
 from app.auth.dependencies import get_current_user
 from app.models.users import DBUser
+from app.core.responses import ApiResponse, success_response
+from app.core.exceptions import InternalServerException
 
 router = APIRouter()
 logger = create_logger(__name__)
@@ -25,10 +27,11 @@ logger = create_logger(__name__)
 
 @router.post("/stream")
 async def stream_message(
+    http_request: Request,
     request: ChatMessageRequest,
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
-):
+) -> StreamingResponse:
     """
     Stream chat message response in real-time with paper metadata
     
@@ -47,7 +50,11 @@ async def stream_message(
     """
     chat_service = ChatService(db_session=db)
     try:
-        print(f"[DEBUG] Stream endpoint called by user {current_user.id}: {request.query[:50]}...")
+        request_id = getattr(http_request.state, 'request_id', None)
+        logger.info(
+            f"Stream endpoint called by user {current_user.id}",
+            extra={"user_id": current_user.id, "query_preview": request.query[:50], "request_id": request_id}
+        )
         return StreamingResponse(
             chat_service.stream_message(
                 request=request,
@@ -57,16 +64,17 @@ async def stream_message(
             media_type="text/event-stream"
         )
     except Exception as e:
-        print(f"[ERROR] Stream endpoint error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Stream endpoint error: {e}", exc_info=True)
+        raise InternalServerException(f"Failed to stream message: {str(e)}")
 
 
-@router.post("/feedback", response_model=FeedbackResponse)
+@router.post("/feedback", response_model=ApiResponse[FeedbackResponse])
 async def submit_feedback(
+    http_request: Request,
     request: FeedbackRequest,
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
-):
+) -> ApiResponse[FeedbackResponse]:
     """
     Submit feedback/rating for a chat message
     
@@ -82,20 +90,25 @@ async def submit_feedback(
             comment=request.comment
         )
         
-        return FeedbackResponse(
+        feedback_response = FeedbackResponse(
             success=success,
             message="Feedback submitted successfully" if success else "Failed to submit feedback"
         )
+        
+        request_id = getattr(http_request.state, 'request_id', None)
+        return success_response(feedback_response, request_id=request_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Feedback submission error: {e}", exc_info=True)
+        raise InternalServerException(f"Failed to submit feedback: {str(e)}")
 
 
 @router.post("/stream-with-tools")
 async def stream_message_with_tools(
+    http_request: Request,
     request: ChatMessageRequest,
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
-):
+) -> StreamingResponse:
     """
     Stream chat message response with AI tool calling support
     
@@ -124,7 +137,11 @@ async def stream_message_with_tools(
     """
     chat_service = ChatService(db_session=db)
     try:
-        logger.info(f"Tool-enabled stream called by user {current_user.id}: {request.query[:50]}...")
+        request_id = getattr(http_request.state, 'request_id', None)
+        logger.info(
+            f"Tool-enabled stream called by user {current_user.id}",
+            extra={"user_id": current_user.id, "query_preview": request.query[:50], "request_id": request_id}
+        )
         return StreamingResponse(
             chat_service.stream_message_with_tools(
                 request=request,
@@ -136,7 +153,7 @@ async def stream_message_with_tools(
         )
     except Exception as e:
         logger.error(f"Tool-enabled stream error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise InternalServerException(f"Failed to stream with tools: {str(e)}")
 
 
 @router.post("/test-stream")

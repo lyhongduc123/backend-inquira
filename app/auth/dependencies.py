@@ -1,12 +1,16 @@
 """
 Authentication dependencies for FastAPI route protection
 """
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.service import decode_access_token, get_user_by_id
 from app.models.users import DBUser
 from app.db.database import get_db_session
+from app.core.exceptions import UnauthorizedException, ForbiddenException
+from app.extensions.logger import create_logger
+
+logger = create_logger(__name__)
 
 # HTTP Bearer token scheme
 security = HTTPBearer()
@@ -27,32 +31,24 @@ async def get_current_user(
         DBUser instance of authenticated user
     
     Raises:
-        HTTPException: If token is invalid or user not found
+        UnauthorizedException: If token is invalid or user not found
+        ForbiddenException: If user is inactive
     """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
     token = credentials.credentials
-    print("Received token:", token)
+    logger.debug(f"Validating token: {token[:20]}...")
     token_data = decode_access_token(token)
-    print("Decoded token data:", token_data)
+    logger.debug(f"Decoded token data for user_id: {token_data.user_id if token_data else None}")
     
     if token_data is None or token_data.user_id is None:
-        raise credentials_exception
+        raise UnauthorizedException("Could not validate credentials")
     
     user = await get_user_by_id(db, user_id=token_data.user_id)
     
     if user is None:
-        raise credentials_exception
+        raise UnauthorizedException("User not found")
     
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user"
-        )
+        raise ForbiddenException("User account is inactive")
     
     return user
 
@@ -70,11 +66,8 @@ async def get_current_active_user(
         DBUser instance if user is active
     
     Raises:
-        HTTPException: If user is inactive
+        ForbiddenException: If user is inactive
     """
     if not current_user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user"
-        )
+        raise ForbiddenException("User account is inactive")
     return current_user

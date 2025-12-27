@@ -50,3 +50,8 @@ class ConversationListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class DeleteResponse(BaseModel):
+    """Response for delete operations"""
+    message: str

@@ -119,7 +119,7 @@ class ConversationService:
         )
 
         if paper_ids:
-            print("[DEBUG] Linking papers to message:", paper_ids)
+            logger.debug(f"Linking {len(paper_ids)} papers to message {message.id}")
             if message.role != "assistant":
                 logger.warning("Linking papers to a non-assistant message, this may be unintended - Skipping linking.")
             else:
@@ -136,8 +136,10 @@ class ConversationService:
         self, db_conversation: DBConversation, messages: Optional[List[DBMessage]] = None
     ) -> ConversationDetail:
         """Convert DB model to detail schema"""
-        print("[DEBUG] Converting conversation to detail:", db_conversation.conversation_id)
-        print("[DEBUG] Messages:", messages)
+        logger.debug(
+            f"Converting conversation to detail",
+            extra={"conversation_id": db_conversation.conversation_id, "has_messages": messages is not None}
+        )
         message_list = []
         if messages:
             message_list = []

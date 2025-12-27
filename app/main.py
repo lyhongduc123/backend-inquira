@@ -1,5 +1,7 @@
 import time
 from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 
 from app.retriever.paper_service import PaperRetrievalService, RetrievalServiceType
@@ -20,16 +22,28 @@ from app.chat import router as chat_router
 from app.conversations import router as conversations_router
 from app.auth import router as auth_router
 
+# Import core components for error handling
+from app.core.exceptions import BaseApiException
+from app.core.responses import error_response, ErrorCode
+from app.extensions.middleware import RequestIDMiddleware
+from app.extensions.logger import create_logger
+
+logger = create_logger(__name__)
+
 app = FastAPI(
     title="Exegent API",
     description="AI-powered chatbot and research assistant",
     version="1.0.0"
 )
 
+# Add Request ID middleware
+app.add_middleware(RequestIDMiddleware)
+
 # CORS middleware for frontend
+from app.core.config import settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Frontend URL
+    allow_origins=[settings.FRONTEND_URL],  # Frontend URL from config
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,6 +53,55 @@ app.add_middleware(
 async def lifespan(app: FastAPI):
     # Initialize database tables on startup
     await init_db()
+
+# Exception handlers
+@app.exception_handler(BaseApiException)
+async def api_exception_handler(request: Request, exc: BaseApiException) -> JSONResponse:
+    """Handle custom API exceptions with structured error response"""
+    request_id = getattr(request.state, 'request_id', None)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response(
+            code=exc.code,
+            message=exc.detail,
+            details=exc.details,
+            request_id=request_id
+        ).model_dump(mode='json')
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Handle FastAPI validation errors"""
+    request_id = getattr(request.state, 'request_id', None)
+    errors = exc.errors()
+    return JSONResponse(
+        status_code=422,
+        content=error_response(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Validation error",
+            details={"errors": errors},
+            request_id=request_id
+        ).model_dump(mode='json')
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Handle unexpected exceptions"""
+    request_id = getattr(request.state, 'request_id', None)
+    logger.error(f"Unhandled exception: {exc}", exc_info=True, extra={"request_id": request_id})
+    return JSONResponse(
+        status_code=500,
+        content=error_response(
+            code=ErrorCode.INTERNAL_ERROR,
+            message="Internal server error",
+            details={"type": type(exc).__name__} if logger.level <= 10 else None,  # Include type in debug mode
+            request_id=request_id
+        ).model_dump(mode='json')
+    )
+
+
     yield
 
 app.router.lifespan_context = lifespan
