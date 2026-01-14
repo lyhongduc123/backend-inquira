@@ -65,14 +65,20 @@ class PaperProcessor:
                     paper_id_str, "failed"
                 )
                 return False
-            full_text = self.extractor_service.extract_pdf_text(pdfBytes)
-            clean_text = self.extractor_service._fix_text_encoding(full_text)
-
-            # TODO: Finish implementing section extraction and keyword extraction
-            # results_text = self.extractor_service.extract_results_conclusion(sections)
-            # keywords = self.extractor_service.extract_keywords(clean_text)
-
-            chunks = self.chunker_service.chunk_text(clean_text, paper_id_str)
+            
+            # Extract structured document using docling
+            doc_structure = self.extractor_service.extract_pdf_structure(pdfBytes)
+            
+            # Use structure-aware chunking for better results
+            chunks = self.chunker_service.chunk_from_structure(doc_structure, paper_id_str)
+            
+            # Fallback to text-based chunking if structure-based fails
+            if not chunks:
+                logger.warning(f"Structure-based chunking failed for {paper_id_str}, falling back to text-based")
+                full_text = self.extractor_service.extract_pdf_text(pdfBytes)
+                clean_text = self.extractor_service._fix_text_encoding(full_text)
+                chunks = self.chunker_service.chunk_text(clean_text, paper_id_str)
+            
             embeddings = await self.embedding_service.create_embeddings_batch(
                 [c[0] for c in chunks]
             )
@@ -90,7 +96,9 @@ class PaperProcessor:
                     embedding=emb if emb is not None else [],
                 )
 
-            summary = await self.summarizer_service.generate_summary(paper, clean_text)
+            # Generate summary from chunks
+            combined_text = "\n\n".join([c[0] for c in chunks[:5]])  # Use first 5 chunks for summary
+            summary = await self.summarizer_service.generate_summary(paper, combined_text)
             summary_emb = await self.embedding_service.create_embedding(summary)
             await self.repository.update_paper_summary(
                 paper_id_str, summary, summary_emb if summary_emb else []

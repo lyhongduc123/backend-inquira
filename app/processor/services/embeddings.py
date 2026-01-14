@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 from openai import AsyncOpenAI
 import ollama
 from app.core.config import settings
+from app.core.exceptions import ServiceUnavailableException
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
@@ -33,7 +34,7 @@ class EmbeddingService:
             self.dimension = 1536
             logger.info(f"Initialized OpenAI embedding service with model: {self.model}")
     
-    async def create_embedding(self, text: str) -> Optional[List[float]]:
+    async def create_embedding(self, text: str) -> List[float]:
         """
         Create embedding for a single text
         
@@ -41,7 +42,10 @@ class EmbeddingService:
             text: Text to embed
             
         Returns:
-            Embedding vector or None if failed
+            Embedding vector
+            
+        Raises:
+            ServiceUnavailableException: If embedding service fails
         """
         try:
             if self.provider == "ollama" and self.ollama_client:
@@ -62,18 +66,22 @@ class EmbeddingService:
                 embedding = response.data[0].embedding
                 return embedding
             else:
-                logger.error(f"No valid client initialized for provider: {self.provider}")
-                return None
+                error_msg = f"No valid client initialized for provider: {self.provider}"
+                logger.error(error_msg)
+                raise ServiceUnavailableException(error_msg)
             
+        except ServiceUnavailableException:
+            raise
         except Exception as e:
-            logger.error(f"Error creating embedding with {self.provider}: {e}")
-            return None
+            error_msg = f"Error creating embedding with {self.provider}: {str(e)}"
+            logger.error(error_msg)
+            raise ServiceUnavailableException(error_msg)
     
     async def create_embeddings_batch(
         self,
         texts: List[str],
         batch_size: int = 100
-    ) -> List[Optional[List[float]]]:
+    ) -> List[List[float]]:
         """
         Create embeddings for multiple texts in batches
         
@@ -82,13 +90,16 @@ class EmbeddingService:
             batch_size: Number of texts per batch (only used for OpenAI)
             
         Returns:
-            List of embedding vectors (None for failed embeddings)
+            List of embedding vectors
+            
+        Raises:
+            ServiceUnavailableException: If embedding service fails
         """
         if self.provider == "ollama":
             # Ollama doesn't support batch processing, process sequentially
             embeddings = []
             for i, text in enumerate(texts):
-                embedding = await self.create_embedding(text)
+                embedding = await self.create_embedding(text)  # Will raise if fails
                 embeddings.append(embedding)
                 if (i + 1) % 10 == 0:
                     logger.info(f"Created {i + 1}/{len(texts)} embeddings with Ollama")
@@ -96,8 +107,9 @@ class EmbeddingService:
         
         # OpenAI batch processing
         if not self.openai_client:
-            logger.error("OpenAI client not initialized")
-            return [None] * len(texts)
+            error_msg = "OpenAI client not initialized"
+            logger.error(error_msg)
+            raise ServiceUnavailableException(error_msg)
         
         embeddings = []
         
@@ -116,9 +128,9 @@ class EmbeddingService:
                 logger.info(f"Created embeddings for batch {i // batch_size + 1} ({len(batch)} texts)")
                 
             except Exception as e:
-                logger.error(f"Error creating embeddings for batch {i // batch_size + 1}: {e}")
-                # Add None for failed embeddings
-                embeddings.extend([None] * len(batch))
+                error_msg = f"Error creating embeddings for batch {i // batch_size + 1}: {str(e)}"
+                logger.error(error_msg)
+                raise ServiceUnavailableException(error_msg)
         
         return embeddings
     
@@ -126,7 +138,7 @@ class EmbeddingService:
         self,
         texts: List[str],
         max_concurrent: int = 5
-    ) -> List[Optional[List[float]]]:
+    ) -> List[List[float]]:
         """
         Create embeddings for multiple texts in parallel
         
@@ -135,27 +147,26 @@ class EmbeddingService:
             max_concurrent: Maximum number of concurrent requests
             
         Returns:
-            List of embedding vectors (None for failed embeddings)
+            List of embedding vectors
+            
+        Raises:
+            ServiceUnavailableException: If any embedding fails
         """
         semaphore = asyncio.Semaphore(max_concurrent)
         
-        async def create_with_semaphore(text: str) -> Optional[List[float]]:
+        async def create_with_semaphore(text: str) -> List[float]:
             async with semaphore:
-                return await self.create_embedding(text)
+                return await self.create_embedding(text)  # Will raise if fails
         
         tasks = [create_with_semaphore(text) for text in texts]
-        embeddings = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Convert exceptions to None
-        result = []
-        for emb in embeddings:
-            if isinstance(emb, Exception):
-                logger.error(f"Error in parallel embedding: {emb}")
-                result.append(None)
-            else:
-                result.append(emb)
-        
-        return result
+        try:
+            embeddings = await asyncio.gather(*tasks)
+            return embeddings
+        except Exception as e:
+            error_msg = f"Error in parallel embedding: {str(e)}"
+            logger.error(error_msg)
+            raise ServiceUnavailableException(error_msg)
     
     async def get_embedding_dimension(self) -> int:
         """Get the dimension of the embeddings for the current model"""

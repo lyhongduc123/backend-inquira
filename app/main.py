@@ -53,6 +53,7 @@ app.add_middleware(
 async def lifespan(app: FastAPI):
     # Initialize database tables on startup
     await init_db()
+    yield
 
 # Exception handlers
 @app.exception_handler(BaseApiException)
@@ -101,8 +102,6 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         ).model_dump(mode='json')
     )
 
-
-    yield
 
 app.router.lifespan_context = lifespan
 

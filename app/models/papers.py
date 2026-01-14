@@ -1,9 +1,17 @@
 
+from __future__ import annotations
+from typing import TYPE_CHECKING
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, Float, ARRAY, Date, ForeignKey, func
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, Float, ARRAY, Date, ForeignKey, func, Index
 from sqlalchemy.dialects.postgresql import JSONB
 from pgvector.sqlalchemy import Vector
 from app.models.base import DatabaseBase as Base
+
+if TYPE_CHECKING:
+    from app.models.authors import DBAuthorPaper
+    from app.models.citations import DBCitation
+    from app.models.messages import DBMessage
+    from app.models.message_papers import DBMessagePaper
 
 
 
@@ -14,7 +22,11 @@ class DBPaper(Base):
     paper_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     
     title: Mapped[str] = mapped_column(Text, nullable=False)
-    authors: Mapped[dict] = mapped_column(JSONB)
+    
+    # DEPRECATED: Keep for backward compatibility during migration
+    # Use paper_authors relationship instead
+    authors: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    
     abstract: Mapped[str] = mapped_column(Text, nullable=False)
     publication_date: Mapped[Date] = mapped_column(Date, nullable=True)
     venue: Mapped[str] = mapped_column(String, nullable=True)
@@ -46,16 +58,26 @@ class DBPaper(Base):
     
     # Citation quality metrics (OpenAlex)
     citation_percentile: Mapped[dict] = mapped_column(JSONB, nullable=True)  # Percentile rankings
-    fwci: Mapped[float] = mapped_column(Float, nullable=True)  # Field-weighted citation impact
+    fwci: Mapped[float] = mapped_column(Float, nullable=True, index=True)  # Field-weighted citation impact
+    
+    # Trust-related computed scores
+    author_trust_score: Mapped[float] = mapped_column(Float, nullable=True, index=True)  # Avg author reputation
+    institutional_trust_score: Mapped[float] = mapped_column(Float, nullable=True)  # Avg institution reputation
+    network_diversity_score: Mapped[float] = mapped_column(Float, nullable=True)  # Cross-institution collaboration
     
     # Paper quality indicators
     is_retracted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     language: Mapped[str] = mapped_column(String(10), nullable=True)  # ISO language code
     
-    # Bibliographic information
-    biblio: Mapped[dict] = mapped_column(JSONB, nullable=True)  # Volume, issue, pages
-    primary_location: Mapped[dict] = mapped_column(JSONB, nullable=True)  # Primary publication venue details
-    locations: Mapped[list] = mapped_column(JSONB, nullable=True)  # All publication locations
+    # Bibliographic informationcomputed from relationships)
+    # DEPRECATED: Computed from paper_authors relationship
+    corresponding_author_ids: Mapped[list] = mapped_column(ARRAY(String), nullable=True)
+    institutions_distinct_count: Mapped[int] = mapped_column(Integer, nullable=True)  # Number of unique institutions
+    countries_distinct_count: Mapped[int] = mapped_column(Integer, nullable=True)  # Number of unique countries
+    
+    # Collaboration quality
+    author_count: Mapped[int] = mapped_column(Integer, nullable=True)
+    is_single_author: Mapped[bool] = mapped_column(Boolean, default=False)
     
     # Author collaboration metadata (for author reputation scoring)
     corresponding_author_ids: Mapped[list] = mapped_column(ARRAY(String), nullable=True)
@@ -72,13 +94,32 @@ class DBPaper(Base):
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     last_accessed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    # Relationships
-    chunks: Mapped[list] = relationship(
-        "DBPaperChunk", back_populates="paper", cascade="all, delete-orphan"
+    # Author relationships (NEW: Trust-focused)
+    paper_authors: Mapped[list["DBAuthorPaper"]] = relationship(
+        "DBAuthorPaper",
+        back_populates="paper",
+        cascade="all, delete-orphan"
     )
+    
+    # Citation relationships (NEW: Structured citations)
+    citations_made: Mapped[list["DBCitation"]] = relationship(
+        "DBCitation",
+        foreign_keys="[DBCitation.citing_paper_id]",
+        back_populates="citing_paper",
+        cascade="all, delete-orphan"
+    )
+    citations_received: Mapped[list["DBCitation"]] = relationship(
+        "DBCitation",
+        foreign_keys="[DBCitation.cited_paper_id]",
+        back_populates="cited_paper",
+        cascade="all, delete-orphan"
+    )
+    
+    # DEPRECATED: Old citation mapping (keep for migration)
     citations: Mapped[list] = relationship(
         "DBCitationMap", back_populates="paper", cascade="all, delete-orphan"
     )
+    
     message_papers: Mapped[list] = relationship(
         "DBMessagePaper",
         back_populates="paper",
@@ -88,6 +129,12 @@ class DBPaper(Base):
         "DBMessage",
         secondary="message_papers",
         back_populates="papers"
+    )
+    
+    __table_args__ = (
+        Index('idx_paper_trust', 'author_trust_score', 'institutional_trust_score'),
+        Index('idx_paper_quality', 'fwci', 'citation_count'),
+        Index('idx_paper_status', 'is_retracted', 'is_open_access'),
     )
 
 

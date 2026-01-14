@@ -1,13 +1,13 @@
 import re
 import tiktoken
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
 
 
 class TextChunker:
-    """Chunk text into smaller pieces for embedding"""
+    """Chunk text into smaller pieces for embedding with intelligent structure-aware chunking"""
     
     def __init__(
         self,
@@ -33,6 +33,93 @@ class TextChunker:
     def count_tokens(self, text: str) -> int:
         """Count tokens in text"""
         return len(self.encoding.encode(text))
+    
+    def chunk_from_structure(
+        self,
+        doc_dict: Dict[str, Any],
+        paper_id: str
+    ) -> List[Tuple[str, int, Optional[str]]]:
+        """
+        Chunk document based on its structure from docling.
+        This is the preferred method for new code.
+        
+        Args:
+            doc_dict: Structured document dictionary from docling
+            paper_id: Paper ID for logging
+            
+        Returns:
+            List of (chunk_text, token_count, section_title) tuples
+        """
+        chunks = []
+        
+        # Extract main content - docling structure typically has these keys
+        main_text = doc_dict.get("main-text", [])
+        
+        # Group content by sections intelligently
+        current_section_title = None
+        current_section_content = []
+        current_tokens = 0
+        
+        for item in main_text:
+            if not isinstance(item, dict):
+                continue
+                
+            item_type = item.get("type", "")
+            item_text = item.get("text", "")
+            
+            # Detect section headings
+            if item_type in ["heading", "title", "section-header"]:
+                # Save previous section if it exists and meets minimum size
+                if current_section_content and current_tokens >= self.min_tokens:
+                    chunk_text = "\n".join(current_section_content)
+                    chunks.append((chunk_text, current_tokens, current_section_title))
+                    current_section_content = []
+                    current_tokens = 0
+                
+                # Start new section
+                current_section_title = item_text
+                continue
+            
+            # Add content to current section
+            if item_text:
+                item_tokens = self.count_tokens(item_text)
+                
+                # If adding this would exceed max, save current chunk
+                if current_tokens + item_tokens > self.max_tokens and current_section_content:
+                    chunk_text = "\n".join(current_section_content)
+                    chunks.append((chunk_text, current_tokens, current_section_title))
+                    
+                    # Keep last paragraph for overlap
+                    if current_section_content:
+                        overlap_text = current_section_content[-1]
+                        overlap_tokens = self.count_tokens(overlap_text)
+                        current_section_content = [overlap_text] if overlap_tokens <= self.overlap_tokens else []
+                        current_tokens = overlap_tokens if overlap_tokens <= self.overlap_tokens else 0
+                    else:
+                        current_section_content = []
+                        current_tokens = 0
+                
+                current_section_content.append(item_text)
+                current_tokens += item_tokens
+        
+        # Add final section
+        if current_section_content and current_tokens >= self.min_tokens:
+            chunk_text = "\n".join(current_section_content)
+            chunks.append((chunk_text, current_tokens, current_section_title))
+        elif current_section_content and chunks:
+            # Append to last chunk if too small
+            last_chunk_text, last_tokens, last_title = chunks[-1]
+            additional_text = "\n".join(current_section_content)
+            combined_text = last_chunk_text + "\n" + additional_text
+            combined_tokens = self.count_tokens(combined_text)
+            chunks[-1] = (combined_text, combined_tokens, last_title or current_section_title)
+        elif current_section_content:
+            # If only one small chunk, keep it anyway
+            chunk_text = "\n".join(current_section_content)
+            chunks.append((chunk_text, current_tokens, current_section_title))
+        
+        logger.info(f"Chunked paper {paper_id} into {len(chunks)} structure-aware chunks")
+        return chunks
     
     def split_into_sentences(self, text: str) -> List[str]:
         """Split text into sentences"""
@@ -75,15 +162,17 @@ class TextChunker:
     
     def _split_into_sections(self, text: str) -> List[Tuple[str, Optional[str]]]:
         """
-        Split text into sections based on headings
+        Split text into sections based on headings.
+        Enhanced to work with markdown headings from docling.
         
         Returns:
             List of (section_text, section_title) tuples
         """
         sections: List[Tuple[str, Optional[str]]] = []
         
-        # Pattern to match section headings (e.g., "1. Introduction", "Abstract", etc.)
-        heading_pattern = r'^(?:\d+\.?\s+)?([A-Z][A-Za-z\s]+)$'
+        # Pattern to match both markdown headings and traditional section headings
+        markdown_heading = r'^#{1,3}\s+(.+)$'
+        traditional_heading = r'^(?:\d+\.?\s+)?([A-Z][A-Za-z\s]+)$'
         
         lines = text.split('\n')
         current_section = []
@@ -92,8 +181,21 @@ class TextChunker:
         for line in lines:
             stripped = line.strip()
             
-            # Check if line is a heading
-            if len(stripped) < 100 and re.match(heading_pattern, stripped):
+            # Check for markdown heading (from docling)
+            md_match = re.match(markdown_heading, stripped)
+            if md_match:
+                # Save previous section
+                if current_section:
+                    section_text = '\n'.join(current_section)
+                    sections.append((section_text, current_title))
+                
+                # Start new section
+                current_title = md_match.group(1).strip()
+                current_section = []
+                continue
+            
+            # Check for traditional heading
+            if len(stripped) < 100 and re.match(traditional_heading, stripped):
                 # Save previous section
                 if current_section:
                     section_text = '\n'.join(current_section)
