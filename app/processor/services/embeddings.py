@@ -10,21 +10,33 @@ logger = create_logger(__name__)
 
 
 class EmbeddingService:
-    """Service for generating embeddings using OpenAI or Ollama"""
+    """Service for generating embeddings using OpenAI or Ollama (Singleton)"""
+    
+    _instance: Optional['EmbeddingService'] = None
+    _initialized: bool = False
+    
+    def __new__(cls, provider: Optional[str] = None):
+        """Singleton pattern: always return the same instance"""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
     
     def __init__(self, provider: Optional[str] = None):
         """
-        Initialize embedding service
+        Initialize embedding service (only once due to singleton)
         
         Args:
             provider: "openai" or "ollama". If None, uses settings.EMBEDDING_PROVIDER
         """
+        if self.__class__._initialized:
+            return
+            
         self.provider = provider or getattr(settings, 'EMBEDDING_PROVIDER', 'openai').lower()
         
         if self.provider == "ollama":
             self.ollama_client = ollama.Client(host=settings.OLLAMA_BASE_URL)
             self.openai_client = None
-            self.model = getattr(settings, 'OLLAMA_EMBEDDING_MODEL', 'nomic-embed-text')
+            self.model = settings.OLLAMA_EMBEDDING_MODEL
             self.dimension = 768 
             logger.info(f"Initialized Ollama embedding service with model: {self.model}")
         else:
@@ -33,6 +45,8 @@ class EmbeddingService:
             self.model = "text-embedding-ada-002"
             self.dimension = 1536
             logger.info(f"Initialized OpenAI embedding service with model: {self.model}")
+        
+        self.__class__._initialized = True
     
     async def create_embedding(self, text: str) -> List[float]:
         """
@@ -171,3 +185,22 @@ class EmbeddingService:
     async def get_embedding_dimension(self) -> int:
         """Get the dimension of the embeddings for the current model"""
         return self.dimension
+
+
+_embedding_service_instance: Optional[EmbeddingService] = None
+
+def get_embedding_service(provider: Optional[str] = None) -> EmbeddingService:
+    """
+    Get the singleton EmbeddingService instance.
+    Recommended over direct instantiation.
+    
+    Args:
+        provider: Optional provider override (only used on first call)
+        
+    Returns:
+        EmbeddingService singleton instance
+    """
+    global _embedding_service_instance
+    if _embedding_service_instance is None:
+        _embedding_service_instance = EmbeddingService(provider)
+    return _embedding_service_instance

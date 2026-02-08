@@ -1,56 +1,53 @@
 """
-Abstract base classes for paper retrieval providers.
+Abstract base class for paper retrieval providers.
 
-This module defines the interfaces that all retrieval providers must implement.
-Supports both simple (metadata-only) and enhanced (full-text) retrieval.
+Defines the interface that all retrieval providers must implement.
+Simplified to support only metadata retrieval and normalization.
 """
+
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 from enum import Enum
 from dataclasses import dataclass
-from app.modules.httpclient import HTTPClient
-from app.retriever.provider.base_schemas import NormalizedResult
 
-
-class RetrievalMode(str, Enum):
-    """Retrieval mode for providers"""
-    SIMPLE = "simple"  # Metadata only
-    ENHANCED = "enhanced"  # With full-text and caching
-    FULL = "full"  # Complete pipeline (chunking, embedding, etc.)
-
+from app.retriever.schemas import NormalizedResult
 
 @dataclass
 class RetrievalConfig:
     """Configuration for retrieval providers"""
-    mode: RetrievalMode = RetrievalMode.SIMPLE
-    enable_caching: bool = False
-    enable_full_text: bool = False
-    max_results: int = 10
+    max_results: int = 100
     timeout: float = 30.0
 
 
 class BaseRetrievalProvider(ABC):
     """
     Abstract base class for all retrieval providers.
-    
-    All providers must implement:
-    - search_papers(): Retrieve paper metadata
-    - get_paper_details() (optional): Get full details for specific paper
-    - supports_full_text(): Whether provider supports full-text retrieval
+
+    Providers must implement:
+    - search_papers(): Retrieve raw paper metadata from API
+    - normalize_result(): Convert provider-specific format to NormalizedResult
+
+    The base class provides:
+    - search_and_normalize(): Convenience method combining search + normalization
+    - Configuration management
     """
 
-    def __init__(self, api_url: str, config: Optional[RetrievalConfig] = None):
+    def __init__(
+        self,
+        api_url: str,
+        config: Optional[RetrievalConfig] = None,
+    ):
         """
         Initialize retrieval provider.
-        
+
         Args:
             api_url: Base URL for the provider's API
+            api_key: Optional API key for authentication
             config: Optional configuration for retrieval behavior
         """
         self.api_url = api_url
         self.config = config or RetrievalConfig()
-        self.client = HTTPClient()
-        self._name = self.__class__.__name__.replace("Provider", "").replace("Retrieval", "")
+        self._name = self.__class__.__name__.replace("Provider", "")
 
     @property
     def name(self) -> str:
@@ -62,81 +59,42 @@ class BaseRetrievalProvider(ABC):
         self,
         query: str,
         limit: Optional[int] = None,
-        offset: int = 0
+        offset: int = 0,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for papers using the provider's API.
-        
+
         Args:
             query: Search query string
             limit: Maximum number of results (uses config default if None)
             offset: Offset for pagination
-            
+            filters: Optional filters (yearRange, category, openAccessOnly, etc.)
+
         Returns:
-            List of paper metadata dictionaries
-            
+            List of raw paper metadata dictionaries from the provider
+
         Raises:
             NotImplementedError: Must be implemented by subclass
         """
         raise NotImplementedError(f"{self.name} must implement search_papers()")
 
-    async def get_paper_details(self, paper_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get detailed information for a specific paper.
-        
-        Optional method - providers can override to support detailed retrieval.
-        
-        Args:
-            paper_id: Unique identifier for the paper
-            
-        Returns:
-            Paper details dictionary, or None if not supported/found
-        """
-        return None
-
-    def supports_full_text(self) -> bool:
-        """
-        Check if provider supports full-text retrieval.
-        
-        Returns:
-            True if provider can retrieve full paper text
-        """
-        return False
-
-    def supports_caching(self) -> bool:
-        """
-        Check if provider supports database caching.
-        
-        Returns:
-            True if provider can cache results
-        """
-        return False
-
     @abstractmethod
     def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedResult:
         """
         Normalize provider-specific result to standard format.
-        
-        Standard format:
-        {
-            "id": str,              # Unique paper ID
-            "title": str,           # Paper title
-            "abstract": str,        # Abstract/summary
-            "authors": List[Dict],  # [{"name": str, "id": str}]
-            "year": int,            # Publication year
-            "venue": str,           # Publication venue
-            "url": str,             # Paper URL
-            "pdfUrl": str,         # PDF URL (if available)
-            "citationCount": int,  # Citation count (if available)
-            "externalIds": Dict,   # {"DOI": str, "ArXiv": str, ...}
-            "source": str,          # Provider name
-        }
-        
+
+        Converts provider's raw API response into a standardized NormalizedResult
+        schema that can be used across all providers.
+
         Args:
             raw_result: Provider-specific result dictionary
-            
+
         Returns:
-            Normalized result dictionary
+            NormalizedResult Pydantic model with standardized fields
+
+        Raises:
+            NotImplementedError: Must be implemented by subclass
         """
         raise NotImplementedError(f"{self.name} must implement normalize_result()")
 
@@ -144,103 +102,66 @@ class BaseRetrievalProvider(ABC):
         self,
         query: str,
         limit: Optional[int] = None,
-        offset: int = 0
+        offset: int = 0,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[NormalizedResult]:
         """
         Search papers and normalize results to standard format.
-        
+
+        Convenience method that combines search_papers() and normalize_result().
+
         Args:
             query: Search query
             limit: Maximum results
             offset: Pagination offset
-            
+            filters: Optional filters (yearRange, category, openAccessOnly, etc.)
+
         Returns:
-            List of normalized paper dictionaries
+            List of normalized paper results
         """
-        results = await self.search_papers(query, limit, offset)
-        normalized = [self.normalize_result(r) for r in results]
+        raw_results = await self.search_papers(query, limit, offset, filters=filters)
+        normalized = [self.normalize_result(r) for r in raw_results]
         return normalized
 
+    async def get_paper_details(self, paper_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get detailed information for a specific paper.
 
-class BaseFullTextProvider(BaseRetrievalProvider):
+        Optional method - providers can override to support detailed retrieval by ID.
+
+        Args:
+            paper_id: Unique identifier for the paper
+
+        Returns:
+            Paper details dictionary, or None if not supported/found
+        """
+        return None
+
+class RetrievalProvider(Protocol):
     """
-    Abstract base for providers that support full-text retrieval.
-    
-    Extends BaseRetrievalProvider with full-text methods.
+    Protocol for retrieval providers.
     """
 
-    def supports_full_text(self) -> bool:
-        """Override to indicate full-text support"""
-        return True
-
-    @abstractmethod
-    async def retrieve_full_text(
+    async def search_papers(
         self,
-        paper_id: str,
-        pdf_url: Optional[str] = None
-    ) -> Optional[str]:
-        """
-        Retrieve full text of a paper.
-        
-        Args:
-            paper_id: Unique paper identifier
-            pdf_url: Optional direct PDF URL
-            
-        Returns:
-            Full text string, or None if retrieval failed
-        """
-        raise NotImplementedError(f"{self.name} must implement retrieve_full_text()")
+        query: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        ...
 
-    async def is_open_access(self, paper_id: str) -> bool:
-        """
-        Check if paper is open access.
-        
-        Args:
-            paper_id: Paper identifier
-            
-        Returns:
-            True if paper is openly accessible
-        """
-        return False
-
-
-class BaseCachedProvider(BaseFullTextProvider):
-    """
-    Abstract base for providers with database caching support.
+    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedResult:
+        ...
     
-    Adds caching capabilities to full-text providers.
-    """
-
-    def __init__(
+    async def get_paper_details(self, paper_id: str) -> Optional[Dict[str, Any]]:
+        ...
+        
+    async def search_and_normalize(
         self,
-        api_url: str,
-        config: Optional[RetrievalConfig] = None,
-        db_session=None
-    ):
-        """
-        Initialize cached provider.
-        
-        Args:
-            api_url: API base URL
-            config: Retrieval configuration
-            db_session: Optional database session for caching
-        """
-        super().__init__(api_url, config)
-        self.db_session = db_session
-
-    def supports_caching(self) -> bool:
-        """Override to indicate caching support"""
-        return True
-
-    @abstractmethod
-    async def get_from_cache(self, query: str) -> Optional[List[NormalizedResult]]:
-        """
-        Retrieve results from cache.
-        
-        Args:
-            query: Search query
-            
-        Returns:
-            Cached results, or None if not in cache
-        """
-        raise NotImplementedError(f"{self.name} must implement get_from_cache()")
+        query: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[NormalizedResult]:
+        ...

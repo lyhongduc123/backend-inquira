@@ -14,7 +14,7 @@ from app.conversations.schemas import (
 )
 from app.models.conversations import DBConversation
 from app.models.messages import DBMessage
-from app.retriever.utils import batch_dbpaper_to_papers, batch_paper_to_dicts
+from app.processor.services import transformer
 
 from app.extensions.logger import create_logger
 
@@ -121,7 +121,9 @@ class ConversationService:
         if paper_ids:
             logger.debug(f"Linking {len(paper_ids)} papers to message {message.id}")
             if message.role != "assistant":
-                logger.warning("Linking papers to a non-assistant message, this may be unintended - Skipping linking.")
+                logger.warning(
+                    "Linking papers to a non-assistant message, this may be unintended - Skipping linking."
+                )
             else:
                 await self.repo.link_papers_to_message(message.id, paper_ids)
 
@@ -133,18 +135,25 @@ class ConversationService:
             )
 
     def _to_detail(
-        self, db_conversation: DBConversation, messages: Optional[List[DBMessage]] = None
+        self,
+        db_conversation: DBConversation,
+        messages: Optional[List[DBMessage]] = None,
     ) -> ConversationDetail:
         """Convert DB model to detail schema"""
         logger.debug(
             f"Converting conversation to detail",
-            extra={"conversation_id": db_conversation.conversation_id, "has_messages": messages is not None}
+            extra={
+                "conversation_id": db_conversation.conversation_id,
+                "has_messages": messages is not None,
+            },
         )
         message_list = []
         if messages:
             message_list = []
             for msg in messages:
-                sources = batch_paper_to_dicts(batch_dbpaper_to_papers(msg.papers))
+                sources = transformer.batch_paper_to_dicts(
+                    transformer.batch_dbpaper_to_papers(msg.papers)
+                )
                 msg_dict = {
                     "id": msg.id,
                     "role": msg.role,
@@ -153,7 +162,6 @@ class ConversationService:
                     "created_at": msg.created_at,
                 }
                 message_list.append(msg_dict)
-                
 
         return ConversationDetail(
             id=db_conversation.conversation_id,

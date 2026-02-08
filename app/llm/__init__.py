@@ -1,3 +1,4 @@
+from typing import Optional
 from .openai_client import OpenaiClient, ModelType
 from .ollama_client import OllamaClient
 from .provider import LLMProvider
@@ -6,6 +7,7 @@ from .summarizer import Summarizer
 from .analyzer import Analyzer
 from .reader import Reader
 from .services import LLMService
+from .configs import PromptConfig, PromptPresets
 from .schemas import (
     # Base Models
     BaseResponse,
@@ -68,6 +70,7 @@ __all__ = [
     "Analyzer", 
     "Reader", 
     "LLMService",
+    "get_llm_service",  # Lazy getter
     
     # Base Models
     "BaseResponse",
@@ -109,6 +112,10 @@ __all__ = [
     "LLMConfiguration",
     "UsageStatistics",
     
+    # Prompt Configuration
+    "PromptConfig",
+    "PromptPresets",
+    
     # Utilities
     "ResponseConverter",
     "ResponseBuilder",
@@ -120,4 +127,15 @@ __all__ = [
     "create_summary_response",
 ]
 
-llm_service = LLMService()
+# Lazy initialization to avoid slow startup
+_llm_service: Optional["LLMService"] = None
+
+def get_llm_service() -> "LLMService":
+    """Get or create the singleton LLM service instance (lazy initialization)"""
+    global _llm_service
+    if _llm_service is None:
+        _llm_service = LLMService()
+    return _llm_service
+
+# For backward compatibility - returns the service when called
+llm_service = get_llm_service()

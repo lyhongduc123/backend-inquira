@@ -6,135 +6,123 @@ import asyncio
 import json
 from typing import AsyncGenerator, Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.llm import llm_service
+from app.llm import get_llm_service
 from app.chat.schemas import ChatMessageRequest
 from app.extensions.logger import create_logger
-from app.extensions.stream import stream_event, get_stream_response_content
+from app.extensions import (
+    stream_event,
+    get_stream_response_content,
+    get_stream_response_reasoning,
+    stream_token,
+    stream_paper_metadata,
+    stream_done,
+    StreamEventType,
+)
 from app.extensions.prompt_filter import is_gibberish
 from app.rag_pipeline.pipeline import RAGPipeline
 from app.rag_pipeline.schemas import RAGResult
 from app.conversations.service import ConversationService
 from app.chat.tool_mixin import ToolAwareChatMixin
 
-from app.retriever.utils import batch_paper_to_dicts
+from app.processor.services import transformer
+from app.extensions.citation_extractor import CitationExtractor
 
 logger = create_logger(__name__)
-
-# Default user ID until auth is implemented
-DEFAULT_USER_ID = 1
-
-
-class ProcessingPhase:
-    """Enumeration of processing phases for better tracking"""
-    INITIALIZATION = "initialization"
-    QUESTION_ANALYSIS = "question_analysis"
-    PAPER_RETRIEVAL = "paper_retrieval"
-    PAPER_PROCESSING = "paper_processing"
-    CONTEXT_BUILDING = "context_building"
-    RESPONSE_GENERATION = "response_generation"
-    TOOL_EXECUTION = "tool_execution"
-    FINALIZATION = "finalization"
 
 
 class ChatService(ToolAwareChatMixin):
     """Service class for handling chat interactions with tool support"""
 
-    def __init__(self, db_session: AsyncSession):
-        """Initialize chat service with LLM and retriever services"""
-        self.llm_service = llm_service
-        self.rag_pipeline = RAGPipeline(db_session=db_session)
+    def __init__(
+        self,
+        db_session: AsyncSession,
+        rag_pipeline: Optional[RAGPipeline] = None,
+        llm_service=None,
+    ):
+        """Initialize chat service with dependency injection.
+
+        Args:
+            db_session: Required database session
+            rag_pipeline: Optional RAG pipeline (created if not provided)
+            llm_service: Optional LLM service (singleton if not provided)
+        """
         self.db_session = db_session
-
-    async def _emit_phase(self, phase: str, message: str, progress: int) -> AsyncGenerator[str, None]:
-        """Emit a processing phase event"""
-        async for evt in stream_event(
-            name="phase",
-            data={"phase": phase, "message": message, "progress": progress}
-        ):
-            yield evt
-
-    async def _emit_thought(self, thought_type: str, content: str, metadata: Dict[str, Any]) -> AsyncGenerator[str, None]:
-        """Emit a thought event"""
-        async for evt in stream_event(
-            name="thought",
-            data={"type": thought_type, "content": content, "metadata": metadata or {}}
-        ):
-            yield evt
+        self.llm_service = llm_service or get_llm_service()
+        self.rag_pipeline = rag_pipeline or RAGPipeline(db_session=db_session)
 
     async def _handle_gibberish_input(
         self,
         conversation_service: ConversationService,
         conversation_id: str,
         user_id: int,
-        query: str
+        query: str,
     ) -> AsyncGenerator[str, None]:
         """Handle gibberish input with helpful introduction message"""
         logger.info(f"Gibberish detected: {query}")
-        
-        # Save user message
+
         try:
             await conversation_service.add_message_to_conversation(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 message_text=query,
                 role="user",
-                auto_title=False
+                auto_title=False,
             )
         except Exception as e:
             logger.error(f"Failed to save user message: {e}")
-        
-        # Generate introduction message
-        intro_message = """Hello! I'm exegent, an academic research assistant.
 
-I'm here to help you explore and understand academic research papers! I can:
+        intro_parts = [
+            "Hello! I'm exegent, an academic research assistant.\n\n",
+            "I'm here to help you explore and understand academic research papers! I can:\n\n",
+            " **Search** through millions of research papers across all disciplines  \n",
+            " **Analyze** and summarize complex scientific papers  \n",
+            " **Find** relevant citations and evidence for your questions  \n",
+            " **Compare** different research findings and methodologies  \n\n",
+            "**How to get started:**\n\n",
+            "Ask me clear research questions like:\n",
+            "- \"What are the latest findings on climate change?\"\n",
+            "- \"How does machine learning improve medical diagnosis?\"\n",
+            "- \"What are the ethical implications of AI?\"\n\n",
+            "**Tips for better results:**\n",
+            "- Be specific about what you want to know\n",
+            "- Use proper words and complete sentences\n",
+            "- Ask about scientific topics, research areas, or academic questions\n\n",
+            "Try asking me a research question, and I'll find and analyze relevant papers for you!",
+        ]
 
- **Search** through millions of research papers across all disciplines  
- **Analyze** and summarize complex scientific papers  
- **Find** relevant citations and evidence for your questions  
- **Compare** different research findings and methodologies  
-
-**How to get started:**
-
-Ask me clear research questions like:
-- "What are the latest findings on climate change?"
-- "How does machine learning improve medical diagnosis?"
-- "What are the ethical implications of AI?"
-
-**Tips for better results:**
-- Be specific about what you want to know
-- Use proper words and complete sentences
-- Ask about scientific topics, research areas, or academic questions
-
-Try asking me a research question, and I'll find and analyze relevant papers for you!"""
-
-        # Stream introduction
-        async for evt in stream_event(name="chunk", data=intro_message):
+        intro_message = "".join(intro_parts)
+        async for evt in stream_event(name="chunk", data={"text": intro_message}):
             yield evt
-        
-        # Save assistant response
+
         try:
             await conversation_service.add_message_to_conversation(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 message_text=intro_message,
                 role="assistant",
-                auto_title=False
+                auto_title=False,
             )
         except Exception as e:
             logger.error(f"Failed to save assistant message: {e}")
-        
+
         async for evt in stream_event(name="done", data=None):
             yield evt
 
     async def _handle_no_results(self) -> AsyncGenerator[str, None]:
         """Handle when no papers are found"""
-        async for evt in self._emit_thought(
-            "retrieval_failure",
-            "No relevant papers found in academic databases",
-            {"reason": "no_results", "suggestion": "try_different_query"}
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "retrieval_failure",
+                "content": "No relevant papers found in academic databases",
+                "metadata": {
+                    "reason": "no_results",
+                    "suggestion": "try_different_query",
+                },
+            },
         ):
             yield evt
-        
+
         error_message = """I couldn't find any relevant research papers for your question. This could be because:
 
 1. The topic might be too specific or recent
@@ -142,7 +130,7 @@ Try asking me a research question, and I'll find and analyze relevant papers for
 3. The papers may be behind paywalls
 
 Please try asking a different question or rephrase your current one."""
-        
+
         async for evt in stream_event(name="chunk", data=error_message):
             yield evt
         async for evt in stream_event(name="done", data=None):
@@ -153,40 +141,77 @@ Please try asking a different question or rephrase your current one."""
         query: str,
         max_subtopics: int = 3,
         per_subtopic_limit: int = 10,
-        top_chunks: int = 20
-    ) -> AsyncGenerator[tuple[Optional[RAGResult] | str | Dict[str, Any], List[str]], None]:
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[tuple[str | RAGResult | None, List[str]], None]:
         """Execute RAG pipeline and yield events"""
-        results = None
-        subtopics_found = []
-        
+        results: Optional[RAGResult] = None
+        subtopics_found: List[str] = []
+
         async for event in self.rag_pipeline.run(
-            query, max_subtopics=max_subtopics, per_subtopic_limit=per_subtopic_limit, top_chunks=top_chunks
+            query,
+            max_subtopics=max_subtopics,
+            per_subtopic_limit=per_subtopic_limit,
+            filters=filters,
         ):
             if event.type == "step":
                 async for evt in stream_event(name="step", data=event.data):
                     yield evt, subtopics_found
+            elif event.type == "search_queries":
+                # Handle new search_queries event
+                queries = event.data.get("queries", [])  # type: ignore
+                subtopics_found = queries  # Maintain backward compatibility
+                async for evt in stream_event(name="search_queries", data=event.data):
+                    yield evt, subtopics_found
+
+                # Emit thought about query optimization
+                async for evt in stream_event(
+                    name="thought",
+                    data={
+                        "type": "query_optimization",
+                        "content": f"Generated {len(queries)} optimized search queries to retrieve comprehensive and relevant academic papers",
+                        "metadata": {
+                            "search_queries": queries,
+                            "strategy": "multi_query_search",
+                        },
+                    },
+                ):
+                    yield evt, subtopics_found
             elif event.type == "subtopics":
-                subtopics_found = event.data.get("subtopics", []) # type: ignore
+                # Backward compatibility for old event type
+                subtopics_found = event.data.get("subtopics", [])  # type: ignore
                 async for evt in stream_event(name="subtopics", data=event.data):
                     yield evt, subtopics_found
-                
+
                 # Emit thought about subtopic breakdown
-                async for evt in self._emit_thought(
-                    "query_decomposition",
-                    f"Breaking down into {len(subtopics_found)} focused research areas to ensure comprehensive coverage",
-                    {"subtopics": subtopics_found, "strategy": "multi-angle_search"}
+                async for evt in stream_event(
+                    name="thought",
+                    data={
+                        "type": "query_decomposition",
+                        "content": f"Breaking down into {len(subtopics_found)} focused research areas to ensure comprehensive coverage",
+                        "metadata": {
+                            "subtopics": subtopics_found,
+                            "strategy": "multi-angle_search",
+                        },
+                    },
                 ):
                     yield evt, subtopics_found
             elif event.type == "result":
-                results = event.data
-        
+                results = event.data  # type: ignore
+            else:
+                async for ent in stream_event(
+                    name=event.type, data=event.data  
+                ):
+                    yield ent, subtopics_found
+
         yield results, subtopics_found
 
-    def _build_context_from_results(self, results: RAGResult) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def _build_context_from_results(
+        self, results: RAGResult
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Build context from RAG results"""
         context = []
         chunk_papers = {}
-        
+
         # Map chunks to papers
         for chunk in results.chunks:
             chunk_paper_id = str(chunk.paper_id)
@@ -197,64 +222,87 @@ Please try asking a different question or rephrase your current one."""
                 )
                 if paper:
                     chunk_papers[chunk_paper_id] = paper
-        
+
         # Build context entries
         for chunk in results.chunks:
             chunk_paper_id = str(chunk.paper_id)
             paper = chunk_papers.get(chunk_paper_id)
             if paper:
-                context.append({
-                    "title": paper.title,
-                    "authors": paper.authors or [],
-                    "abstract": paper.abstract,
-                    "year": paper.publication_date.year if paper.publication_date else None,
-                    "url": paper.url,
-                    "pdf_url": paper.pdf_url,
-                    "citationCount": paper.citation_count or 0,
-                    "paper_id": chunk_paper_id,
-                    "chunk_text": chunk.text,
-                    "section": chunk.section_title or "Unknown Section",
-                })
-        
+                context.append(
+                    {
+                        "title": paper.title,
+                        "authors": paper.authors or [],
+                        "abstract": paper.abstract,
+                        "year": (
+                            paper.publication_date.year
+                            if paper.publication_date
+                            else None
+                        ),
+                        "url": paper.url,
+                        "pdf_url": paper.pdf_url,
+                        "citationCount": paper.citation_count or 0,
+                        "paper_id": chunk_paper_id,
+                        "chunk_text": chunk.text,
+                        "section": chunk.section_title or "Unknown Section",
+                    }
+                )
+
         return context, chunk_papers
 
     async def _emit_analysis_events(
         self,
         results: RAGResult,
         context: List[Dict[str, Any]],
-        chunk_papers: Dict[str, Any]
+        chunk_papers: Dict[str, Any],
     ) -> AsyncGenerator[str, None]:
         """Emit analysis and sources events"""
         # Emit context analysis thought
-        async for evt in self._emit_thought(
-            "context_preparation",
-            f"Preparing {len(context)} contextual excerpts from papers, prioritizing sections most relevant to your question",
-            {
-                "context_pieces": len(context),
-                "unique_papers": len(chunk_papers),
-                "sections_identified": len([c for c in context if c.get("section") != "Unknown Section"])
-            }
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "context_preparation",
+                "content": f"Preparing {len(context)} contextual excerpts from papers, prioritizing sections most relevant to your question",
+                "metadata": {
+                    "context_pieces": len(context),
+                    "unique_papers": len(chunk_papers),
+                    "sections_identified": len(
+                        [c for c in context if c.get("section") != "Unknown Section"]
+                    ),
+                },
+            },
         ):
             yield evt
 
         # Emit sources
-        async for evt in stream_event(name="sources", data=batch_paper_to_dicts(results.papers)):
+        async for evt in stream_event(
+            name="sources", data=transformer.batch_paper_to_dicts(results.papers)
+        ):
             yield evt
 
         # Provide retrieval analysis
         citation_stats = {
-            "high_impact": len([p for p in results.papers if (p.citation_count or 0) > 100]),
-            "medium_impact": len([p for p in results.papers if 10 < (p.citation_count or 0) <= 100]),
-            "recent": len([p for p in results.papers if p.publication_date and p.publication_date.year >= 2020]),
+            "high_impact": len(
+                [p for p in results.papers if (p.citation_count or 0) > 100]
+            ),
+            "medium_impact": len(
+                [p for p in results.papers if 10 < (p.citation_count or 0) <= 100]
+            ),
+            "recent": len(
+                [
+                    p
+                    for p in results.papers
+                    if p.publication_date and p.publication_date.year >= 2020
+                ]
+            ),
         }
-        
+
         async for evt in stream_event(
             name="analysis",
             data={
                 "type": "source_quality",
                 "stats": citation_stats,
-                "message": f"Retrieved {citation_stats['high_impact']} highly-cited papers, {citation_stats['recent']} recent publications"
-            }
+                "message": f"Retrieved {citation_stats['high_impact']} highly-cited papers, {citation_stats['recent']} recent publications",
+            },
         ):
             yield evt
 
@@ -266,7 +314,7 @@ Please try asking a different question or rephrase your current one."""
         user_message: str,
         assistant_message: str,
         paper_ids: List[str],
-        auto_title_user: bool = True
+        auto_title_user: bool = True,
     ):
         """Save user and assistant messages to conversation"""
         try:
@@ -275,7 +323,7 @@ Please try asking a different question or rephrase your current one."""
                 user_id=user_id,
                 message_text=user_message,
                 role="user",
-                auto_title=auto_title_user
+                auto_title=auto_title_user,
             )
             logger.info(f"User message added to conversation {conversation_id}")
         except Exception as e:
@@ -297,7 +345,7 @@ Please try asking a different question or rephrase your current one."""
     async def stream_message(
         self,
         request: ChatMessageRequest,
-        user_id: Optional[int] = None,
+        user_id: int,
         db_session=None,
     ) -> AsyncGenerator[str, None]:
         """
@@ -337,18 +385,16 @@ Please try asking a different question or rephrase your current one."""
             yield "event: done\ndata: \n\n"
             return
 
-        # Phase 1: Initialization
-        async for evt in self._emit_phase(ProcessingPhase.INITIALIZATION, "Setting up conversation...", 10):
-            yield evt
-
-        user_id = user_id or DEFAULT_USER_ID
+        user_id = user_id
         conversation_service = ConversationService(db_session)
         conversation = await conversation_service.get_or_create_conversation(
-            user_id=user_id, conversation_id=request.conversation_id, title=request.query
+            user_id=user_id,
+            conversation_id=request.conversation_id,
+            title=request.query,
         )
         yield f"event: conversation\ndata: {json.dumps({'conversation_id': conversation.id})}\n\n"
 
-        # Check for gibberish input
+        # Check for gibberish input BEFORE emitting any phase events
         if is_gibberish(request.query):
             async for evt in self._handle_gibberish_input(
                 conversation_service, conversation.id, user_id, request.query
@@ -356,68 +402,55 @@ Please try asking a different question or rephrase your current one."""
                 yield evt
             return
 
-        # Phase 2: Question Analysis
-        async for evt in self._emit_phase(ProcessingPhase.QUESTION_ANALYSIS, "Analyzing your question...", 20):
-            yield evt
-
-        async for evt in self._emit_thought(
-            "question_understanding",
-            f"Understanding the core intent of: '{request.query}'",
-            {"query_length": len(request.query), "complexity": "analyzing"}
+        # Phase 1: Searching/Querying
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "searching",
+                "content": f"Searching academic databases for: '{request.query}'",
+                "metadata": {"query": request.query},
+            },
         ):
             yield evt
 
-        # Phase 3: Paper Retrieval
-        async for evt in self._emit_phase(ProcessingPhase.PAPER_RETRIEVAL, "Searching academic databases...", 30):
-            yield evt
-
-        results = None
+        results: Optional[RAGResult] = None
         async for result_or_evt, _ in self._execute_rag_pipeline(request.query):
             if isinstance(result_or_evt, str):
                 yield result_or_evt
-            else:
+            elif isinstance(result_or_evt, RAGResult):
                 results = result_or_evt
 
         if results is None:
             logger.error("RAG pipeline did not return any results")
-            error_message = "An error occurred while retrieving research papers. Please try again."
+            error_message = (
+                "An error occurred while retrieving research papers. Please try again."
+            )
             async for evt in stream_event(name="chunk", data=error_message):
                 yield evt
             async for evt in stream_event(name="done", data=None):
                 yield evt
             return
 
-        results = RAGResult(papers=results.papers, chunks=results.chunks)
-
         if len(results.papers) == 0:
             async for evt in self._handle_no_results():
                 yield evt
             return
 
-        # Phase 4: Paper Processing & Analysis
-        async for evt in self._emit_phase(
-            ProcessingPhase.PAPER_PROCESSING,
-            f"Processing {len(results.papers)} papers...",
-            50
-        ):
-            yield evt
-
-        async for evt in self._emit_thought(
-            "retrieval_success",
-            f"Found {len(results.papers)} relevant papers with {len(results.chunks)} high-quality text sections",
-            {
-                "total_papers": len(results.papers),
-                "total_chunks": len(results.chunks),
-                "avg_chunks_per_paper": len(results.chunks) / len(results.papers) if results.papers else 0
-            }
+        # Phase 2: Ranking/Filtering
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "ranking",
+                "content": f"Found {len(results.papers)} papers, filtering to {len(results.chunks)} most relevant sections",
+                "metadata": {
+                    "total_papers": len(results.papers),
+                    "total_chunks": len(results.chunks),
+                },
+            },
         ):
             yield evt
 
         logger.info(f"Found {len(results.chunks)} relevant chunks via vector search")
-
-        # Phase 5: Context Building
-        async for evt in self._emit_phase(ProcessingPhase.CONTEXT_BUILDING, "Analyzing paper content and relevance...", 60):
-            yield evt
 
         context, chunk_papers = self._build_context_from_results(results)
 
@@ -425,18 +458,17 @@ Please try asking a different question or rephrase your current one."""
         async for evt in self._emit_analysis_events(results, context, chunk_papers):
             yield evt
 
-        # Phase 6: Response Generation
-        async for evt in self._emit_phase(ProcessingPhase.RESPONSE_GENERATION, "Synthesizing insights from papers...", 70):
-            yield evt
-
-        async for evt in self._emit_thought(
-            "synthesis_strategy",
-            "Analyzing papers to construct a comprehensive, evidence-based response with proper citations",
-            {
-                "approach": "multi_source_synthesis",
-                "citation_style": "inline_with_paper_ids",
-                "context_chunks": len(context)
-            }
+        # Phase 3: Thinking (LLM reasoning and generation)
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "thinking",
+                "content": "Synthesizing insights from papers with evidence-based reasoning",
+                "metadata": {
+                    "context_chunks": len(context),
+                    "unique_papers": len(chunk_papers),
+                },
+            },
         ):
             yield evt
 
@@ -456,10 +488,6 @@ Please try asking a different question or rephrase your current one."""
             async for chunk_event in stream_event(name="chunk", data=chunk_data):
                 yield chunk_event
 
-        # Phase 7: Finalization
-        async for evt in self._emit_phase(ProcessingPhase.FINALIZATION, "Saving conversation...", 95):
-            yield evt
-
         full_response = "".join(assistant_response_chunks)
         await self._save_conversation_messages(
             conversation_service,
@@ -467,22 +495,206 @@ Please try asking a different question or rephrase your current one."""
             user_id,
             request.query,
             full_response,
-            [str(p.paper_id) for p in results.papers]
+            [str(p.paper_id) for p in results.papers],
         )
-
-        async for evt in self._emit_thought(
-            "completion",
-            f"Response generated successfully with {len(results.papers)} citations",
-            {
-                "response_length": len(full_response),
-                "papers_cited": len(results.papers),
-                "conversation_id": conversation.id
-            }
-        ):
-            yield evt
 
         async for done_event in stream_event(name="done", data=None):
             yield done_event
+
+    async def stream_message_with_citations(
+        self,
+        request: ChatMessageRequest,
+        user_id: int,
+        db_session=None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream chat message with citation extraction.
+
+        Args:
+            request: Chat message request
+            user_id: User ID
+            db_session: Database session
+
+        Yields:
+            SSE events:
+            - conversation: Conversation ID
+            - retrieved: All retrieved paper IDs
+            - metadata: Paper metadata for client caching
+            - token: Each token as generated
+            - citation: When a citation is detected (with claim, confidence)
+            - done: Completion with cited vs retrieved paper lists
+        """
+        if not db_session:
+            logger.error("Database session required for stream_message_with_citations")
+            async for evt in stream_event(
+                name="error", data={"error": "Database connection error"}
+            ):
+                yield evt
+            return
+
+        user_id = user_id
+        conversation_service = ConversationService(db_session)
+        conversation = await conversation_service.get_or_create_conversation(
+            user_id=user_id,
+            conversation_id=request.conversation_id,
+            title=request.query,
+        )
+
+        # Emit conversation ID
+        yield f"event: conversation\ndata: {json.dumps({'conversation_id': conversation.id})}\n\n"
+
+        # Check for gibberish
+        if is_gibberish(request.query):
+            async for evt in self._handle_gibberish_input(
+                conversation_service, conversation.id, user_id, request.query
+            ):
+                yield evt
+            return
+
+        # Phase 1: Searching
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "searching",
+                "content": f"Searching academic databases for: '{request.query}'",
+                "metadata": {"query": request.query},
+            },
+        ):
+            yield evt
+
+        # Execute RAG pipeline
+        results: Optional[RAGResult] = None
+        try:
+            async for result_or_evt, _ in self._execute_rag_pipeline(
+                request.query, filters=request.filter
+            ):
+                if isinstance(result_or_evt, str):
+                    yield result_or_evt
+                elif isinstance(result_or_evt, RAGResult):
+                    results = result_or_evt
+        except Exception as e:
+            logger.error(f"Error during RAG pipeline execution: {e}")
+            async for evt in stream_event(
+                name="error",
+                data={"error": "An error occurred while retrieving research papers."},
+            ):
+                yield evt
+            return
+
+        if results is None or len(results.papers) == 0:
+            async for evt in self._handle_no_results():
+                yield evt
+            return
+
+        # Build context
+        context, chunk_papers = self._build_context_from_results(results)
+
+        # Stream retrieved paper IDs
+        retrieved_paper_ids = [str(p.paper_id) for p in results.papers]
+
+        # Stream paper metadata for client caching (with SJR enrichment)
+        async for evt in stream_paper_metadata(results.papers, self.db_session):
+            yield evt
+
+        # Phase 2: Ranking
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "ranking",
+                "content": f"Filtered to {len(context)} most relevant sections from {len(chunk_papers)} papers",
+                "metadata": {
+                    "context_chunks": len(context),
+                    "unique_papers": len(chunk_papers),
+                },
+            },
+        ):
+            yield evt
+
+        # Emit analysis events
+        async for evt in self._emit_analysis_events(results, context, chunk_papers):
+            yield evt
+
+        # Phase 3: Thinking
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "thinking",
+                "content": "Analyzing papers and generating response with citations",
+                "metadata": {"approach": "evidence_based_synthesis"},
+            },
+        ):
+            yield evt
+
+        # Stream LLM response
+        assistant_response_chunks = []
+        reasoning_chunks = []
+        async for chunk_text in self.llm_service.stream_citation_based_response(
+            query=request.query, context=context
+        ):
+            text = get_stream_response_content(chunk_text)
+            reasoning_chunk = get_stream_response_reasoning(chunk_text)
+            if reasoning_chunk and reasoning_chunk not in reasoning_chunks:
+                async for evt in stream_event(
+                    name="reasoning", data={"text": reasoning_chunk}
+                ):
+                    yield evt
+
+                reasoning_chunks.append(reasoning_chunk)
+            if text is None:
+                continue
+
+            async for evt in stream_token(text):
+                yield evt
+
+            assistant_response_chunks.append(text)
+
+        if reasoning_chunks:
+            full_reasoning = "".join(reasoning_chunks)
+            logger.info(f"Collected reasoning content: {len(full_reasoning)} chars")
+
+        # Extract citations from complete response for analytics
+        full_response = "".join(assistant_response_chunks)
+        cited_paper_ids = CitationExtractor.extract_citations_from_text(full_response)
+        final_citations = CitationExtractor.group_citations_by_paper(full_response)
+
+        # Build citation_details for database (for analytics)
+        citation_details = {}
+        for paper_id, details in final_citations.items():
+            citation_details[paper_id] = {
+                "claim": details["claim"],
+                "confidence": details["confidence"],
+                "chunk_ids": [],
+                "context": f"Cited {len(details['claims'])} times",
+            }
+
+        try:
+            await self._save_conversation_messages(
+                conversation_service,
+                conversation.id,
+                user_id,
+                request.query,
+                full_response,
+                retrieved_paper_ids,
+                auto_title_user=True,
+            )
+
+            logger.info(
+                f"Message saved: {len(cited_paper_ids)} cited out of {len(retrieved_paper_ids)} retrieved"
+            )
+        except Exception as e:
+            logger.error(f"Failed to save messages: {e}")
+
+        # Stream done event with summary
+        async for evt in stream_done(
+            cited_paper_ids=cited_paper_ids,
+            retrieved_paper_ids=retrieved_paper_ids,
+            metadata={
+                "total_citations": len(final_citations),
+                "response_length": len(full_response),
+                "conversation_id": conversation.id,
+            },
+        ):
+            yield evt
 
     async def save_feedback(
         self, message_id: int, rating: int, comment: Optional[str] = None
@@ -505,45 +717,45 @@ Please try asking a different question or rephrase your current one."""
     async def stream_message_with_tools(
         self,
         request: ChatMessageRequest,
-        user_id: Optional[int] = None,
+        user_id: int,
         db_session=None,
-        enable_tools: bool = True
+        enable_tools: bool = True,
     ) -> AsyncGenerator[str, None]:
         """
         Stream chat message response with tool calling support
-        
+
         This enhanced method allows the AI to autonomously use tools when needed:
         - compare_papers: Compare multiple papers across different aspects
         - opinion_meter: Analyze opinion distribution on a topic
         - citation_analysis: Analyze citation impact of papers
         - research_trends: Analyze research trends over time
-        
+
         Args:
             request: Chat message request
             user_id: User ID
             db_session: Database session
             enable_tools: Whether to enable tool calling
-            
+
         Yields:
             SSE events including tool_call events for tool execution
         """
         if not db_session:
             logger.error("Database session required for stream_message_with_tools")
-            async for evt in stream_event(name="error", data={"error": "Database connection error"}):
+            async for evt in stream_event(
+                name="error", data={"error": "Database connection error"}
+            ):
                 yield evt
             return
-        
-        # Phase 1: Initialization
-        async for evt in self._emit_phase(ProcessingPhase.INITIALIZATION, "Setting up conversation...", 10):
-            yield evt
-        
-        user_id = user_id or DEFAULT_USER_ID
+
+        user_id = user_id
         conversation_service = ConversationService(db_session)
         conversation = await conversation_service.get_or_create_conversation(
-            user_id=user_id, conversation_id=request.conversation_id, title=request.query
+            user_id=user_id,
+            conversation_id=request.conversation_id,
+            title=request.query,
         )
         yield f"event: conversation\ndata: {json.dumps({'conversation_id': conversation.id})}\n\n"
-        
+
         # Check for gibberish
         if is_gibberish(request.query):
             async for evt in self._handle_gibberish_input(
@@ -551,38 +763,61 @@ Please try asking a different question or rephrase your current one."""
             ):
                 yield evt
             return
-        
-        # Phase 2: Question Analysis
-        async for evt in self._emit_phase(ProcessingPhase.QUESTION_ANALYSIS, "Analyzing your question...", 20):
+
+        # Phase 1: Searching
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "searching",
+                "content": f"Searching for papers on: '{request.query}'",
+                "metadata": {"query": request.query},
+            },
+        ):
             yield evt
-        
-        # Phase 3: Paper Retrieval
-        async for evt in self._emit_phase(ProcessingPhase.PAPER_RETRIEVAL, "Searching academic databases...", 30):
-            yield evt
-        
-        results = None
+
+        results: Optional[RAGResult] = None
         async for result_or_evt, _ in self._execute_rag_pipeline(request.query):
             if isinstance(result_or_evt, str):
                 yield result_or_evt
-            else:
+            elif isinstance(result_or_evt, RAGResult):
                 results = result_or_evt
-        
+
         if results is None or len(results.papers) == 0:
             async for evt in self._handle_no_results():
                 yield evt
             return
-        
+
         # Build context
         context, chunk_papers = self._build_context_from_results(results)
-        
+
+        # Phase 2: Ranking
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "ranking",
+                "content": f"Filtered to {len(context)} relevant sections from {len(chunk_papers)} papers",
+                "metadata": {"papers": len(chunk_papers), "chunks": len(context)},
+            },
+        ):
+            yield evt
+
         # Emit sources
-        async for evt in stream_event(name="sources", data=batch_paper_to_dicts(results.papers)):
+        async for evt in stream_event(
+            name="sources", data=transformer.batch_paper_to_dicts(results.papers)
+        ):
             yield evt
-        
-        # Phase 4: Response Generation with Tools
-        async for evt in self._emit_phase(ProcessingPhase.RESPONSE_GENERATION, "Generating response...", 60):
+
+        # Phase 3: Thinking (with tools)
+        async for evt in stream_event(
+            name="thought",
+            data={
+                "type": "thinking",
+                "content": "Analyzing papers and determining if tools are needed",
+                "metadata": {"tools_enabled": enable_tools},
+            },
+        ):
             yield evt
-        
+
         # Build messages for LLM
         system_message = """You are an expert research assistant with access to powerful tools. You can:
 
@@ -605,10 +840,12 @@ Please try asking a different question or rephrase your current one."""
 
 **Available papers:** You have access to paper IDs from the retrieved papers. Use these IDs when calling tools."""
 
+        # At this point results is guaranteed to be RAGResult, not None
+        paper_list = [{"id": str(p.paper_id), "title": p.title} for p in results.papers]
         user_prompt = f"""Question: {request.query}
 
 Available papers (use these IDs for tools):
-{json.dumps([{"id": str(p.paper_id), "title": p.title} for p in results.papers], indent=2)}
+{json.dumps(paper_list, indent=2)}
 
 Context from papers:
 {json.dumps(context[:5], indent=2)}
@@ -617,27 +854,26 @@ Please answer the question. Use tools if needed to provide comprehensive analysi
 
         messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": user_prompt}
+            {"role": "user", "content": user_prompt},
         ]
-        
+
         # Stream with tool support
         assistant_response_chunks = []
-        
+
         if enable_tools:
             from app.llm.tools import tool_registry
+
             tools = tool_registry.get_tools_for_openai()
-            
+
             # Use tool-aware streaming
             async for evt in self.stream_with_tools(
-                messages=messages,
-                db_session=db_session,
-                user_id=user_id
+                messages=messages, db_session=db_session, user_id=user_id
             ):
                 yield evt
                 # Collect chunks for saving
                 if evt.startswith("event: chunk"):
                     try:
-                        data_line = evt.split('\n')[1]
+                        data_line = evt.split("\n")[1]
                         if data_line.startswith("data: "):
                             chunk_data = json.loads(data_line[6:])
                             if isinstance(chunk_data, dict) and "text" in chunk_data:
@@ -649,121 +885,24 @@ Please answer the question. Use tools if needed to provide comprehensive analysi
             async for chunk_text in self.llm_service.stream_citation_based_response(
                 query=request.query, context=context
             ):
+
                 text = get_stream_response_content(chunk_text)
                 if text:
                     assistant_response_chunks.append(text)
                     async for evt in stream_event(name="chunk", data={"text": text}):
                         yield evt
-        
+
         # Save conversation
         full_response = "".join(assistant_response_chunks)
+        paper_ids = [str(p.paper_id) for p in results.papers]
         await self._save_conversation_messages(
             conversation_service,
             conversation.id,
             user_id,
             request.query,
             full_response,
-            [str(p.paper_id) for p in results.papers]
+            paper_ids,
         )
-        
+
         async for evt in stream_event(name="done", data=None):
             yield evt
-
-    # async def stream_message_with_papers(
-    #     self,
-    #     request: ChatMessageRequest,
-    #     db_session: AsyncSession,
-    #     user_id: Optional[int] = None
-    # ) -> AsyncGenerator[str, None]:
-    #     """
-    #     Stream chat response with full paper retrieval, caching, and vector search
-
-    #     This method performs the complete pipeline:
-    #     1. Break down user question into subtopics
-    #     2. Search Semantic Scholar for relevant papers
-    #     3. Check database cache, retrieve full-text if needed
-    #     4. Process papers (chunk, embed, summarize) if not cached
-    #     5. Use vector search to find most relevant chunks
-    #     6. Stream LLM response with citations to specific chunks
-
-    #     Args:
-    #         request: Chat message request containing user query
-    #         db_session: Database session for paper caching and retrieval
-    #         user_id: Optional user ID for personalization
-
-    #     Yields:
-    #         Response chunks with citations to specific paper sections
-    #     """
-    #     # Step 1: Break down the question
-    #     questions = await self.llm_service.breakdown_user_question(
-    #         user_question=request.query
-    #     )
-    #     logger.info(f"Question breakdown: {questions}")
-
-    #     # Step 2: Search and retrieve papers with caching
-    #     # This uses the PaperRetrievalService which handles:
-    #     # - Searching Semantic Scholar
-    #     # - Checking DB cache
-    #     # - Retrieving full-text if available
-    #     # - Processing (chunking, embedding, summarizing)
-    #     max_subtopics = 3
-    #     db_papers = []
-
-    #     for idx, subtopic in enumerate(questions.subtopics[:max_subtopics], 1):
-    #         try:
-    #             # Use search_with_caching for full pipeline
-    #             papers = await self.retriever.search_with_caching(
-    #                 query=subtopic,
-    #                 db_session=db_session,
-    #                 search_services=[RetrievalServiceType.SEMANTIC],
-    #                 limit=3,
-    #                 auto_process=True
-    #             )
-    #             db_papers.extend(papers)
-    #             print(f"Subtopic {idx}/{max_subtopics}: Retrieved {len(papers)} processed papers from DB")
-
-    #             await asyncio.sleep(1)
-    #         except Exception as e:
-    #             print(f"Error retrieving papers for subtopic '{subtopic}': {e}")
-    #             continue
-
-    #     # Step 3: Deduplicate papers
-    #     unique_papers = []
-    #     seen_ids = set()
-
-    #     for paper in db_papers:
-    #         if paper.id not in seen_ids:
-    #             unique_papers.append(paper)
-    #             seen_ids.add(paper.id)
-
-    #     print(f"Total unique processed papers: {len(unique_papers)}")
-
-    #     # Step 4: Find most relevant chunks using vector search
-    #     # TODO: Implement vector similarity search on chunks
-    #     # For now, convert DB papers to context format
-    #     context = []
-    #     for paper in unique_papers[:5]:  # Top 5 papers
-    #         context.append({
-    #             'title': paper.title,
-    #             'authors': paper.authors_list if hasattr(paper, 'authors_list') else paper.authors,
-    #             'abstract': paper.abstract,
-    #             'year': paper.publication_year if hasattr(paper, 'publication_year') else paper.publication_date,
-    #             'url': paper.url,
-    #             'citationCount': paper.citation_count or 0,
-    #             'paper_id': paper.paper_id if hasattr(paper, 'paper_id') else str(paper.id)
-    #         })
-
-    #     sources_event = f"event: sources\ndata: {json.dumps(context)}\n\n"
-    #     yield sources_event
-
-    #     # Stream the response and collect it for conversation tracking
-    #     full_response = ""
-    #     async for chunk in self.llm_service.stream_citation_based_response(
-    #         query=request.query,
-    #         context=context
-    #     ):
-    #         full_response += chunk
-    #         chunk_event = f"event: chunk\ndata: {json.dumps(chunk)}\n\n"
-    #         yield chunk_event
-
-    #     yield "event: done\ndata: \n\n"

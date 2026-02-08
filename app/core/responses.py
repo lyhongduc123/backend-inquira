@@ -59,7 +59,7 @@ def success_response(data: T, request_id: Optional[str] = None) -> ApiResponse[T
 
 
 def paginated_response(
-    items: List[T],
+    data: List[T],
     total: int,
     page: int,
     page_size: int,
@@ -69,7 +69,7 @@ def paginated_response(
     total_pages = ceil(total / page_size) if page_size > 0 else 0
     
     paginated_data = PaginatedData(
-        items=items,
+        items=data,
         total=total,
         page=page,
         page_size=page_size,

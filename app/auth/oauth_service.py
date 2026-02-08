@@ -199,7 +199,7 @@ async def get_or_create_user(db: AsyncSession, user_data: Dict[str, Any]) -> DBU
 async def create_refresh_token(db: AsyncSession, user_id: int) -> str:
     """Create a new refresh token for a user"""
     token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     
     db_token = DBRefreshToken(
         user_id=user_id,

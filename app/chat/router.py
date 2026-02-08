@@ -33,17 +33,25 @@ async def stream_message(
     current_user: DBUser = Depends(get_current_user)
 ) -> StreamingResponse:
     """
-    Stream chat message response in real-time with paper metadata
+    Stream chat message response in real-time with citation tracking
     
     Returns Server-Sent Events (SSE) stream with:
-    1. event: sources - Paper metadata (JSON array)
-    2. event: chunk - Response text chunks
-    3. event: done - Completion signal
+    1. event: conversation - Conversation metadata (JSON)
+    2. event: metadata - Paper metadata for all retrieved papers (JSON array)
+    3. event: token - Each token as generated (JSON: {type, content})
+    4. event: done - Completion with cited vs retrieved summary (JSON)
+    
+    The new streaming architecture provides:
+    - Real-time token-by-token streaming
+    - Paper metadata sent once at the start
+    - Frontend validates citations against metadata
+    - Separation of cited (4 papers) vs retrieved (20 papers)
     
     Frontend should:
-    - Parse 'sources' event to display citations
-    - Accumulate 'chunk' events to build the response
-    - Stop listening on 'done' event
+    - Parse 'metadata' to get all available papers and cache them
+    - Accumulate 'token' events to build response
+    - Validate (cite:paper_id) markers against metadata during rendering
+    - Use 'done' to organize papers into References (cited) and Related (not cited)
     
     - **query**: User's message/question
     - **conversation_id**: Optional ID of existing conversation
@@ -52,11 +60,11 @@ async def stream_message(
     try:
         request_id = getattr(http_request.state, 'request_id', None)
         logger.info(
-            f"Stream endpoint called by user {current_user.id}",
+            f"Stream endpoint with citations called by user {current_user.id}",
             extra={"user_id": current_user.id, "query_preview": request.query[:50], "request_id": request_id}
         )
         return StreamingResponse(
-            chat_service.stream_message(
+            chat_service.stream_message_with_citations(
                 request=request,
                 user_id=current_user.id,
                 db_session=db

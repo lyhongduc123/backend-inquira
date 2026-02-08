@@ -1,14 +1,18 @@
-from .chunker import TextChunker
-from .embeddings import EmbeddingService
+from .chunker import ChunkingService
+from .embeddings import EmbeddingService, get_embedding_service
 from .extractor import ExtractorService
 from .summarizer import SummarizerService
 from .transformer import TransformerService
 
+transformer = TransformerService()
+
 __all__ = [
-    "TextChunker",
+    "ChunkingService",
     "EmbeddingService",
+    "get_embedding_service",
     "ExtractorService",
     "SummarizerService",
     "TransformerService",
+    "transformer",
 ]
 

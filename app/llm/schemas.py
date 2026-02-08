@@ -282,6 +282,7 @@ class QuestionBreakdownResponse(BaseModel):
     complexity: Literal["simple", "intermediate", "advanced"] = Field(..., description="Question complexity level")
     explanations: Optional[List[str]] = Field(None, description="Optional explanations for each subtopic")
     has_explanations: bool = Field(..., description="Whether explanations are included")
+    reasoning_content: Optional[str] = Field(None, description="LLM's reasoning process for generating the breakdown")
     model_used: str = Field(..., description="Model used for breakdown")
 
 

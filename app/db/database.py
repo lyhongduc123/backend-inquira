@@ -17,8 +17,22 @@ async def get_db_session():
         await db.close()
 
 async def init_db():
-    """Initialize database by creating pgvector extension and all tables"""
+    """Verify database connectivity and ensure required extensions exist"""
     async with engine.begin() as conn:
+        # Required extension
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        DatabaseBase.metadata.bind = engine
-        await conn.run_sync(DatabaseBase.metadata.create_all)
+
+        # Health check
+        await conn.execute(text("SELECT 1"))
+
+        # Alembic check
+        try:
+            result = await conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            )
+            version = result.scalar_one()
+        except Exception:
+            raise RuntimeError(
+                "Database schema not initialized. "
+                "Run: alembic upgrade head"
+            )

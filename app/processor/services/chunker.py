@@ -1,12 +1,23 @@
 import re
 import tiktoken
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, NamedTuple
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
 
 
-class TextChunker:
+class ChunkWithMetadata(NamedTuple):
+    """Enhanced chunk with docling metadata"""
+    text: str  # Clean text for embeddings
+    token_count: int
+    section_title: Optional[str]
+    page_number: Optional[int]
+    label: Optional[str]  # section_header, text, caption, etc.
+    level: Optional[int]  # Hierarchy level
+    docling_metadata: Dict[str, Any]  # bbox, prov, etc.
+
+
+class ChunkingService:
     """Chunk text into smaller pieces for embedding with intelligent structure-aware chunking"""
     
     def __init__(
@@ -34,90 +45,329 @@ class TextChunker:
         """Count tokens in text"""
         return len(self.encoding.encode(text))
     
+    def chunk_from_docling_structure(
+        self,
+        doc_dict: Dict[str, Any],
+        paper_id: str
+    ) -> List[ChunkWithMetadata]:
+        """
+        Chunk document from docling structure WITH RICH METADATA.
+        
+        Args:
+            doc_dict: Docling document dictionary
+            paper_id: Paper ID for logging
+            
+        Returns:
+            List of ChunkWithMetadata tuples
+        """
+        chunks = []
+        
+        # Extract texts from docling
+        texts = doc_dict.get("texts", [])
+        
+        current_section_title = None
+        current_section_level = None
+        current_parts = []  # Clean text parts
+        current_tokens = 0
+        current_page = None
+        current_label = None
+        current_metadata_items = []  # Accumulate metadata from text_items
+        
+        for text_item in texts:
+            # Skip furniture (headers, footers)
+            if text_item.get("content_layer") == "furniture":
+                continue
+            
+            text_content = text_item.get("text", "")
+            if not text_content:
+                continue
+            
+            label = text_item.get("label", "")
+            level = text_item.get("level")
+            page_no = None
+            
+            # Extract page number from prov
+            prov = text_item.get("prov", [])
+            if prov and len(prov) > 0:
+                page_no = prov[0].get("page_no")
+                if page_no is not None:
+                    current_page = page_no
+            
+            item_tokens = self.count_tokens(text_content)
+            
+            # Handle section headers
+            if label == "section_header":
+                # Save previous chunk if exists
+                if current_parts and current_tokens >= self.min_tokens:
+                    chunks.append(ChunkWithMetadata(
+                        text="\n\n".join(current_parts),
+                        token_count=current_tokens,
+                        section_title=current_section_title,
+                        page_number=current_page,
+                        label=current_label,
+                        level=current_section_level,
+                        docling_metadata={"items": current_metadata_items}
+                    ))
+                    current_parts = []
+                    current_tokens = 0
+                    current_metadata_items = []
+                
+                # Update section context
+                current_section_title = text_content
+                current_section_level = level
+                current_label = label
+                continue
+            
+            # Check if adding would exceed max
+            if current_tokens + item_tokens > self.max_tokens and current_parts:
+                # Save current chunk
+                chunks.append(ChunkWithMetadata(
+                    text="\n\n".join(current_parts),
+                    token_count=current_tokens,
+                    section_title=current_section_title,
+                    page_number=current_page,
+                    label=current_label,
+                    level=current_section_level,
+                    docling_metadata={"items": current_metadata_items}
+                ))
+                
+                # Keep last part for overlap
+                if current_parts:
+                    overlap_text = current_parts[-1]
+                    overlap_tokens = self.count_tokens(overlap_text)
+                    
+                    if overlap_tokens <= self.overlap_tokens:
+                        current_parts = [overlap_text]
+                        current_tokens = overlap_tokens
+                        # Keep last metadata item for overlap
+                        current_metadata_items = [current_metadata_items[-1]] if current_metadata_items else []
+                    else:
+                        current_parts = []
+                        current_tokens = 0
+                        current_metadata_items = []
+                else:
+                    current_parts = []
+                    current_tokens = 0
+                    current_metadata_items = []
+            
+            # Add content and metadata
+            current_parts.append(text_content)
+            current_tokens += item_tokens
+            current_label = label
+            
+            # Accumulate docling metadata
+            item_metadata = {
+                "text": text_content[:100],  # Preview
+                "label": label,
+                "level": level,
+                "bbox": text_item.get("bbox"),
+                "prov": prov
+            }
+            current_metadata_items.append(item_metadata)
+        
+        # Add final chunk
+        if current_parts:
+            if current_tokens >= self.min_tokens:
+                chunks.append(ChunkWithMetadata(
+                    text="\n\n".join(current_parts),
+                    token_count=current_tokens,
+                    section_title=current_section_title,
+                    page_number=current_page,
+                    label=current_label,
+                    level=current_section_level,
+                    docling_metadata={"items": current_metadata_items}
+                ))
+            elif chunks:
+                # Append to last chunk
+                last = chunks[-1]
+                combined_text = last.text + "\n\n" + "\n\n".join(current_parts)
+                combined_tokens = self.count_tokens(combined_text)
+                
+                # Merge metadata
+                combined_metadata_items = last.docling_metadata.get("items", []) + current_metadata_items
+                
+                chunks[-1] = ChunkWithMetadata(
+                    text=combined_text,
+                    token_count=combined_tokens,
+                    section_title=last.section_title or current_section_title,
+                    page_number=current_page or last.page_number,
+                    label=current_label or last.label,
+                    level=last.level,
+                    docling_metadata={"items": combined_metadata_items}
+                )
+            else:
+                # First chunk, keep even if small
+                chunks.append(ChunkWithMetadata(
+                    text="\n\n".join(current_parts),
+                    token_count=current_tokens,
+                    section_title=current_section_title,
+                    page_number=current_page,
+                    label=current_label,
+                    level=current_section_level,
+                    docling_metadata={"items": current_metadata_items}
+                ))
+        
+        logger.info(f"[{paper_id}] Created {len(chunks)} chunks from docling structure")
+        return chunks
+    
+    def chunk_from_tei_structure(
+        self,
+        tei_structure: Dict[str, Any],
+        paper_id: str
+    ) -> List[ChunkWithMetadata]:
+        """
+        Chunk document from TEI XML structure extracted by GROBID.
+        
+        TEI structure format:
+        {
+            "title": str,
+            "authors": List[{name, affiliation, email}],
+            "abstract": str,
+            "sections": List[{title, content}],
+            "references": List[{raw_text}]
+        }
+        
+        Args:
+            tei_structure: TEI structure dictionary from extract_tei_xml_structure()
+            paper_id: Paper ID for logging
+            
+        Returns:
+            List of ChunkWithMetadata tuples
+        """
+        chunks = []
+        
+        # Chunk abstract if present
+        abstract = tei_structure.get("abstract", "").strip()
+        if abstract:
+            abstract_tokens = self.count_tokens(abstract)
+            if abstract_tokens > self.max_tokens:
+                # Split long abstract
+                abstract_chunks = self._split_text_into_chunks(abstract, "Abstract")
+                for chunk_text, token_count in abstract_chunks:
+                    chunks.append(ChunkWithMetadata(
+                        text=chunk_text,
+                        token_count=token_count,
+                        section_title="Abstract",
+                        page_number=None,
+                        label="abstract",
+                        level=1,
+                        docling_metadata={}
+                    ))
+            else:
+                chunks.append(ChunkWithMetadata(
+                    text=abstract,
+                    token_count=abstract_tokens,
+                    section_title="Abstract",
+                    page_number=None,
+                    label="abstract",
+                    level=1,
+                    docling_metadata={}
+                ))
+        
+        # Chunk sections
+        sections = tei_structure.get("sections", [])
+        for section in sections:
+            section_title = section.get("title", "").strip()
+            section_content = section.get("content", "").strip()
+            
+            if not section_content:
+                continue
+            
+            section_tokens = self.count_tokens(section_content)
+            
+            if section_tokens > self.max_tokens:
+                # Split long section
+                section_chunks = self._split_text_into_chunks(section_content, section_title)
+                for chunk_text, token_count in section_chunks:
+                    chunks.append(ChunkWithMetadata(
+                        text=chunk_text,
+                        token_count=token_count,
+                        section_title=section_title,
+                        page_number=None,
+                        label="section",
+                        level=1,
+                        docling_metadata={}
+                    ))
+            else:
+                chunks.append(ChunkWithMetadata(
+                    text=section_content,
+                    token_count=section_tokens,
+                    section_title=section_title,
+                    page_number=None,
+                    label="section",
+                    level=1,
+                    docling_metadata={}
+                ))
+        
+        logger.info(f"[{paper_id}] Created {len(chunks)} chunks from TEI structure")
+        return chunks
+    
+    def _split_text_into_chunks(
+        self,
+        text: str,
+        section_title: Optional[str] = None
+    ) -> List[Tuple[str, int]]:
+        """
+        Split text into overlapping chunks.
+        
+        Args:
+            text: Text to split
+            section_title: Section title for context
+            
+        Returns:
+            List of (chunk_text, token_count) tuples
+        """
+        chunks = []
+        sentences = self.split_into_sentences(text)
+        
+        current_chunk = []
+        current_tokens = 0
+        
+        for sentence in sentences:
+            sentence_tokens = self.count_tokens(sentence)
+            
+            # If adding this sentence exceeds max_tokens, save current chunk
+            if current_tokens + sentence_tokens > self.max_tokens and current_chunk:
+                chunk_text = " ".join(current_chunk)
+                chunks.append((chunk_text, current_tokens))
+                
+                # Start new chunk with overlap
+                # Keep last few sentences for context
+                overlap_sentences = []
+                overlap_tokens = 0
+                for s in reversed(current_chunk):
+                    s_tokens = self.count_tokens(s)
+                    if overlap_tokens + s_tokens <= self.overlap_tokens:
+                        overlap_sentences.insert(0, s)
+                        overlap_tokens += s_tokens
+                    else:
+                        break
+                
+                current_chunk = overlap_sentences
+                current_tokens = overlap_tokens
+            
+            current_chunk.append(sentence)
+            current_tokens += sentence_tokens
+        
+        # Add final chunk
+        if current_chunk:
+            chunk_text = " ".join(current_chunk)
+            chunks.append((chunk_text, current_tokens))
+        
+        return chunks
+    
     def chunk_from_structure(
         self,
         doc_dict: Dict[str, Any],
         paper_id: str
     ) -> List[Tuple[str, int, Optional[str]]]:
         """
-        Chunk document based on its structure from docling.
-        This is the preferred method for new code.
-        
-        Args:
-            doc_dict: Structured document dictionary from docling
-            paper_id: Paper ID for logging
-            
-        Returns:
-            List of (chunk_text, token_count, section_title) tuples
+        DEPRECATED: Use chunk_from_docling_structure() instead.
+        Kept for backward compatibility.
         """
-        chunks = []
-        
-        # Extract main content - docling structure typically has these keys
-        main_text = doc_dict.get("main-text", [])
-        
-        # Group content by sections intelligently
-        current_section_title = None
-        current_section_content = []
-        current_tokens = 0
-        
-        for item in main_text:
-            if not isinstance(item, dict):
-                continue
-                
-            item_type = item.get("type", "")
-            item_text = item.get("text", "")
-            
-            # Detect section headings
-            if item_type in ["heading", "title", "section-header"]:
-                # Save previous section if it exists and meets minimum size
-                if current_section_content and current_tokens >= self.min_tokens:
-                    chunk_text = "\n".join(current_section_content)
-                    chunks.append((chunk_text, current_tokens, current_section_title))
-                    current_section_content = []
-                    current_tokens = 0
-                
-                # Start new section
-                current_section_title = item_text
-                continue
-            
-            # Add content to current section
-            if item_text:
-                item_tokens = self.count_tokens(item_text)
-                
-                # If adding this would exceed max, save current chunk
-                if current_tokens + item_tokens > self.max_tokens and current_section_content:
-                    chunk_text = "\n".join(current_section_content)
-                    chunks.append((chunk_text, current_tokens, current_section_title))
-                    
-                    # Keep last paragraph for overlap
-                    if current_section_content:
-                        overlap_text = current_section_content[-1]
-                        overlap_tokens = self.count_tokens(overlap_text)
-                        current_section_content = [overlap_text] if overlap_tokens <= self.overlap_tokens else []
-                        current_tokens = overlap_tokens if overlap_tokens <= self.overlap_tokens else 0
-                    else:
-                        current_section_content = []
-                        current_tokens = 0
-                
-                current_section_content.append(item_text)
-                current_tokens += item_tokens
-        
-        # Add final section
-        if current_section_content and current_tokens >= self.min_tokens:
-            chunk_text = "\n".join(current_section_content)
-            chunks.append((chunk_text, current_tokens, current_section_title))
-        elif current_section_content and chunks:
-            # Append to last chunk if too small
-            last_chunk_text, last_tokens, last_title = chunks[-1]
-            additional_text = "\n".join(current_section_content)
-            combined_text = last_chunk_text + "\n" + additional_text
-            combined_tokens = self.count_tokens(combined_text)
-            chunks[-1] = (combined_text, combined_tokens, last_title or current_section_title)
-        elif current_section_content:
-            # If only one small chunk, keep it anyway
-            chunk_text = "\n".join(current_section_content)
-            chunks.append((chunk_text, current_tokens, current_section_title))
-        
+        # Use new method and convert to old format
+        new_chunks = self.chunk_from_docling_structure(doc_dict, paper_id)
+        return [(c.text, c.token_count, c.section_title) for c in new_chunks]
         logger.info(f"Chunked paper {paper_id} into {len(chunks)} structure-aware chunks")
         return chunks
     

@@ -1,35 +1,41 @@
-from typing import List, Dict, Any, Optional
-from enum import Enum
-from app.core.config import settings
+"""
+Retriever module for paper search and retrieval.
 
+Provides:
+- Multi-provider paper search (Semantic Scholar, OpenAlex)
+- Normalized result schemas
+- Hybrid search with metadata enrichment
+"""
 from .provider import (
     SemanticScholarProvider,
-    ArxivProvider,
     OpenAlexProvider,
-    GoogleScholarProvider,
     RetrievalConfig,
-    RetrievalMode
+    RetrievalMode,
+    BaseRetrievalProvider,
 )
-
+from .schemas import NormalizedResult, AuthorSchema
 from .paper_schemas import Paper, PaperChunk, Author, Citation
 from .paper_retriever import PaperRetriever
-from .paper_repository import PaperRepository
 from .paper_service import PaperRetrievalService, RetrievalServiceType
 
 # Export all components
 __all__ = [
+    # Main service
     'PaperRetrievalService',
     'RetrievalServiceType',
     
     # Providers
     'SemanticScholarProvider',
-    'ArxivProvider',
     'OpenAlexProvider',
-    'GoogleScholarProvider',
+    'BaseRetrievalProvider',
     
     # Configuration
     'RetrievalConfig',
     'RetrievalMode',
+    
+    # Schemas
+    'NormalizedResult',
+    'AuthorSchema',
     
     # Data models
     'Paper',
@@ -39,5 +45,4 @@ __all__ = [
     
     # Utilities
     'PaperRetriever',
-    'PaperRepository',
 ]

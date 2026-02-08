@@ -12,124 +12,229 @@ if TYPE_CHECKING:
     from app.models.citations import DBCitation
     from app.models.messages import DBMessage
     from app.models.message_papers import DBMessagePaper
+    from app.models.journals import DBJournal
 
 
 
 class DBPaper(Base):
+    """
+    Academic paper entity with trust scoring and citation analysis.
+    
+    Aggregates data from multiple sources (OpenAlex, Semantic Scholar, CrossRef)
+    with computed trust metrics, citation networks, and semantic embeddings.
+    """
     __tablename__ = "papers"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    paper_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    paper_id: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False, index=True,
+        comment="Unique identifier (Semantic Scholar preferred, OpenAlex/DOI fallback)"
+    )
     
-    title: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False, comment="Full paper title")
     
-    # DEPRECATED: Keep for backward compatibility during migration
-    # Use paper_authors relationship instead
-    authors: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    authors: Mapped[dict] = mapped_column(
+        JSONB, nullable=True,
+        comment="DEPRECATED: Legacy JSONB author data. Use paper_authors relationship."
+    )
+    """DEPRECATED: Use paper_authors relationship for structured author data."""
     
-    abstract: Mapped[str] = mapped_column(Text, nullable=False)
-    publication_date: Mapped[Date] = mapped_column(Date, nullable=True)
-    venue: Mapped[str] = mapped_column(String, nullable=True)
+    abstract: Mapped[str] = mapped_column(Text, nullable=False, comment="Paper abstract/summary")
+    publication_date: Mapped[Date] = mapped_column(Date, nullable=True, comment="Publication date")
+    venue: Mapped[str] = mapped_column(String, nullable=True, comment="Publication venue/conference")
+    issn: Mapped[str] = mapped_column(
+        String(20), nullable=True, index=True,
+        comment="Primary ISSN for journal identification"
+    )
+    issn_l: Mapped[str] = mapped_column(
+        String(20), nullable=True, index=True,
+        comment="Linking ISSN (OpenAlex standard)"
+    )
     
-    
-    url: Mapped[str] = mapped_column(Text, nullable=True)
-    pdf_url: Mapped[str] = mapped_column(Text, nullable=True)
-    is_open_access: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    open_access_pdf: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    url: Mapped[str] = mapped_column(Text, nullable=True, comment="Primary URL to paper")
+    pdf_url: Mapped[str] = mapped_column(Text, nullable=True, comment="Direct PDF download URL")
+    is_open_access: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True,
+        comment="Whether paper is open access"
+    )
+    open_access_pdf: Mapped[dict] = mapped_column(
+        JSONB, nullable=True,
+        comment="Open access PDF metadata (URL, version, license)"
+    )
 
-    # Metadata
-    source: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    external_ids: Mapped[dict] = mapped_column(JSONB, nullable=True)  
-    # Summary
-    summary: Mapped[str] = mapped_column(Text, nullable=True)
-    summary_embedding: Mapped[Vector] = mapped_column(Vector(768), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(50), nullable=False, index=True,
+        comment="Data source: openalex, semanticscholar"
+    )
+    external_ids: Mapped[dict] = mapped_column(
+        JSONB, nullable=True,
+        comment="External IDs (DOI, PubMed, ArXiv, etc.)"
+    )
+    
+    summary: Mapped[str] = mapped_column(
+        Text, nullable=True,
+        comment="AI-generated summary for semantic search"
+    )
+    summary_embedding: Mapped[Vector] = mapped_column(
+        Vector(768), nullable=True,
+        comment="768-dim vector embedding of summary (nomic-embed-text)"
+    )
 
-    # Relevance scoring
-    relevance_score: Mapped[float] = mapped_column(Float, nullable=True)
-    citation_count: Mapped[int] = mapped_column(Integer, default=0, index=True)
-    influential_citation_count: Mapped[int] = mapped_column(Integer, default=0)  # Semantic Scholar only
-    reference_count: Mapped[int] = mapped_column(Integer, default=0)
+    relevance_score: Mapped[float] = mapped_column(
+        Float, nullable=True,
+        comment="Query-specific relevance score"
+    )
+    citation_count: Mapped[int] = mapped_column(
+        Integer, default=0, index=True,
+        comment="Total number of citations"
+    )
+    influential_citation_count: Mapped[int] = mapped_column(
+        Integer, default=0,
+        comment="Influential citations (Semantic Scholar only)"
+    )
+    reference_count: Mapped[int] = mapped_column(
+        Integer, default=0,
+        comment="Number of references cited by this paper"
+    )
 
-    # OpenAlex-specific rich metadata for project requirements
-    topics: Mapped[list] = mapped_column(JSONB, nullable=True)  # Research topics with scores
-    keywords: Mapped[list] = mapped_column(JSONB, nullable=True)  # Keywords with scores
-    concepts: Mapped[list] = mapped_column(JSONB, nullable=True)  # Concepts with scores and hierarchy levels
-    mesh_terms: Mapped[list] = mapped_column(JSONB, nullable=True)  # MeSH terms for biomedical papers
+    topics: Mapped[list] = mapped_column(
+        JSONB, nullable=True,
+        comment="OpenAlex research topics with relevance scores"
+    )
+    keywords: Mapped[list] = mapped_column(
+        JSONB, nullable=True,
+        comment="Extracted keywords with scores"
+    )
+    concepts: Mapped[list] = mapped_column(
+        JSONB, nullable=True,
+        comment="OpenAlex concepts with scores and hierarchy levels"
+    )
+    mesh_terms: Mapped[list] = mapped_column(
+        JSONB, nullable=True,
+        comment="MeSH terms for biomedical papers"
+    )
     
-    # Citation quality metrics (OpenAlex)
-    citation_percentile: Mapped[dict] = mapped_column(JSONB, nullable=True)  # Percentile rankings
-    fwci: Mapped[float] = mapped_column(Float, nullable=True, index=True)  # Field-weighted citation impact
+    citation_percentile: Mapped[dict] = mapped_column(
+        JSONB, nullable=True,
+        comment="Citation percentile rankings by field and year"
+    )
+    fwci: Mapped[float] = mapped_column(
+        Float, nullable=True, index=True,
+        comment="Field-Weighted Citation Impact (OpenAlex)"
+    )
     
-    # Trust-related computed scores
-    author_trust_score: Mapped[float] = mapped_column(Float, nullable=True, index=True)  # Avg author reputation
-    institutional_trust_score: Mapped[float] = mapped_column(Float, nullable=True)  # Avg institution reputation
-    network_diversity_score: Mapped[float] = mapped_column(Float, nullable=True)  # Cross-institution collaboration
+    author_trust_score: Mapped[float] = mapped_column(
+        Float, nullable=True, index=True,
+        comment="Average trust score of all authors"
+    )
+    institutional_trust_score: Mapped[float] = mapped_column(
+        Float, nullable=True,
+        comment="Average reputation score of affiliated institutions"
+    )
+    network_diversity_score: Mapped[float] = mapped_column(
+        Float, nullable=True,
+        comment="Cross-institutional collaboration diversity score"
+    )
     
-    # Paper quality indicators
-    is_retracted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    language: Mapped[str] = mapped_column(String(10), nullable=True)  # ISO language code
+    journal_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("journals.id"), nullable=True, index=True,
+        comment="Foreign key to journals table (SJR data)"
+    )
     
-    # Bibliographic informationcomputed from relationships)
-    # DEPRECATED: Computed from paper_authors relationship
-    corresponding_author_ids: Mapped[list] = mapped_column(ARRAY(String), nullable=True)
-    institutions_distinct_count: Mapped[int] = mapped_column(Integer, nullable=True)  # Number of unique institutions
-    countries_distinct_count: Mapped[int] = mapped_column(Integer, nullable=True)  # Number of unique countries
+    is_retracted: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True,
+        comment="Whether paper has been retracted"
+    )
+    language: Mapped[str] = mapped_column(
+        String(10), nullable=True,
+        comment="ISO 639-1 language code"
+    )
     
-    # Collaboration quality
-    author_count: Mapped[int] = mapped_column(Integer, nullable=True)
-    is_single_author: Mapped[bool] = mapped_column(Boolean, default=False)
-    
-    # Author collaboration metadata (for author reputation scoring)
-    corresponding_author_ids: Mapped[list] = mapped_column(ARRAY(String), nullable=True)
-    institutions_distinct_count: Mapped[int] = mapped_column(Integer, nullable=True)  # Number of unique institutions
-    countries_distinct_count: Mapped[int] = mapped_column(Integer, nullable=True)  # Number of unique countries
+    corresponding_author_ids: Mapped[list] = mapped_column(
+        ARRAY(String), nullable=True,
+        comment="IDs of corresponding authors"
+    )
+    institutions_distinct_count: Mapped[int] = mapped_column(
+        Integer, nullable=True,
+        comment="Number of unique institutions involved"
+    )
+    countries_distinct_count: Mapped[int] = mapped_column(
+        Integer, nullable=True,
+        comment="Number of unique countries involved"
+    )
 
-    # Status tracking
-    is_processed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    processing_status: Mapped[str] = mapped_column(String(50), default="pending")
-    processing_error: Mapped[str] = mapped_column(Text, nullable=True)
+    is_processed: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True,
+        comment="Whether paper has been fully processed"
+    )
+    processing_status: Mapped[str] = mapped_column(
+        String(50), default="pending",
+        comment="Processing status: pending, processing, completed, failed"
+    )
+    processing_error: Mapped[str] = mapped_column(
+        Text, nullable=True,
+        comment="Error message if processing failed"
+    )
 
-    # Timestamps
-    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    last_accessed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+        comment="Record creation timestamp"
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),
+        comment="Last update timestamp"
+    )
+    last_accessed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+        comment="Last access timestamp for cache management"
+    )
 
-    # Author relationships (NEW: Trust-focused)
     paper_authors: Mapped[list["DBAuthorPaper"]] = relationship(
         "DBAuthorPaper",
         back_populates="paper",
         cascade="all, delete-orphan"
     )
+    """Structured author-paper relationships with affiliations and roles."""
     
-    # Citation relationships (NEW: Structured citations)
     citations_made: Mapped[list["DBCitation"]] = relationship(
         "DBCitation",
         foreign_keys="[DBCitation.citing_paper_id]",
         back_populates="citing_paper",
         cascade="all, delete-orphan"
     )
+    """Papers cited by this paper (outgoing citations)."""
+    
     citations_received: Mapped[list["DBCitation"]] = relationship(
         "DBCitation",
         foreign_keys="[DBCitation.cited_paper_id]",
         back_populates="cited_paper",
         cascade="all, delete-orphan"
     )
-    
-    # DEPRECATED: Old citation mapping (keep for migration)
-    citations: Mapped[list] = relationship(
-        "DBCitationMap", back_populates="paper", cascade="all, delete-orphan"
-    )
+    """Papers that cite this paper (incoming citations)."""
     
     message_papers: Mapped[list] = relationship(
         "DBMessagePaper",
         back_populates="paper",
         cascade="all, delete-orphan"
     )
+    """Association records linking papers to messages."""
+    
     messages: Mapped[list] = relationship(
         "DBMessage",
         secondary="message_papers",
-        back_populates="papers"
+        back_populates="papers",
+        overlaps="message_papers",
+        viewonly=True,
     )
+    """Messages that reference this paper (view-only)."""
+    
+    chunks: Mapped[list["DBPaperChunk"]] = relationship(
+        "DBPaperChunk", back_populates="paper", cascade="all, delete-orphan"
+    )
+    """Text chunks for semantic search and citation verification."""
+    
+    journal: Mapped["DBJournal"] = relationship("DBJournal", foreign_keys=[journal_id])
+    """Associated journal with SJR metrics."""
     
     __table_args__ = (
         Index('idx_paper_trust', 'author_trust_score', 'institutional_trust_score'),
@@ -140,71 +245,74 @@ class DBPaper(Base):
 
 
 class DBPaperChunk(Base):
+    """
+    Text chunks for semantic search and citation verification.
+    
+    Papers are split into chunks with structural metadata and embeddings
+    for efficient semantic retrieval and context extraction.
+    """
     __tablename__ = "paper_chunks"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    chunk_id: Mapped[str] = mapped_column(String(150), unique=True, nullable=False, index=True)
-    paper_id: Mapped[str] = mapped_column(String(100), ForeignKey("papers.paper_id"), nullable=False, index=True)
+    chunk_id: Mapped[str] = mapped_column(
+        String(150), unique=True, nullable=False, index=True,
+        comment="Unique chunk identifier (paper_id + chunk_index)"
+    )
+    paper_id: Mapped[str] = mapped_column(
+        String(100), ForeignKey("papers.paper_id"), nullable=False, index=True,
+        comment="Reference to parent paper"
+    )
 
-    # Chunk content
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False, comment="Chunk text content")
+    token_count: Mapped[int] = mapped_column(
+        Integer, nullable=False,
+        comment="Number of tokens in chunk"
+    )
 
-    # Chunk metadata
-    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_index: Mapped[int] = mapped_column(
+        Integer, nullable=False,
+        comment="Sequential chunk number within paper"
+    )
     
-    # offsets (super useful)
-    char_start: Mapped[int] = mapped_column(Integer, nullable=True)
-    char_end: Mapped[int] = mapped_column(Integer, nullable=True)
+    char_start: Mapped[int] = mapped_column(
+        Integer, nullable=True,
+        comment="Character offset start position in full text"
+    )
+    char_end: Mapped[int] = mapped_column(
+        Integer, nullable=True,
+        comment="Character offset end position in full text"
+    )
     
-    # structural metadata
-    section_title: Mapped[str] = mapped_column(Text, nullable=True)
-    page_number: Mapped[int] = mapped_column(Integer, nullable=True)
+    section_title: Mapped[str] = mapped_column(
+        Text, nullable=True,
+        comment="Section header/title if applicable"
+    )
+    page_number: Mapped[int] = mapped_column(
+        Integer, nullable=True,
+        comment="Page number in original PDF"
+    )
+    
+    label: Mapped[str] = mapped_column(
+        String(50), nullable=True,
+        comment="Docling label: section_header, text, caption, etc."
+    )
+    level: Mapped[int] = mapped_column(
+        Integer, nullable=True,
+        comment="Hierarchy level for section headers"
+    )
+    docling_metadata: Mapped[dict] = mapped_column(
+        JSONB, nullable=True,
+        comment="Docling extraction metadata (bbox, page_no, etc.)"
+    )
 
-    # Vector embedding (768-dim for Ollama nomic-embed-text)
-    embedding: Mapped[Vector] = mapped_column(Vector(768), nullable=True)
+    embedding: Mapped[Vector] = mapped_column(
+        Vector(768), nullable=True,
+        comment="768-dim vector embedding (nomic-embed-text)"
+    )
 
-    # Timestamps
-    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+        comment="Chunk creation timestamp"
+    )
 
-    # Relationships
     paper: Mapped["DBPaper"] = relationship("DBPaper", back_populates="chunks")
-
-
-
-class DBCitationMap(Base):
-    __tablename__ = "citation_map"
-
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    query_id: Mapped[str] = mapped_column(String(100))
-    claim_text: Mapped[str] = mapped_column(Text, nullable=False)
-    chunk_id: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
-    paper_id: Mapped[str] = mapped_column(String(100), ForeignKey("papers.paper_id"), nullable=False, index=True)
-    confidence: Mapped[float] = mapped_column(Float)
-
-    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    # Relationships
-    paper: Mapped["DBPaper"] = relationship("DBPaper", back_populates="citations")
-
-
-
-class DBResearchQuery(Base):
-    __tablename__ = "research_queries"
-
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    query_text: Mapped[str] = mapped_column(Text, nullable=False)
-    query_embedding: Mapped[Vector] = mapped_column(Vector(1536))
-
-    # Retrieved papers
-    retrieved_paper_ids: Mapped[list] = mapped_column(ARRAY(String))
-
-    # Results
-    answer: Mapped[str] = mapped_column(Text)
-    confidence: Mapped[float] = mapped_column(Float)
-
-    # Metadata
-    user_id: Mapped[int] = mapped_column(Integer)
-    session_id: Mapped[str] = mapped_column(String(100))
-
-    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())

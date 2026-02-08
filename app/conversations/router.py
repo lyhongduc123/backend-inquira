@@ -49,7 +49,7 @@ async def list_conversations(
     
     request_id = getattr(request.state, 'request_id', None)
     return paginated_response(
-        items=conversations,
+        data=conversations,
         total=total,
         page=page,
         page_size=page_size,

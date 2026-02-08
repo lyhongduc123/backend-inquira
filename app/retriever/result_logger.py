@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from app.retriever.provider.base_schemas import NormalizedResult
+from app.retriever.schemas import NormalizedResult
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)

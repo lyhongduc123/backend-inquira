@@ -31,7 +31,7 @@ async def compare_papers_tool(
         Comparison results
     """
     from app.retriever.paper_repository import PaperRepository
-    from app.llm import llm_service
+    from app.llm import get_llm_service
     
     logger.info(f"Comparing papers: {paper_ids} on aspects: {comparison_aspects}")
     
@@ -63,7 +63,7 @@ async def compare_papers_tool(
         }
     
     # Use LLM service to compare papers
-    comparison = await llm_service.compare_papers(
+    comparison = await get_llm_service().compare_papers(
         papers_data=papers,
         comparison_aspects=comparison_aspects or ["methodology", "findings", "limitations"]
     )
@@ -97,7 +97,8 @@ comparison_tool = Tool(
         )
     ]
 )
-tool_registry.register(comparison_tool, compare_papers_tool)
+# Tool will be registered on first use
+_comparison_tool = (comparison_tool, compare_papers_tool)
 
 
 # ============================================================================
@@ -121,7 +122,7 @@ async def opinion_meter_tool(
         Opinion distribution analysis
     """
     from app.retriever.paper_repository import PaperRepository
-    from app.llm import llm_service
+    from app.llm import get_llm_service
     
     logger.info(f"Analyzing opinions on topic: {topic}")
     
@@ -195,7 +196,7 @@ async def opinion_meter_tool(
         """
         
         from app.llm.provider import LLMProvider
-        provider = llm_service.llm_provider
+        provider = get_llm_service().llm_provider
         response = provider.simple_prompt(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3
@@ -261,7 +262,8 @@ opinion_meter = Tool(
         )
     ]
 )
-tool_registry.register(opinion_meter, opinion_meter_tool)
+# Tool will be registered on first use
+_opinion_meter = (opinion_meter, opinion_meter_tool)
 
 
 # ============================================================================
@@ -336,7 +338,8 @@ citation_analysis = Tool(
         )
     ]
 )
-tool_registry.register(citation_analysis, citation_analysis_tool)
+# Tool will be registered on first use
+_citation_analysis = (citation_analysis, citation_analysis_tool)
 
 
 # ============================================================================
@@ -426,7 +429,23 @@ research_trends = Tool(
         )
     ]
 )
-tool_registry.register(research_trends, research_trends_tool)
+# Tool will be registered on first use
+_research_trends = (research_trends, research_trends_tool)
 
 
-logger.info("Built-in tools registered successfully")
+# Lazy registration to avoid slow startup
+_tools_registered = False
+
+def register_builtin_tools():
+    """Register all built-in tools (lazy initialization)"""
+    global _tools_registered
+    if _tools_registered:
+        return
+    
+    tool_registry.register(*_comparison_tool)
+    tool_registry.register(*_opinion_meter)
+    tool_registry.register(*_citation_analysis)
+    tool_registry.register(*_research_trends)
+    
+    _tools_registered = True
+    logger.info("Built-in tools registered successfully")

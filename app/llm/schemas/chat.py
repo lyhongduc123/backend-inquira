@@ -5,6 +5,15 @@ from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel, Field
 
 
+class LLMParameterOverrides(BaseModel):
+    """Optional LLM parameter overrides for API requests"""
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Sampling temperature")
+    max_tokens: Optional[int] = Field(None, ge=1, description="Maximum tokens in response")
+    top_p: Optional[float] = Field(None, ge=0.0, le=1.0, description="Nucleus sampling threshold")
+    presence_penalty: Optional[float] = Field(None, ge=-2.0, le=2.0, description="Penalize new topics")
+    frequency_penalty: Optional[float] = Field(None, ge=-2.0, le=2.0, description="Penalize repetition")
+
+
 class SearchSummaryResponse(BaseModel):
     """Response model for search results summary"""
     query: str = Field(..., description="Original search query")
@@ -15,15 +24,28 @@ class SearchSummaryResponse(BaseModel):
 
 
 class QuestionBreakdownResponse(BaseModel):
-    """Response model for question breakdown"""
+    """Response model for question breakdown into search queries"""
     original_question: str = Field(..., description="Original user question")
     clarified_question: str = Field(..., description="Clarified/refined question")
-    subtopics: List[str] = Field(..., description="Breakdown sub-topics")
-    num_subtopics: int = Field(..., description="Number of sub-topics")
+    search_queries: List[str] = Field(..., description="Optimized search queries for academic retrieval")
+    num_queries: int = Field(..., description="Number of search queries")
     complexity: Literal["simple", "intermediate", "advanced"] = Field(..., description="Question complexity level")
-    explanations: Optional[List[str]] = Field(None, description="Optional explanations for each subtopic")
+    explanations: Optional[List[str]] = Field(None, description="Optional explanations for each query")
     has_explanations: bool = Field(..., description="Whether explanations are included")
-    model_used: str = Field(..., description="Model used for breakdown")
+    reasoning_content: Optional[str] = Field(None, description="LLM's reasoning process for generating queries")
+    model_used: str = Field(..., description="Model used for query generation")
+    llm_params_used: Optional[Dict[str, Any]] = Field(None, description="LLM parameters used for generation")
+    
+    # Backward compatibility
+    @property
+    def subtopics(self) -> List[str]:
+        """Backward compatibility alias for search_queries"""
+        return self.search_queries
+    
+    @property
+    def num_subtopics(self) -> int:
+        """Backward compatibility alias for num_queries"""
+        return self.num_queries
 
 
 class ChatResponse(BaseModel):
@@ -33,6 +55,7 @@ class ChatResponse(BaseModel):
     sources_used: int = Field(..., description="Number of sources used")
     model_used: str = Field(..., description="Model used for response")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+    llm_params_used: Optional[Dict[str, Any]] = Field(None, description="LLM parameters used for generation")
 
 
 class RelatedTopicsResponse(BaseModel):

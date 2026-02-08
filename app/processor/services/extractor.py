@@ -1,18 +1,39 @@
 import io
 import re
 import unicodedata
-from typing import Dict, Any, List
-from docling.document_converter import DocumentConverter
+from typing import Dict, Any, List, Optional
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
+from docling.datamodel.pipeline_options import (
+    ThreadedPdfPipelineOptions,
+)
+from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
+from docling.datamodel.base_models import InputFormat
 from docling_core.types.io import DocumentStream
 from app.extensions.logger import create_logger
+import xml.etree.ElementTree as ET
 
 logger = create_logger(__name__)
 
-
 class ExtractorService:
+    _pipeline_options = ThreadedPdfPipelineOptions(
+        accelerator_options=AcceleratorOptions(
+            device=AcceleratorDevice.CUDA,  # or AcceleratorDevice.AUTO
+        ),
+        do_ocr=False
+    )
+
     def __init__(self):
         """Initialize the extractor service with docling converter"""
-        self.converter = DocumentConverter()
+        self.converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_cls=ThreadedStandardPdfPipeline,
+                    pipeline_options=self._pipeline_options
+                )
+            }
+        )
+        self.converter.initialize_pipeline(InputFormat.PDF)
 
     def extract_pdf_structure(self, pdf_bytes: bytes) -> Dict[str, Any]:
         """
@@ -28,10 +49,7 @@ class ExtractorService:
             # Convert PDF bytes to file-like object
             pdf_file = DocumentStream(name="input.pdf", stream=io.BytesIO(pdf_bytes))
 
-            # Use docling to convert the PDF
             result = self.converter.convert(source=pdf_file)
-
-            # Export to dict for structured access
             doc_dict = result.document.export_to_dict()
 
             logger.info(
@@ -74,28 +92,38 @@ class ExtractorService:
 
     def _dict_to_markdown(self, doc_dict: Dict[str, Any]) -> str:
         """
-        Convert document dict to markdown text.
-        This is a simplified converter - docling's export_to_markdown is better.
+        Convert docling document dict to clean text (no markdown).
+        Extracts text from docling's structured format.
         
         Args:
             doc_dict: Document dictionary from docling
         Returns:
-            Markdown formatted text
+            Clean text without markdown formatting
         """
-        # Try to get main text content from the document structure
-        # The exact structure depends on docling's output format
         text_parts = []
         
-        # Extract text from document structure
-        if "main-text" in doc_dict:
-            for item in doc_dict.get("main-text", []):
-                if isinstance(item, dict):
-                    if "text" in item:
-                        text_parts.append(item["text"])
-                elif isinstance(item, str):
-                    text_parts.append(item)
+        # Extract texts from docling structure
+        texts = doc_dict.get("texts", [])
         
-        return "\n\n".join(text_parts) if text_parts else str(doc_dict)
+        for text_item in texts:
+            # Skip furniture (headers, footers, page numbers)
+            if text_item.get("content_layer") == "furniture":
+                continue
+            
+            # Get the text content
+            text_content = text_item.get("text", "")
+            if not text_content:
+                continue
+            
+            label = text_item.get("label", "")
+            
+            # Add section headers as plain text (no markdown)
+            if label == "section_header":
+                text_parts.append(f"\n{text_content}\n")
+            else:
+                text_parts.append(text_content)
+        
+        return "\n\n".join(text_parts)
 
     def split_sections(self, text: str) -> dict:
         """
@@ -173,3 +201,188 @@ class ExtractorService:
         text = re.sub(r"\n{3,}", "\n\n", text)
 
         return text.strip()
+
+    def extract_tei_xml_structure(self, tei_xml: str) -> Dict[str, Any]:
+        """
+        Extract structured data from GROBID TEI XML.
+        
+        TEI (Text Encoding Initiative) XML from GROBID provides rich structured data:
+        - Title, authors, affiliations
+        - Abstract
+        - Full text with section headers
+        - References
+        - Figures and tables metadata
+        
+        Args:
+            tei_xml (str): TEI XML string from GROBID
+            
+        Returns:
+            Dictionary with structured document data
+        """
+        try:
+            root = ET.fromstring(tei_xml)
+            
+            # TEI namespace
+            ns = {'tei': 'http://www.tei-c.org/ns/1.0'}
+            
+            # Extract metadata
+            title_elem = root.find('.//tei:titleStmt/tei:title[@type="main"]', ns)
+            title = title_elem.text if title_elem is not None else ""
+            
+            # Extract authors
+            authors = []
+            for author in root.findall('.//tei:sourceDesc//tei:author', ns):
+                persName = author.find('.//tei:persName', ns)
+                if persName is not None:
+                    forename = persName.find('.//tei:forename[@type="first"]', ns)
+                    surname = persName.find('.//tei:surname', ns)
+                    
+                    author_name = ""
+                    if forename is not None and forename.text:
+                        author_name = forename.text + " "
+                    if surname is not None and surname.text:
+                        author_name += surname.text
+                    
+                    # Extract affiliation
+                    affiliation_elem = author.find('.//tei:affiliation/tei:orgName[@type="institution"]', ns)
+                    affiliation = affiliation_elem.text if affiliation_elem is not None else None
+                    
+                    if author_name.strip():
+                        authors.append({
+                            'name': author_name.strip(),
+                            'affiliation': affiliation
+                        })
+            
+            # Extract abstract
+            abstract_elem = root.find('.//tei:profileDesc/tei:abstract', ns)
+            abstract = self._extract_text_from_element(abstract_elem, ns) if abstract_elem is not None else ""
+            
+            # Extract body sections
+            sections = []
+            body = root.find('.//tei:text/tei:body', ns)
+            if body is not None:
+                for div in body.findall('.//tei:div', ns):
+                    head_elem = div.find('.//tei:head', ns)
+                    section_title = head_elem.text if head_elem is not None else "Unknown Section"
+                    
+                    # Extract paragraphs in this section
+                    paragraphs = []
+                    for p in div.findall('.//tei:p', ns):
+                        p_text = self._extract_text_from_element(p, ns)
+                        if p_text.strip():
+                            paragraphs.append(p_text.strip())
+                    
+                    if paragraphs:
+                        sections.append({
+                            'title': section_title,
+                            'content': paragraphs
+                        })
+            
+            # Extract references
+            references = []
+            for biblStruct in root.findall('.//tei:listBibl/tei:biblStruct', ns):
+                ref_title_elem = biblStruct.find('.//tei:analytic/tei:title[@type="main"]', ns)
+                if ref_title_elem is None:
+                    ref_title_elem = biblStruct.find('.//tei:monogr/tei:title', ns)
+                
+                ref_title = ref_title_elem.text if ref_title_elem is not None else ""
+                
+                # Extract reference authors
+                ref_authors = []
+                for ref_author in biblStruct.findall('.//tei:author/tei:persName', ns):
+                    ref_author_text = self._extract_text_from_element(ref_author, ns)
+                    if ref_author_text.strip():
+                        ref_authors.append(ref_author_text.strip())
+                
+                if ref_title and ref_title.strip():
+                    references.append({
+                        'title': ref_title.strip(),
+                        'authors': ref_authors
+                    })
+            
+            result = {
+                'title': title,
+                'authors': authors,
+                'abstract': abstract,
+                'sections': sections,
+                'references': references
+            }
+            
+            logger.info(f"Successfully extracted TEI XML structure: {len(sections)} sections, {len(references)} references")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error extracting TEI XML structure: {e}")
+            raise Exception(f"Failed to extract TEI XML: {e}")
+    
+    def _extract_text_from_element(self, element: Optional[ET.Element], ns: Dict[str, str]) -> str:
+        """
+        Recursively extract text from an XML element and its children.
+        
+        Args:
+            element: XML element
+            ns: Namespace dictionary
+            
+        Returns:
+            Extracted text
+        """
+        if element is None:
+            return ""
+        
+        # Get text content
+        text_parts = []
+        
+        # Add element's direct text
+        if element.text:
+            text_parts.append(element.text)
+        
+        # Add text from children
+        for child in element:
+            child_text = self._extract_text_from_element(child, ns)
+            if child_text:
+                text_parts.append(child_text)
+            
+            # Add tail text after child element
+            if child.tail:
+                text_parts.append(child.tail)
+        
+        return " ".join(text_parts)
+    
+    def extract_tei_xml_text(self, tei_xml: str) -> str:
+        """
+        Extract plain text from GROBID TEI XML (backward compatibility).
+        For new code, prefer extract_tei_xml_structure() for better results.
+        
+        Args:
+            tei_xml (str): TEI XML string from GROBID
+            
+        Returns:
+            Extracted text as a string
+        """
+        try:
+            structure = self.extract_tei_xml_structure(tei_xml)
+            
+            # Combine title, abstract, and sections into text
+            text_parts = []
+            
+            if structure.get('title'):
+                text_parts.append(structure['title'])
+            
+            if structure.get('abstract'):
+                text_parts.append(structure['abstract'])
+            
+            for section in structure.get('sections', []):
+                text_parts.append(section['title'])
+                text_parts.extend(section['content'])
+            
+            full_text = "\n\n".join(text_parts)
+            
+            # Clean up the text
+            full_text = self._fix_text_encoding(full_text)
+            
+            logger.info(f"Successfully extracted text from TEI XML: {len(full_text)} characters")
+            return full_text
+            
+        except Exception as e:
+            logger.error(f"Error extracting text from TEI XML: {e}")
+            raise Exception(f"Failed to extract text from TEI XML: {e}")

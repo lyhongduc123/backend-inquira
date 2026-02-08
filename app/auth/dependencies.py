@@ -71,3 +71,33 @@ async def get_current_active_user(
     if not current_user.is_active:
         raise ForbiddenException("User account is inactive")
     return current_user
+
+
+async def get_admin_user(
+    current_user: DBUser = Depends(get_current_user)
+) -> DBUser:
+    """
+    Dependency to ensure current user has admin privileges.
+    
+    TODO: Add is_admin field to DBUser model.
+    For now, this checks is_active as a placeholder.
+    
+    Args:
+        current_user: Current user from get_current_user dependency
+    
+    Returns:
+        DBUser instance if user is admin
+    
+    Raises:
+        ForbiddenException: If user is not admin
+    """
+    # TODO: Replace with actual admin check once is_admin field exists
+    # if not getattr(current_user, 'is_admin', False):
+    #     raise ForbiddenException("Admin privileges required")
+    
+    # Temporary: Allow all active users (replace this)
+    if not current_user.is_active:
+        raise ForbiddenException("Admin privileges required")
+    
+    logger.warning(f"Admin endpoint accessed by user {current_user.id} - TODO: Add proper admin role check")
+    return current_user

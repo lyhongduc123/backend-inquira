@@ -1,9 +1,11 @@
 """
 Tool-aware chat service mixin for handling LLM tool calls
+NOTE: Currently not used in the main chat service, this is a placeholder/draft for future implementation.
 """
 import json
 from typing import AsyncGenerator, List, Dict, Any, Optional
 from app.llm.tools import ToolExecutor, ToolCall, tool_registry
+from app.llm.tools.builtin_tools import register_builtin_tools
 from app.extensions.logger import create_logger
 from app.extensions.stream import stream_event
 
@@ -30,6 +32,9 @@ class ToolAwareChatMixin:
         Yields:
             SSE events for tool execution
         """
+        # Ensure tools are registered (lazy initialization)
+        register_builtin_tools()
+        
         # Create tool executor with context
         executor = ToolExecutor(context={
             "db_session": db_session,
@@ -105,8 +110,6 @@ class ToolAwareChatMixin:
                     }
                 ):
                     yield evt
-        
-        return results
     
     async def stream_with_tools(
         self,
@@ -143,8 +146,8 @@ class ToolAwareChatMixin:
             content_chunks = []
             
             # Use LLM provider with tools
-            from app.llm import llm_service
-            llm_provider = llm_service.llm_provider
+            from app.llm import get_llm_service
+            llm_provider = get_llm_service().llm_provider
             
             try:
                 # Stream response

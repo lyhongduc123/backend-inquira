@@ -18,23 +18,27 @@ class DBAuthor(Base):
     __tablename__ = "authors"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    author_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    author_id: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False, index=True,
+        comment="Primary author ID (Semantic Scholar preferred, OpenAlex fallback)"
+    )
+    openalex_id: Mapped[str] = mapped_column(
+        String(100), nullable=True, index=True,
+        comment="OpenAlex author ID (always stored separately)"
+    )
     
-    # Basic info
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     display_name: Mapped[str] = mapped_column(String(255), nullable=True)
-    
-    # Disambiguation & Identity
+
     orcid: Mapped[str] = mapped_column(String(50), nullable=True, unique=True, index=True)
     external_ids: Mapped[dict] = mapped_column(JSONB, nullable=True)  # OpenAlex, Semantic Scholar, etc.
     
-    # Author metadata
     h_index: Mapped[int] = mapped_column(Integer, default=0)
     i10_index: Mapped[int] = mapped_column(Integer, default=0)
     total_citations: Mapped[int] = mapped_column(Integer, default=0, index=True)
     total_papers: Mapped[int] = mapped_column(Integer, default=0)
     
-    # Trust signals
+
     verified: Mapped[bool] = mapped_column(Boolean, default=False)  # ORCID-verified or manually verified
     retracted_papers_count: Mapped[int] = mapped_column(Integer, default=0, index=True)
     

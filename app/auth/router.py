@@ -48,9 +48,9 @@ async def google_login():
     Returns redirect URL to Google's OAuth consent screen
     """
     provider = GoogleOAuthProvider(
-        client_id=settings.GOOGLE_CLIENT_ID,
-        client_secret=settings.GOOGLE_CLIENT_SECRET,
-        redirect_uri=settings.GOOGLE_REDIRECT_URI,
+        client_id=settings.OAUTH_GOOGLE_CLIENT_ID,
+        client_secret=settings.OAUTH_GOOGLE_CLIENT_SECRET,
+        redirect_uri=settings.OAUTH_GOOGLE_REDIRECT_URI,
     )
 
     state = secrets.token_urlsafe(32)
@@ -83,9 +83,9 @@ async def google_callback(
         return RedirectResponse(url=redirect_url)
 
     provider = GoogleOAuthProvider(
-        client_id=settings.GOOGLE_CLIENT_ID,
-        client_secret=settings.GOOGLE_CLIENT_SECRET,
-        redirect_uri=settings.GOOGLE_REDIRECT_URI,
+        client_id=settings.OAUTH_GOOGLE_CLIENT_ID,
+        client_secret=settings.OAUTH_GOOGLE_CLIENT_SECRET,
+        redirect_uri=settings.OAUTH_GOOGLE_REDIRECT_URI,
     )
 
     try:
@@ -113,9 +113,9 @@ async def github_login():
     Returns redirect URL to GitHub's OAuth consent screen
     """
     provider = GitHubOAuthProvider(
-        client_id=settings.GITHUB_CLIENT_ID,
-        client_secret=settings.GITHUB_CLIENT_SECRET,
-        redirect_uri=settings.GITHUB_REDIRECT_URI,
+        client_id=settings.OAUTH_GITHUB_CLIENT_ID,
+        client_secret=settings.OAUTH_GITHUB_CLIENT_SECRET,
+        redirect_uri=settings.OAUTH_GITHUB_REDIRECT_URI,
     )
 
     state = secrets.token_urlsafe(32)
@@ -148,9 +148,9 @@ async def github_callback(
         return RedirectResponse(url=redirect_url)
 
     provider = GitHubOAuthProvider(
-        client_id=settings.GITHUB_CLIENT_ID,
-        client_secret=settings.GITHUB_CLIENT_SECRET,
-        redirect_uri=settings.GITHUB_REDIRECT_URI,
+        client_id=settings.OAUTH_GITHUB_CLIENT_ID,
+        client_secret=settings.OAUTH_GITHUB_CLIENT_SECRET,
+        redirect_uri=settings.OAUTH_GITHUB_REDIRECT_URI,
     )
 
     try:
@@ -203,7 +203,7 @@ async def refresh_access_token(
         access_token=access_token,
         refresh_token=new_refresh_token,
         token_type="bearer",
-        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
     
     request_id = getattr(http_request.state, 'request_id', None)

@@ -19,8 +19,14 @@ import app.models
 
 # Import routers
 from app.chat import router as chat_router
+from app.chat.test_router import router as test_router
 from app.conversations import router as conversations_router
 from app.auth import router as auth_router
+from app.papers import router as papers_router
+from app.processor.router import router as preprocessing_router
+from app.authors.router import router as authors_router
+from app.institutions.router import router as institutions_router
+from app.validation import router as validation_router
 
 # Import core components for error handling
 from app.core.exceptions import BaseApiException
@@ -114,17 +120,6 @@ def read_root():
 def health_check():
     return {"status": "healthy"}
 
-@app.get("/api/test")
-async def api_test():
-    res = await SemanticScholarProvider("test").get_snippet("Walrus Sui definitions")
-    return res
-
-@app.get("/test")
-async def api_test_retrieval(db: AsyncSession = Depends(get_db_session)):
-    service = PaperRetrievalService(db)
-    papers = await service.search("Blockchain Technology: Core", limit=5, services=[RetrievalServiceType.SEMANTIC])
-    return papers
-
 # API v1 routes
 app.include_router(
     auth_router,
@@ -140,6 +135,36 @@ app.include_router(
     conversations_router, 
     prefix="/api/v1/conversations", 
     tags=["conversations"]
+)
+app.include_router(
+    papers_router,
+    prefix="/api/v1/papers",
+    tags=["papers"]
+)
+app.include_router(
+    preprocessing_router,
+    prefix="/api/v1/admin/preprocessing",
+    tags=["admin", "preprocessing"]
+)
+app.include_router(
+    authors_router,
+    prefix="/api/v1/admin/authors",
+    tags=["admin", "authors"]
+)
+app.include_router(
+    institutions_router,
+    prefix="/api/v1/admin/institutions",
+    tags=["admin", "institutions"]
+)
+app.include_router(
+    validation_router,
+    prefix="/api/v1/admin/validation",
+    tags=["admin", "validation"]
+)
+app.include_router(
+    test_router,
+    prefix="/api/v1",
+    tags=["test"]
 )
 
 def start():
