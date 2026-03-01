@@ -13,7 +13,8 @@ Usage:
     python -m app.trust.compute_scores --paper-id <paper_id>
 """
 
-from typing import List, Optional
+import math
+from typing import Any, Dict, List, Optional
 import logging
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -28,359 +29,185 @@ class TrustScoreComputer:
     def __init__(self, db: Session):
         self.db = db
     
-    def compute_author_reputation(self, author_id: int) -> float:
-        """
-        Compute composite reputation score for an author (0-100).
-        
-        Factors:
-        - H-index (weight: 30%)
-        - Total citations (weight: 20%)
-        - Field-weighted citation impact (weight: 20%)
-        - Verification status (weight: 10%)
-        - Retraction penalty (weight: -20% per retraction)
-        - Self-citation rate (weight: -10% if > 30%)
-        - Collaboration diversity (weight: 10%)
-        """
-        author = self.db.query(DBAuthor).get(author_id)
-        if not author:
-            return 0.0
-        
-        score = 0.0
-        h_score = min(30, (author.h_index or 0) * 0.6)
-        score += h_score
-        
-        if author.total_citations and author.total_citations > 0:
-            import math
-            citation_score = min(20, math.log10(author.total_citations) * 4)
-            score += citation_score
-        
-        if author.field_weighted_citation_impact:
-            fwci_score = min(20, author.field_weighted_citation_impact * 10)
-            score += fwci_score
-        
-        if author.verified:
-            score += 10
-        
-        retraction_penalty = (author.retracted_papers_count or 0) * 20
-        score -= retraction_penalty
-        
-        if author.self_citation_rate and author.self_citation_rate > 0.3:
-            score -= 10
-        
-        if author.collaboration_diversity_score:
-            collab_score = author.collaboration_diversity_score * 10
-            score += collab_score
-        
-        return max(0.0, min(100.0, score))
+def compute_author_reputation(author_data: Dict[str, Any]) -> float:
+    """
+    Compute composite reputation score for an author (0-100).
     
-    def compute_institution_reputation(self, institution_id: int) -> float:
-        """
-        Compute composite reputation score for an institution (0-100).
-        
-        Factors:
-        - Total citations (weight: 30%)
-        - H-index (weight: 25%)
-        - Average paper quality (FWCI) (weight: 25%)
-        - Retraction rate penalty (weight: -20%)
-        - Paper volume (weight: 10%)
-        """
-        institution = self.db.query(DBInstitution).get(institution_id)
-        if not institution:
-            return 0.0
-        
-        score = 0.0
-        
-        # 1. Citation count (0-30 points, logarithmic)
-        if institution.total_citations and institution.total_citations > 0:
-            import math
-            citation_score = min(30, math.log10(institution.total_citations) * 6)
-            score += citation_score
-        
-        # 2. H-index (0-25 points, capped at 100)
-        h_score = min(25, (institution.h_index or 0) * 0.25)
-        score += h_score
-        
-        # 3. Average paper quality (0-25 points)
-        if institution.avg_paper_quality:
-            quality_score = min(25, institution.avg_paper_quality * 12.5)
-            score += quality_score
-        
-        # 4. Retraction rate penalty
-        retraction_penalty = (institution.retraction_rate or 0) * 100  # 1% = -1 point
-        score -= retraction_penalty
-        
-        # 5. Paper volume (0-10 points, logarithmic)
-        if institution.total_papers and institution.total_papers > 0:
-            import math
-            volume_score = min(10, math.log10(institution.total_papers) * 3)
-            score += volume_score
-        
-        return max(0.0, min(100.0, score))
+    Pure function - takes author data dict, returns score.
     
-    def compute_author_metrics(self, author_id: int) -> None:
-        """Compute h-index, total citations, FWCI, etc. for an author."""
-        author = self.db.query(DBAuthor).get(author_id)
-        if not author:
-            return
-        
-        # Get all papers by this author
-        papers = self.db.query(DBPaper).join(DBAuthorPaper).filter(
-            DBAuthorPaper.author_id == author_id
-        ).all()
-        
-        # Total papers
-        author.total_papers = len(papers)
-        
-        # Total citations
-        author.total_citations = sum(p.citation_count or 0 for p in papers)
-        
-        # H-index calculation
-        citation_counts = sorted([p.citation_count or 0 for p in papers], reverse=True)
-        h_index = 0
-        for i, citations in enumerate(citation_counts, 1):
-            if citations >= i:
-                h_index = i
-            else:
-                break
-        author.h_index = h_index
-        
-        # i10-index (papers with >=10 citations)
-        author.i10_index = sum(1 for p in papers if (p.citation_count or 0) >= 10)
-        
-        # Average FWCI
-        fwci_values = [p.fwci for p in papers if p.fwci is not None]
-        if fwci_values:
-            author.field_weighted_citation_impact = sum(fwci_values) / len(fwci_values)
-        
-        # Check retractions
-        retracted_papers = [p for p in papers if p.is_retracted]
-        author.has_retracted_papers = len(retracted_papers) > 0
-        author.retracted_papers_count = len(retracted_papers)
-        
-        # Collaboration diversity (unique institutions / total papers)
-        unique_institutions = self.db.query(
-            func.count(func.distinct(DBAuthorPaper.institution_id))
-        ).filter(
-            DBAuthorPaper.author_id == author_id,
-            DBAuthorPaper.institution_id.isnot(None)
-        ).scalar() or 0
-        
-        if author.total_papers > 0:
-            author.collaboration_diversity_score = min(1.0, unique_institutions / author.total_papers)
-        
-        # Corresponding author frequency
-        corresponding_count = self.db.query(DBAuthorPaper).filter(
-            DBAuthorPaper.author_id == author_id,
-            DBAuthorPaper.is_corresponding == True
-        ).count()
-        author.is_corresponding_author_frequently = (
-            corresponding_count / author.total_papers > 0.5 if author.total_papers > 0 else False
-        )
-        
-        # Average author position
-        positions = self.db.query(DBAuthorPaper.author_position).filter(
-            DBAuthorPaper.author_id == author_id,
-            DBAuthorPaper.author_position.isnot(None)
-        ).all()
-        if positions:
-            author.average_author_position = sum(p[0] for p in positions) / len(positions)
-        
-        # Compute self-citation rate (requires citations table)
-        self_citations = self.db.query(DBCitation).filter(
-            DBCitation.is_self_citation == True
-        ).join(
-            DBAuthorPaper,
-            DBCitation.cited_paper_id == DBAuthorPaper.paper_id
-        ).filter(
-            DBAuthorPaper.author_id == author_id
-        ).count()
-        
-        total_citations_received = self.db.query(DBCitation).join(
-            DBAuthorPaper,
-            DBCitation.cited_paper_id == DBAuthorPaper.paper_id
-        ).filter(
-            DBAuthorPaper.author_id == author_id
-        ).count()
-        
-        if total_citations_received > 0:
-            author.self_citation_rate = self_citations / total_citations_received
-        
-        self.db.commit()
+    Factors:
+    - H-index (weight: 30%)
+    - Total citations (weight: 20%)
+    - Field-weighted citation impact (weight: 20%)
+    - Verification status (weight: 10%)
+    - Retraction penalty (weight: -20% per retraction)
+    - Collaboration diversity (weight: 10%)
     
-    def compute_paper_trust_scores(self, paper_id: int) -> None:
-        """Compute trust scores for a paper based on its authors and institutions."""
-        paper = self.db.query(DBPaper).get(paper_id)
-        if not paper:
-            return
+    Args:
+        author_data: Dict with keys: h_index, total_citations, field_weighted_citation_impact,
+                     verified, retracted_papers_count, collaboration_diversity_score
         
-        # Get all authors for this paper
-        author_papers = self.db.query(DBAuthorPaper).filter_by(paper_id=paper_id).all()
-        
-        if not author_papers:
-            return
-        
-        # Author trust score (average)
-        author_scores = []
-        for ap in author_papers:
-            if ap.author.reputation_score:
-                author_scores.append(ap.author.reputation_score)
-        
-        if author_scores:
-            paper.author_trust_score = sum(author_scores) / len(author_scores)
-        
-        # Institutional trust score (average)
-        institution_scores = []
-        for ap in author_papers:
-            if ap.institution and ap.institution.reputation_score:
-                institution_scores.append(ap.institution.reputation_score)
-        
-        if institution_scores:
-            paper.institutional_trust_score = sum(institution_scores) / len(institution_scores)
-        
-        # Network diversity score
-        unique_institutions = len(set(ap.institution_id for ap in author_papers if ap.institution_id))
-        paper.network_diversity_score = min(1.0, unique_institutions / len(author_papers))
-        
-        # Author count
-        paper.author_count = len(author_papers)
-        paper.is_single_author = len(author_papers) == 1
-        
-        # Update legacy fields from relationships
-        paper.institutions_distinct_count = unique_institutions
-        paper.countries_distinct_count = len(set(
-            ap.institution.country_code for ap in author_papers 
-            if ap.institution and ap.institution.country_code
-        ))
-        
-        self.db.commit()
+    Returns:
+        Reputation score (0-100)
+    """
+    if not author_data:
+        return 0.0
     
-    def update_all_authors(self) -> None:
-        """Compute metrics and reputation for all authors."""
-        logger.info("Computing metrics for all authors...")
-        
-        authors = self.db.query(DBAuthor).all()
-        total = len(authors)
-        
-        for i, author in enumerate(authors, 1):
-            if i % 100 == 0:
-                logger.info(f"Processing author {i}/{total}")
-            
-            self.compute_author_metrics(author.id)
-            author.reputation_score = self.compute_author_reputation(author.id)
-        
-        self.db.commit()
-        logger.info(f"Completed author reputation computation for {total} authors")
+    score = 0.0
     
-    def update_all_institutions(self) -> None:
-        """Compute metrics and reputation for all institutions."""
-        logger.info("Computing metrics for all institutions...")
-        
-        institutions = self.db.query(DBInstitution).all()
-        total = len(institutions)
-        
-        for i, institution in enumerate(institutions, 1):
-            if i % 50 == 0:
-                logger.info(f"Processing institution {i}/{total}")
-            
-            # Compute metrics from papers
-            papers = self.db.query(DBPaper).join(DBAuthorPaper).filter(
-                DBAuthorPaper.institution_id == institution.id
-            ).all()
-            
-            institution.total_papers = len(papers)
-            institution.total_citations = sum(p.citation_count or 0 for p in papers)
-            
-            # Average paper quality
-            fwci_values = [p.fwci for p in papers if p.fwci]
-            if fwci_values:
-                institution.avg_paper_quality = sum(fwci_values) / len(fwci_values)
-            
-            # Retraction rate
-            retracted = sum(1 for p in papers if p.is_retracted)
-            institution.retraction_rate = retracted / institution.total_papers if institution.total_papers > 0 else 0
-            
-            # Compute reputation
-            institution.reputation_score = self.compute_institution_reputation(institution.id)
-        
-        self.db.commit()
-        logger.info(f"Completed institution reputation computation for {total} institutions")
+    # 1. H-index (0-30 points, capped at 50)
+    h_index = author_data.get('h_index', 0) or 0
+    h_score = min(30, h_index * 0.6)
+    score += h_score
     
-    def update_all_papers(self) -> None:
-        """Compute trust scores for all papers."""
-        logger.info("Computing trust scores for all papers...")
+    # 2. Citation count (0-20 points, logarithmic)
+    total_citations = author_data.get('total_citations', 0) or 0
+    if total_citations > 0:
+        citation_score = min(20, math.log10(total_citations) * 4)
+        score += citation_score
+    
+    # 3. FWCI (0-20 points)
+    fwci = author_data.get('field_weighted_citation_impact')
+    if fwci:
+        fwci_score = min(20, fwci * 10)
+        score += fwci_score
+    
+    # 4. Verification bonus (10 points)
+    if author_data.get('verified', False):
+        score += 10
+    
+    # 5. Retraction penalty (-20 per retraction)
+    retraction_count = author_data.get('retracted_papers_count', 0) or 0
+    retraction_penalty = retraction_count * 20
+    score -= retraction_penalty
+    
+    # 6. Collaboration diversity (0-10 points)
+    collab_diversity = author_data.get('collaboration_diversity_score')
+    if collab_diversity:
+        collab_score = collab_diversity * 10
+        score += collab_score
+    
+    return max(0.0, min(100.0, score))
+    
+def compute_institution_reputation(institution_data: Dict[str, Any]) -> float:
+    """
+    Compute composite reputation score for an institution (0-100).
+    
+    Pure function - takes institution data dict, returns score.
+    
+    Factors:
+    - Total citations (weight: 30%)
+    - H-index (weight: 25%)
+    - Average paper quality (FWCI) (weight: 25%)
+    - Retraction rate penalty (weight: -20%)
+    - Paper volume (weight: 10%)
+    
+    Args:
+        institution_data: Dict with keys: total_citations, h_index, avg_paper_quality,
+                         retraction_rate, total_papers
         
-        papers = self.db.query(DBPaper).all()
-        total = len(papers)
-        
-        for i, paper in enumerate(papers, 1):
-            if i % 500 == 0:
-                logger.info(f"Processing paper {i}/{total}")
-            
-            self.compute_paper_trust_scores(paper.id)
-        
-        self.db.commit()
-        logger.info(f"Completed paper trust score computation for {total} papers")
+    Returns:
+        Reputation score (0-100)
+    """
+    if not institution_data:
+        return 0.0
+    
+    score = 0.0
+    
+    # 1. Citation count (0-30 points, logarithmic)
+    total_citations = institution_data.get('total_citations', 0) or 0
+    if total_citations > 0:
+        citation_score = min(30, math.log10(total_citations) * 6)
+        score += citation_score
+    
+    # 2. H-index (0-25 points, capped at 100)
+    h_index = institution_data.get('h_index', 0) or 0
+    h_score = min(25, h_index * 0.25)
+    score += h_score
+    
+    # 3. Average paper quality (0-25 points)
+    avg_quality = institution_data.get('avg_paper_quality')
+    if avg_quality:
+        quality_score = min(25, avg_quality * 12.5)
+        score += quality_score
+    
+    # 4. Retraction rate penalty (1% = -1 point)
+    retraction_rate = institution_data.get('retraction_rate', 0) or 0
+    retraction_penalty = retraction_rate * 100
+    score -= retraction_penalty
+    
+    # 5. Paper volume (0-10 points, logarithmic)
+    total_papers = institution_data.get('total_papers', 0) or 0
+    if total_papers > 0:
+        volume_score = min(10, math.log10(total_papers) * 3)
+        score += volume_score
+    
+    return max(0.0, min(100.0, score))
+    
 
+    
+def compute_paper_trust_scores(
+    author_papers_data: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Compute trust scores for a paper based on its authors and institutions.
+    
+    Pure function - takes author-paper data list, returns score dictionary.
+    
+    Args:
+        author_papers_data: List of dicts with keys:
+            - author_reputation_score: float | None
+            - institution_reputation_score: float | None
+            - institution_id: int | None
+            - country_code: str | None
+        
+    Returns:
+        Dict with computed scores: author_trust_score, institutional_trust_score,
+        network_diversity_score, author_count, is_single_author, etc.
+    """
+    if not author_papers_data:
+        return {
+            "author_trust_score": None,
+            "institutional_trust_score": None,
+            "network_diversity_score": 0.0,
+            "author_count": 0,
+            "is_single_author": False,
+            "institutions_distinct_count": 0,
+            "countries_distinct_count": 0,
+        }
+    
+    # Author trust score (average)
+    author_scores = [
+        ap['author_reputation_score']
+        for ap in author_papers_data
+        if ap.get('author_reputation_score') is not None
+    ]
+    
+    # Institutional trust score (average)
+    institution_scores = [
+        ap['institution_reputation_score']
+        for ap in author_papers_data
+        if ap.get('institution_reputation_score') is not None
+    ]
+    
+    # Network diversity score
+    unique_institutions = len(
+        set(ap.get('institution_id') for ap in author_papers_data if ap.get('institution_id'))
+    )
+    
+    # Country diversity
+    unique_countries = len(
+        set(ap.get('country_code') for ap in author_papers_data if ap.get('country_code'))
+    )
+    
+    return {
+        "author_trust_score": sum(author_scores) / len(author_scores) if author_scores else None,
+        "institutional_trust_score": sum(institution_scores) / len(institution_scores) if institution_scores else None,
+        "network_diversity_score": min(1.0, unique_institutions / len(author_papers_data)) if author_papers_data else 0.0,
+        "author_count": len(author_papers_data),
+        "is_single_author": len(author_papers_data) == 1,
+        "institutions_distinct_count": unique_institutions,
+        "countries_distinct_count": unique_countries,
+    }
+    
 
-def compute_all_trust_scores(db: Session) -> None:
-    """Run complete trust score computation pipeline."""
-    computer = TrustScoreComputer(db)
-    
-    # Order matters: authors -> institutions -> papers
-    logger.info("Starting full trust score computation...")
-    
-    computer.update_all_authors()
-    computer.update_all_institutions()
-    computer.update_all_papers()
-    
-    logger.info("Trust score computation complete!")
-
-
-if __name__ == "__main__":
-    import argparse
-    import sys
-    import os
-    
-    # Add parent directory to path for imports
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-    
-    try:
-        from app.db.database import AsyncSession
-    except ImportError:
-        print("Error: Could not import SessionLocal. Make sure you're running from the backend-exegent directory.")
-        print("Usage: python -m app.trust.compute_scores --all")
-        sys.exit(1)
-    
-    parser = argparse.ArgumentParser(description="Compute trust scores")
-    parser.add_argument("--all", action="store_true", help="Compute all scores")
-    parser.add_argument("--authors-only", action="store_true", help="Compute author scores only")
-    parser.add_argument("--institutions-only", action="store_true", help="Compute institution scores only")
-    parser.add_argument("--papers-only", action="store_true", help="Compute paper scores only")
-    parser.add_argument("--paper-id", type=int, help="Compute scores for specific paper")
-    parser.add_argument("--author-id", type=int, help="Compute scores for specific author")
-    
-    args = parser.parse_args()
-    
-    db = Session()
-    computer = TrustScoreComputer(db)
-    
-    try:
-        if args.all:
-            compute_all_trust_scores(db)
-        elif args.authors_only:
-            computer.update_all_authors()
-        elif args.institutions_only:
-            computer.update_all_institutions()
-        elif args.papers_only:
-            computer.update_all_papers()
-        elif args.paper_id:
-            computer.compute_paper_trust_scores(args.paper_id)
-            logger.info(f"Computed trust scores for paper {args.paper_id}")
-        elif args.author_id:
-            computer.compute_author_metrics(args.author_id)
-            score = computer.compute_author_reputation(args.author_id)
-            logger.info(f"Author {args.author_id} reputation score: {score:.2f}")
-        else:
-            parser.print_help()
-    finally:
-        db.close()

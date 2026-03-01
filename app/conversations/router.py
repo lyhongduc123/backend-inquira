@@ -16,13 +16,13 @@ from app.conversations.schemas import (
 )
 from app.auth.dependencies import get_current_user
 from app.models.users import DBUser
-from app.core.responses import ApiResponse, PaginatedData, success_response, paginated_response
+from app.core.responses import PaginatedData
 from app.core.exceptions import NotFoundException
 
 router = APIRouter()
 
 
-@router.get("", response_model=ApiResponse[PaginatedData[ConversationSummary]])
+@router.get("", response_model=PaginatedData[ConversationSummary])
 async def list_conversations(
     request: Request,
     page: int = Query(1, ge=1, description="Page number"),
@@ -30,7 +30,7 @@ async def list_conversations(
     archived: Optional[bool] = Query(None, description="Filter by archive status"),
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
-) -> ApiResponse[PaginatedData[ConversationSummary]]:
+) -> PaginatedData[ConversationSummary]:
     """
     List all conversations for the current user
     
@@ -47,22 +47,26 @@ async def list_conversations(
         archived=archived
     )
     
-    request_id = getattr(request.state, 'request_id', None)
-    return paginated_response(
-        data=conversations,
+    from math import ceil
+    total_pages = ceil(total / page_size) if page_size > 0 else 0
+    
+    return PaginatedData(
+        items=conversations,
         total=total,
         page=page,
         page_size=page_size,
-        request_id=request_id
+        total_pages=total_pages,
+        has_next=page < total_pages,
+        has_previous=page > 1
     )
     
-@router.post("", response_model=ApiResponse[ConversationDetail])
+@router.post("", response_model=ConversationDetail)
 async def create_conversation(
     http_request: Request,
     request: ConversationCreate,
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
-) -> ApiResponse[ConversationDetail]:
+) -> ConversationDetail:
     """
     Create a new conversation
     
@@ -75,16 +79,15 @@ async def create_conversation(
         title=request.title
     )
     
-    request_id = getattr(http_request.state, 'request_id', None)
-    return success_response(conversation, request_id=request_id)
+    return conversation
 
-@router.get("/{conversation_id}", response_model=ApiResponse[ConversationDetail])
+@router.get("/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation(
     http_request: Request,
     conversation_id: str,
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
-) -> ApiResponse[ConversationDetail]:
+) -> ConversationDetail:
     """
     Get detailed conversation including all messages
     
@@ -96,17 +99,16 @@ async def get_conversation(
     if not conversation:
         raise NotFoundException(f"Conversation {conversation_id} not found")
     
-    request_id = getattr(http_request.state, 'request_id', None)
-    return success_response(conversation, request_id=request_id)
+    return conversation
 
-@router.put("/{conversation_id}", response_model=ApiResponse[ConversationDetail])
+@router.put("/{conversation_id}", response_model=ConversationDetail)
 async def update_conversation(
     http_request: Request,
     conversation_id: str,
     request: ConversationUpdate,
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
-) -> ApiResponse[ConversationDetail]:
+) -> ConversationDetail:
     """
     Update conversation (rename, archive, etc.)
     
@@ -125,17 +127,16 @@ async def update_conversation(
     if not conversation:
         raise NotFoundException(f"Conversation {conversation_id} not found")
     
-    request_id = getattr(http_request.state, 'request_id', None)
-    return success_response(conversation, request_id=request_id)
+    return conversation
 
 
-@router.delete("/{conversation_id}", response_model=ApiResponse[DeleteResponse])
+@router.delete("/{conversation_id}", response_model=DeleteResponse)
 async def delete_conversation(
     http_request: Request,
     conversation_id: str,
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
-) -> ApiResponse[DeleteResponse]:
+) -> DeleteResponse:
     """
     Delete a conversation and all its messages
     
@@ -147,8 +148,4 @@ async def delete_conversation(
     if not success:
         raise NotFoundException(f"Conversation {conversation_id} not found")
     
-    request_id = getattr(http_request.state, 'request_id', None)
-    return success_response(
-        DeleteResponse(message="Conversation deleted successfully"),
-        request_id=request_id
-    )
+    return DeleteResponse(message="Conversation deleted successfully")

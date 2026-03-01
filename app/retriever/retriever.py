@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 from PyPDF2 import PdfReader
 from app.extensions.logger import create_logger
 from app.core.config import settings
+from app.core.dtos.paper import PaperEnrichedDTO
 
 logger = create_logger(__name__)
 
@@ -36,24 +37,8 @@ class PaperRetriever:
             "plos.org",
             "frontiersin.org",
             "mdpi.com",
-            "nature.com/articles",  # Some Nature articles are OA
+            "nature.com/articles",
         }
-
-    def is_likely_open_access(self, url: str) -> bool:
-        """
-        Check if URL is likely from an open access source
-
-        Args:
-            url: URL to check
-
-        Returns:
-            True if likely open access, False otherwise
-        """
-        if not url:
-            return False
-
-        url_lower = url.lower()
-        return any(domain in url_lower for domain in self.open_access_domains)
 
     async def download_pdf(
         self, pdf_url: str, check_open_access: bool = True
@@ -68,11 +53,6 @@ class PaperRetriever:
         Returns:
             PDF content as bytes, or None if failed/paywalled/not a PDF
         """
-        if check_open_access:
-            if self.get_access_info({"pdf_url": pdf_url})["likely_paywalled"]:
-                logger.info(f"Skipping potential paywalled URL: {pdf_url}")
-                return None
-
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -91,8 +71,6 @@ class PaperRetriever:
                     return None
 
                 response.raise_for_status()
-
-                # Verify content type
                 content_type = response.headers.get("content-type", "")
 
                 # Check if it's actually a PDF
@@ -262,101 +240,10 @@ class PaperRetriever:
             logger.error(f"Error downloading TEI from OpenAlex {openalex_id}: {e}")
             return None
 
-    # def extract_text_from_pdf(self, pdf_content: bytes) -> Optional[str]:
-    #     """
-    #     Extract text from PDF content with encoding fixes
-
-    #     Args:
-    #         pdf_content: PDF file as bytes
-
-    #     Returns:
-    #         Extracted text, or None if failed
-    #     """
-    #     try:
-    #         pdf_file = io.BytesIO(pdf_content)
-    #         reader = PdfReader(pdf_file)
-
-    #         text_parts = []
-    #         for page_num, page in enumerate(reader.pages):
-    #             try:
-    #                 text = page.extract_text()
-    #                 if text:
-    #                     # Fix common PDF encoding issues
-    #                     text = self._fix_text_encoding(text)
-    #                     text_parts.append(text)
-    #             except Exception as e:
-    #                 logger.warning(f"Error extracting text from page {page_num}: {e}")
-
-    #         full_text = "\n\n".join(text_parts)
-    #         logger.info(f"Extracted {len(full_text)} characters from {len(reader.pages)} pages")
-
-    #         return full_text if full_text.strip() else None
-
-    #     except Exception as e:
-    #         logger.error(f"Error extracting text from PDF: {e}")
-    #         return None
-
-    # def _fix_text_encoding(self, text: str) -> str:
-    #     """
-    #     Fix common PDF text encoding issues
-
-    #     Args:
-    #         text: Raw extracted text
-
-    #     Returns:
-    #         Cleaned text
-    #     """
-
-    #     # Normalize unicode characters
-    #     text = unicodedata.normalize('NFKD', text)
-
-    #     # Remove non-printable characters except newlines/tabs
-    #     text = ''.join(char for char in text if char.isprintable() or char in '\n\t')
-
-    #     # Fix common ligatures that get mangled
-    #     ligature_map = {
-    #         'ﬁ': 'fi',
-    #         'ﬂ': 'fl',
-    #         'ﬀ': 'ff',
-    #         'ﬃ': 'ffi',
-    #         'ﬄ': 'ffl',
-    #         'ﬅ': 'ft',
-    #         'ﬆ': 'st',
-    #         '€': 'e',  # Common encoding error
-    #         '�': '',   # Replacement character - remove it
-    #     }
-
-    #     for bad, good in ligature_map.items():
-    #         text = text.replace(bad, good)
-
-    #     # Fix multiple spaces
-    #     text = re.sub(r' +', ' ', text)
-
-    #     # Fix multiple newlines (keep max 2)
-    #     text = re.sub(r'\n{3,}', '\n\n', text)
-
-    #     return text.strip()
-
-    # async def get_paper_text(self, pdf_url: str, check_open_access: bool = True) -> Optional[bytes]:
-    #     """
-    #     Download PDF and extract text
-
-    #     Args:
-    #         pdf_url: URL to PDF file
-    #         check_open_access: If True, only download from known OA sources
-
-    #     Returns:
-    #         Extracted text, or None if failed/paywalled
-    #     """
-    #     pdf_content = await self.download_pdf(pdf_url, check_open_access)
-    #     if not pdf_content:
-    #         return None
-
-    #     # text = self.extract_text_from_pdf(pdf_content)
-    #     return pdf_content
-
     async def try_multiple_sources(self, paper_data: Dict[str, Any]) -> Optional[bytes]:
         """
+        DEPRECATED: Use 'paper_service.resolve_paper_content' instead.
+        
         Try to retrieve paper PDF from multiple sources.
 
         Args:
@@ -378,10 +265,6 @@ class PaperRetriever:
         open_access_pdf_url = paper_data.get("open_access_pdf")
         if open_access_pdf_url and isinstance(open_access_pdf_url, str):
             sources.append(("OpenAccess", "url", open_access_pdf_url))
-
-        if "pdf_url" in paper_data and paper_data["pdf_url"]:
-            if self.is_likely_open_access(paper_data["pdf_url"]):
-                sources.append(("PDF", "url", paper_data["pdf_url"]))
 
         if "doi" in paper_data and paper_data["doi"]:
             doi = paper_data["doi"]
@@ -421,6 +304,8 @@ class PaperRetriever:
         self, paper_data: Dict[str, Any], prefer_tei: bool = True
     ) -> Optional[Dict[str, Any]]:
         """
+        DEPRECATED: Use 'download_pdf' and 'download_pdf_from_openalex', 'download_tei_from_openalex' instead.
+
         Get structured content from paper (TEI XML or PDF).
 
         TEI XML (from GROBID via OpenAlex) provides:
@@ -526,55 +411,42 @@ class PaperRetriever:
         """
         return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
 
-    def get_access_info(self, paper_data: Dict[str, Any]) -> Dict[str, Any]:
+    def get_access_info(self, paper_data: PaperEnrichedDTO) -> Dict[str, Any]:
         """
         Determine access availability for a paper.
 
         Args:
-            paper_data: Dictionary containing paper metadata
+            paper_data: PaperPreprocess object containing paper metadata
 
         Returns:
             Dictionary with access information
         """
         sources = []
         has_pdf = False
-        has_tei = False
+        has_xml = False
 
-        is_open_access_db = paper_data.get("is_open_access", False)
-
-        if paper_data.get("openalex_id"):
-            sources.append("OpenAlex")
+        is_open_access_db = paper_data.is_open_access
+        pdf_url = paper_data.pdf_url
+        if pdf_url:
+            sources.append("pdf_url")
             has_pdf = True
-            has_tei = True
-
-        if paper_data.get("arxiv_id"):
-            sources.append("arXiv")
-            has_pdf = True
-
-        open_access_pdf_url = paper_data.get("open_access_pdf")
-        if open_access_pdf_url and isinstance(open_access_pdf_url, str):
-            sources.append("OpenAccess")
-            has_pdf = True
-
-        pdf_url = paper_data.get("pdf_url", "")
-        if pdf_url and self.is_likely_open_access(pdf_url):
-            sources.append("PDF")
-            has_pdf = True
-
-        doi = paper_data.get("doi", "")
-        if doi and ("biorxiv" in doi.lower() or "medrxiv" in doi.lower()):
-            sources.append("bioRxiv/medRxiv")
-            has_pdf = True
+        if paper_data.external_ids:
+            if paper_data.external_ids.get("openalex_id"):
+                if paper_data.has_content:
+                    if paper_data.has_content.get("grobid_tei"):
+                        sources.append("openalex_grobid_xml")
+                        has_xml = True
+                    if paper_data.has_content.get("pdf"):
+                        sources.append("openalex_pdf")
+                        has_pdf = True
 
         is_open_access = is_open_access_db if is_open_access_db else (len(sources) > 0)
-        likely_paywalled = not is_open_access and bool(paper_data.get("doi"))
 
         return {
             "is_open_access": is_open_access,
             "has_pdf_url": has_pdf,
-            "has_tei_xml": has_tei,
+            "has_tei_xml": has_xml,
             "sources": sources,
-            "likely_paywalled": likely_paywalled,
         }
 
 

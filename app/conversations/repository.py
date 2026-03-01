@@ -1,7 +1,7 @@
 """
 Repository for conversation database operations
 """
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from sqlalchemy import desc, select
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +17,9 @@ class ConversationRepository:
     async def create(
         self,
         user_id: int,
-        title: str = "New Conversation"
+        title: str = "New Conversation",
+        conversation_type: str = "multi_paper_rag",
+        primary_paper_id: Optional[str] = None
     ) -> DBConversation:
         """Create a new conversation"""
         conversation_id = str(uuid.uuid4())
@@ -27,7 +29,9 @@ class ConversationRepository:
             user_id=user_id,
             title=title,
             message_count=0,
-            is_archived=False
+            is_archived=False,
+            conversation_type=conversation_type,
+            primary_paper_id=primary_paper_id
         )
         
         self.db.add(db_conversation)
@@ -118,7 +122,7 @@ class ConversationRepository:
         
         # Delete all messages first
         await self.db.execute(
-            DBMessage.__table__.delete().where(
+            DBMessage.__table__.delete().where( # type: ignore
                 DBMessage.conversation_id == conversation_id
             )
         )
@@ -168,62 +172,62 @@ class ConversationRepository:
                 conversation.title = title
                 await self.db.commit()
     
-    async def create_message(
-        self,
-        conversation_id: str,
-        user_id: int,
-        role: str,
-        content: str,
-        status: str = "sent"
-    ) -> DBMessage:
-        """Create a new message in a conversation"""
-        db_message = DBMessage(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            role=role,
-            content=content,
-            status=status,
-            is_active=True
-        )
+    async def get_by_paper(
+        self, 
+        user_id: int, 
+        paper_id: str
+    ) -> Optional[DBConversation]:
+        """
+        Find single-paper conversation for user + paper.
         
-        self.db.add(db_message)
-        await self.db.commit()
-        await self.db.refresh(db_message)
-        
-        return db_message
-    
-    async def get_messages_by_conversation(
-        self,
-        conversation_id: str,
-        skip: int = 0,
-        limit: int = 100
-    ) -> List[DBMessage]:
-        """Get all messages for a conversation"""
+        Returns the most recent non-archived conversation if multiple exist.
+        """
         result = await self.db.execute(
-            select(DBMessage)
-            .where(DBMessage.conversation_id == conversation_id)
-            .where(DBMessage.is_active == True)
-            .order_by(DBMessage.created_at)
-            .options(joinedload(DBMessage.papers))
+            select(DBConversation)
+            .where(
+                DBConversation.user_id == user_id,
+                DBConversation.primary_paper_id == paper_id,
+                DBConversation.conversation_type == "single_paper_detail",
+                DBConversation.is_archived == False
+            )
+            .order_by(desc(DBConversation.updated_at))
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_paper_conversations(
+        self,
+        user_id: int,
+        paper_id: str,
+        skip: int = 0,
+        limit: int = 10
+    ) -> tuple[List[DBConversation], int]:
+        """
+        List all conversations for a specific paper (including archived).
+        
+        Useful for showing conversation history for a paper.
+        """
+        # Get total count
+        count_query = select(DBConversation).where(
+            DBConversation.user_id == user_id,
+            DBConversation.primary_paper_id == paper_id,
+            DBConversation.conversation_type == "single_paper_detail"
+        )
+        count_result = await self.db.execute(count_query)
+        total = len(count_result.all())
+        
+        # Get paginated results
+        result = await self.db.execute(
+            select(DBConversation)
+            .where(
+                DBConversation.user_id == user_id,
+                DBConversation.primary_paper_id == paper_id,
+                DBConversation.conversation_type == "single_paper_detail"
+            )
+            .order_by(desc(DBConversation.updated_at))
             .offset(skip)
             .limit(limit)
         )
-        return list(result.unique().scalars().all())
-    
-    async def link_papers_to_message(
-        self,
-        message_id: int,
-        paper_ids: List[str]
-    ):
-        """Link papers to a message using DBMessagePaper join table. Accepts paper_id (string) and finds DBPaper.id."""
-        from app.models.papers import DBPaper
-        from app.models.message_papers import DBMessagePaper
-        for paper_id in paper_ids:
-            result = await self.db.execute(
-                select(DBPaper).where(DBPaper.paper_id == paper_id)
-            )
-            db_paper = result.scalar_one_or_none()
-            if db_paper:
-                link = DBMessagePaper(message_id=message_id, paper_id=db_paper.id)
-                self.db.add(link)
-        await self.db.commit()
+        conversations = result.scalars().all()
+        
+        return list(conversations), total

@@ -5,9 +5,10 @@ Chunk schemas for API requests/responses
 from typing import Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
+from app.core.model import CamelModel
 
 
-class ChunkBase(BaseModel):
+class ChunkBase(CamelModel):
     """Base chunk schema"""
     chunk_id: str
     paper_id: str

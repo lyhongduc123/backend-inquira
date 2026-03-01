@@ -1,6 +1,7 @@
 import io
 import re
 import unicodedata
+import gc
 from typing import Dict, Any, List, Optional
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
@@ -16,24 +17,49 @@ import xml.etree.ElementTree as ET
 logger = create_logger(__name__)
 
 class ExtractorService:
-    _pipeline_options = ThreadedPdfPipelineOptions(
-        accelerator_options=AcceleratorOptions(
-            device=AcceleratorDevice.CUDA,  # or AcceleratorDevice.AUTO
-        ),
-        do_ocr=False
-    )
+    def __init__(self, use_cuda: bool = True):
+        """Initialize the extractor service with docling converter
+        
+        Args:
+            use_cuda: Whether to attempt CUDA acceleration (falls back to CPU on error)
+        """
+        self._use_cuda = use_cuda
+        self._cuda_failed = False
+        self.converter = None
+        self._initialize_converter()
 
-    def __init__(self):
-        """Initialize the extractor service with docling converter"""
-        self.converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(
-                    pipeline_cls=ThreadedStandardPdfPipeline,
-                    pipeline_options=self._pipeline_options
-                )
-            }
-        )
-        self.converter.initialize_pipeline(InputFormat.PDF)
+    def _initialize_converter(self):
+        """Initialize the converter with appropriate device settings"""
+        device = AcceleratorDevice.CUDA if (self._use_cuda and not self._cuda_failed) else AcceleratorDevice.CPU
+        
+        try:
+            logger.debug(f"Initializing Docling converter with device: {device}")
+            pipeline_options = ThreadedPdfPipelineOptions(
+                accelerator_options=AcceleratorOptions(
+                    device=device,
+                ),
+                do_ocr=False
+            )
+            
+            self.converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(
+                        pipeline_cls=ThreadedStandardPdfPipeline,
+                        pipeline_options=pipeline_options
+                    )
+                }
+            )
+            self.converter.initialize_pipeline(InputFormat.PDF)
+            logger.debug("Docling converter initialized successfully")
+            
+        except Exception as e:
+            if device == AcceleratorDevice.CUDA and "CUDA" in str(e):
+                logger.warning(f"CUDA initialization failed: {e}. Falling back to CPU")
+                self._cuda_failed = True
+                gc.collect()
+                self._initialize_converter()  # Retry with CPU
+            else:
+                raise
 
     def extract_pdf_structure(self, pdf_bytes: bytes) -> Dict[str, Any]:
         """
@@ -57,6 +83,22 @@ class ExtractorService:
             )
             return doc_dict
 
+        except RuntimeError as e:
+            # Handle CUDA errors with CPU fallback
+            if ("CUDA" in str(e) or "CUBLAS" in str(e)) and not self._cuda_failed:
+                logger.warning(f"CUDA error during PDF extraction: {e}. Reinitializing with CPU")
+                self._cuda_failed = True
+                gc.collect()
+                self._initialize_converter()
+                # Retry with CPU
+                pdf_file = DocumentStream(name="input.pdf", stream=io.BytesIO(pdf_bytes))
+                result = self.converter.convert(source=pdf_file)
+                doc_dict = result.document.export_to_dict()
+                logger.info("Successfully extracted document using CPU fallback")
+                return doc_dict
+            else:
+                logger.error(f"Error extracting PDF structure with docling: {e}")
+                raise Exception(f"Failed to extract PDF structure: {e}")
         except Exception as e:
             logger.error(f"Error extracting PDF structure with docling: {e}")
             raise Exception(f"Failed to extract PDF structure: {e}")

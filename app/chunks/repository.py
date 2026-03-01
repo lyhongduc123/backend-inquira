@@ -28,8 +28,13 @@ class ChunkRepository:
         page_number: Optional[int] = None,
         label: Optional[str] = None,
         level: Optional[int] = None,
+        defer_commit: bool = False,
     ) -> DBPaperChunk:
-        """Create a paper chunk"""
+        """Create a paper chunk
+        
+        Args:
+            defer_commit: If True, don't commit immediately (for batch operations)
+        """
         db_chunk = DBPaperChunk(
             chunk_id=chunk_id,
             paper_id=paper_id,
@@ -44,8 +49,10 @@ class ChunkRepository:
         )
         
         self.db.add(db_chunk)
-        await self.db.commit()
-        await self.db.refresh(db_chunk)
+        
+        if not defer_commit:
+            await self.db.commit()
+            await self.db.refresh(db_chunk)
         
         return db_chunk
     

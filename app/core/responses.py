@@ -1,5 +1,6 @@
 from typing import Generic, TypeVar, Optional, List
 from pydantic import BaseModel, Field
+from app.core.model import CamelModel
 from datetime import datetime
 from enum import Enum
 from math import ceil
@@ -23,7 +24,7 @@ class ErrorDetail(BaseModel):
     message: str
     details: Optional[dict] = None
 
-class ApiResponse(BaseModel, Generic[T]):
+class ApiResponse(CamelModel, Generic[T]):
     """Standard API response wrapper"""
     success: bool
     data: Optional[T] = None
@@ -42,7 +43,7 @@ class ApiResponse(BaseModel, Generic[T]):
         }
 
 
-class PaginatedData(BaseModel, Generic[T]):
+class PaginatedData(CamelModel, Generic[T]):
     """Paginated response data"""
     items: List[T]
     total: int

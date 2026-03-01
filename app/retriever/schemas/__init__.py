@@ -3,9 +3,16 @@ Retriever schemas package.
 
 Exports all schema models for the retriever module.
 """
-from .base import AuthorSchema, NormalizedResult
+from .base import AuthorSchema, NormalizedPaperResult, NormalizedAuthorResult
+from .openalex import OAMeta, OAResponse
+from .semantic_scholar import S2RelevanceResponse, S2AuthorPapersResponse
 
 __all__ = [
     "AuthorSchema",
-    "NormalizedResult",
+    "NormalizedPaperResult",
+    "NormalizedAuthorResult",
+    "OAMeta",
+    "OAResponse",
+    "S2RelevanceResponse",
+    "S2AuthorPapersResponse",
 ]

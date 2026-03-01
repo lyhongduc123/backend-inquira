@@ -3,10 +3,11 @@ Bulk preprocessing service using Semantic Scholar bulk search API.
 
 Workflow:
 1. Use POST /paper/search/bulk to get papers matching criteria
-2. Check if paper exists in database (skip if yes)
-3. Process new papers through RAG pipeline (embed & chunk)
-4. Handle pagination with continuation tokens
-5. Track progress with state management
+2. Enrich Semantic Scholar results with OpenAlex metadata
+3. Check if paper exists in database (skip if yes)
+4. Create papers and process through RAG pipeline (extract, chunk, embed)
+5. Handle pagination with continuation tokens
+6. Track progress with state management
 """
 import httpx
 from typing import List, Dict, Any, Optional
@@ -15,13 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.extensions.logger import create_logger
 from app.papers.repository import PaperRepository
-from app.retriever.provider.semantic_scholar_provider import SemanticScholarProvider
-from app.retriever.provider.openalex_provider import OpenAlexProvider
-from app.retriever.schemas import NormalizedResult
+from app.papers.service import PaperService
+from app.retriever.service import RetrievalService, RetrievalServiceType
 from app.processor.services import transformer
 from app.processor.paper_processor import PaperProcessor
 from app.core.config import settings
 from app.models.preprocessing_state import DBPreprocessingState
+from app.chunks.repository import ChunkRepository
 
 logger = create_logger(__name__)
 
@@ -37,28 +38,27 @@ class PreprocessingService:
     def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
         self.repository = PaperRepository(db_session)
-        self.processor = PaperProcessor(self.repository)
+        self.paper_service = PaperService(self.repository)
         
-        # Initialize providers for normalization
-        self.semantic_provider = SemanticScholarProvider(
-            api_url=settings.SEMANTIC_API_URL,
-            db_session=db_session
+        # Use RetrievalService for unified retrieval and enrichment
+        self.retriever = RetrievalService(db=db_session)
+        
+        # Use PaperProcessor for RAG pipeline (extraction, chunking, embedding)
+        chunk_repository = ChunkRepository(db_session)
+        self.processor = PaperProcessor(
+            repository=self.repository,
+            chunk_repository=chunk_repository,
+            retrieval_service=self.retriever
         )
-        self.openalex_provider = OpenAlexProvider(
-            api_url=settings.OPENALEX_API_URL
-        )
         
-        self.base_url = "https://api.semanticscholar.org"
-        self.semantic_base_url = settings.SEMANTIC_API_URL
-        self.openalex_base_url = settings.OPENALEX_API_URL
-        self.semantic_api_key = settings.SEMANTIC_API_KEY
-        self.openalex_api_key = settings.OPENALEX_API_KEY
-        
-        # HTTP client
+        # HTTP client for bulk search API
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(60.0, connect=30.0),
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
         )
+        
+        self.semantic_base_url = settings.SEMANTIC_API_URL
+        self.semantic_api_key = settings.SEMANTIC_API_KEY
     
     async def close(self):
         """Close HTTP client connections."""
@@ -76,6 +76,13 @@ class PreprocessingService:
     ) -> Dict[str, Any]:
         """
         Process papers from Semantic Scholar bulk search API.
+        
+        Workflow:
+        1. Fetch papers from bulk search API with pagination
+        2. Enrich with OpenAlex metadata via RetrievalService
+        3. Check if papers exist in database (skip if yes)
+        4. Create papers and process through RAG pipeline
+        5. Track progress with state management
         
         Args:
             job_id: Unique job identifier for tracking
@@ -107,18 +114,16 @@ class PreprocessingService:
         state.is_running = True
         state.status_message = "Starting bulk search..."  # type: ignore
         await self.db_session.commit()
-        await self.db_session.refresh(state)
         
         try:
             continuation_token = state.continuation_token if resume else None
             
             while state.processed_count < target_count:
-                # Re-fetch state in case it was expunged from session
+                # Re-fetch state to check for pause
                 stmt = select(DBPreprocessingState).where(DBPreprocessingState.job_id == job_id)
                 result = await self.db_session.execute(stmt)
                 state = result.scalar_one()
                 
-                # Check if pause requested
                 if state.is_paused:
                     logger.info(f"Job {job_id} paused by user request")
                     state.is_running = False
@@ -127,7 +132,7 @@ class PreprocessingService:
                     return self._state_to_stats(state)
                 
                 # Fetch batch from bulk search
-                batch_size = min(1000, target_count - state.processed_count)
+                batch_size = min(100, target_count - state.processed_count)
                 result = await self._fetch_bulk_search(
                     query=search_query,
                     limit=batch_size,
@@ -146,11 +151,12 @@ class PreprocessingService:
                 
                 # Update state with token
                 state.continuation_token = continuation_token  # type: ignore
+                await self.db_session.commit()
                 
-                # Process batch
+                # Process batch (normalize, enrich, create, process through RAG)
                 await self._process_search_batch(papers_data, state, target_count)
                 
-                # Re-fetch state after processing (may have been expunged)
+                # Re-fetch state after processing
                 stmt = select(DBPreprocessingState).where(DBPreprocessingState.job_id == job_id)
                 result = await self.db_session.execute(stmt)
                 state = result.scalar_one()
@@ -174,7 +180,6 @@ class PreprocessingService:
             state.completed_at = datetime.now()  # type: ignore
             state.status_message = f"Completed: {state.processed_count} papers processed"  # type: ignore
             await self.db_session.commit()
-            await self.db_session.refresh(state)
             
             logger.info(f"Job {job_id} finished: {self._state_to_stats(state)}")
             return self._state_to_stats(state)
@@ -198,13 +203,16 @@ class PreprocessingService:
         target_count: int
     ) -> None:
         """
-        Process a batch of papers from search results.
+        Process a batch of papers from bulk search results.
         
         Workflow:
         1. Filter for papers with openAccessPdf only
-        2. Batch fetch full details from Semantic Scholar
-        3. Enrich with OpenAlex
-        4. Process through RAG pipeline
+        2. Batch fetch full details from S2 (including author h-index, citation counts)
+        3. Normalize enriched S2 results
+        4. Enrich with OpenAlex metadata (using RetrievalService)
+        5. Transform to Paper schema
+        6. Check if already exists in database
+        7. Create paper and process through RAG pipeline
         
         Args:
             papers_data: List of paper data from bulk search
@@ -222,107 +230,110 @@ class PreprocessingService:
         paper_ids = [p.get('paperId') for p in oa_papers if p.get('paperId')]
         
         if not paper_ids:
+            logger.warning("No valid paper IDs in batch")
             return
         
-        logger.info(f"Fetching details for {len(paper_ids)} open access papers")
+        logger.info(f"Fetching full details for {len(paper_ids)} open access papers from S2")
         
-        # Batch fetch full paper details in smaller chunks to avoid memory inflation
-        # Reduced from 500 to 50 to prevent loading too many papers in memory
-        batch_size = 50
-        for i in range(0, len(paper_ids), batch_size):
+        # Step 1: Batch fetch full paper details from S2 (with author metrics)
+        detailed_papers = await self._fetch_paper_details_batch(paper_ids)
+        
+        if not detailed_papers:
+            logger.warning("No detailed papers returned from S2 batch fetch")
+            return
+        
+        logger.info(f"Retrieved {len(detailed_papers)} detailed papers from S2")
+        
+        # Step 2: Normalize Semantic Scholar results (now with full author data)
+        semantic_provider = self.retriever.providers[RetrievalServiceType.SEMANTIC]
+        
+        normalized_papers = []
+        for paper_data in detailed_papers:
+            try:
+                normalized = semantic_provider.normalize_result(paper_data)
+                normalized_papers.append(normalized)
+            except Exception as e:
+                logger.error(f"Error normalizing paper: {e}")
+                state.error_count += 1
+                continue
+        
+        if not normalized_papers:
+            logger.warning("No papers to process from this batch")
+            return
+        
+        enriched_papers = await self.retriever._enrich_with_openalex(normalized_papers)
+        logger.info(f"Enriched {len(enriched_papers)} papers with OpenAlex metadata")
+        papers = transformer.batch_normalized_to_papers(enriched_papers)
+        for paper in papers:
             if state.processed_count >= target_count:
                 break
             
-            batch_ids = paper_ids[i:i+batch_size]
-            detailed_papers = await self._fetch_paper_details_batch(batch_ids)
+            # Re-fetch state to check for pause
+            stmt = select(DBPreprocessingState).where(DBPreprocessingState.job_id == state.job_id)
+            result = await self.db_session.execute(stmt)
+            state = result.scalar_one()
             
-            # Process each detailed paper
-            for paper_detail in detailed_papers:
-                if state.processed_count >= target_count:
-                    break
+            if state.is_paused:
+                logger.info(f"Job {state.job_id} paused during batch processing")
+                return
+            
+            try:
+                paper_id = str(paper.paper_id)
+                existing = await self.repository.get_paper_by_id(paper_id)
+                if existing:
+                    state.skipped_count += 1
+                    state.current_index += 1
+                    continue
                 
-                # Re-fetch state to check for pause (in case it was expunged)
-                stmt = select(DBPreprocessingState).where(DBPreprocessingState.job_id == state.job_id)
-                result = await self.db_session.execute(stmt)
-                state = result.scalar_one()
-                
-                if state.is_paused:
-                    logger.info(f"Job {state.job_id} paused during batch processing")
-                    return
+                db_paper = await self.paper_service.create_paper_from_schema(paper)
+                logger.info(f"Created paper {paper_id}")
                 
                 try:
-                    paper_id = paper_detail.get('paperId')
-                    if not paper_id:
+                    success = await self.processor.process_single_paper(paper)
+                    if success:
+                        state.processed_count += 1
+                        logger.info(f"Successfully processed {paper_id}")
+                    else:
                         state.error_count += 1
-                        continue
+                        logger.warning(f"Failed to process {paper_id}")
                     
-                    # Check if already exists
-                    existing = await self.repository.get_paper_by_id(str(paper_id))
-                    if existing:
-                        state.skipped_count += 1
-                        state.current_index += 1
-                        continue
+                    state.current_index += 1
                     
-                    # Use provider to normalize Semantic Scholar result
-                    normalized = self.semantic_provider.normalize_result(paper_detail)
+                    # Commit after EVERY paper to free memory immediately
+                    await self.db_session.commit()
                     
-                    # Enrich with OpenAlex if DOI available
-                    doi = paper_detail.get('externalIds', {}).get('DOI')
-                    if doi:
-                        openalex_work = await self._fetch_openalex_by_doi(doi)
-                        if openalex_work:
-                            # Normalize OpenAlex result
-                            oa_normalized = self.openalex_provider.normalize_result(openalex_work)
-                            # Merge the two normalized results (OpenAlex has authorships)
-                            normalized = self._merge_normalized_results(normalized, oa_normalized)
+                    # Expunge all objects from session to free memory
+                    self.db_session.expunge_all()
                     
-                    # Convert to Paper and create
-                    papers = transformer.batch_normalized_to_papers([normalized])
-                    if papers:
-                        paper = papers[0]
-                        await self.repository.create_paper(paper)
+                    # Re-fetch state
+                    stmt_refresh = select(DBPreprocessingState).where(DBPreprocessingState.job_id == state.job_id)
+                    result_refresh = await self.db_session.execute(stmt_refresh)
+                    state = result_refresh.scalar_one()
+                    
+                    if state.processed_count % 5 == 0:
+                        logger.info(f"Progress: {state.processed_count}/{target_count}")
                         
-                        # Process through RAG pipeline (PDF, chunking, embedding)
-                        try:
-                            await self.processor.process_single_paper(paper)
-                            state.processed_count += 1
-                            state.current_index += 1
-                            
-                            # Commit after EVERY paper to free memory immediately
-                            # This prevents embeddings and chunks from accumulating in session
-                            await self.db_session.commit()
-                            
-                            # Expunge all objects from session to free memory
-                            self.db_session.expunge_all()
-                            
-                            # Re-add state to session by querying it fresh
-                            stmt_refresh = select(DBPreprocessingState).where(DBPreprocessingState.job_id == state.job_id)
-                            result_refresh = await self.db_session.execute(stmt_refresh)
-                            state = result_refresh.scalar_one()
-                            
-                            if state.processed_count % 5 == 0:
-                                logger.info(f"Progress: {state.processed_count}/{target_count}")
-                        except Exception as e:
-                            logger.error(f"Error processing paper {paper_id} through RAG pipeline: {e}")
-                            state.error_count += 1
-                            state.current_index += 1
-                            # Commit error state and clear session
-                            await self.db_session.commit()
-                            self.db_session.expunge_all()
-                            # Re-fetch state
-                            stmt_refresh = select(DBPreprocessingState).where(DBPreprocessingState.job_id == state.job_id)
-                            result_refresh = await self.db_session.execute(stmt_refresh)
-                            state = result_refresh.scalar_one()
-                    
                 except Exception as e:
-                    logger.error(f"Error processing paper from search: {e}")
+                    logger.error(f"Error processing paper {paper_id} through RAG pipeline: {e}")
                     state.error_count += 1
                     state.current_index += 1
+                    # Commit error state and clear session
+                    await self.db_session.commit()
+                    self.db_session.expunge_all()
+                    # Re-fetch state
+                    stmt_refresh = select(DBPreprocessingState).where(DBPreprocessingState.job_id == state.job_id)
+                    result_refresh = await self.db_session.execute(stmt_refresh)
+                    state = result_refresh.scalar_one()
+                    
+            except Exception as e:
+                logger.error(f"Error processing paper from search: {e}")
+                state.error_count += 1
+                state.current_index += 1
     
     async def _fetch_bulk_search(
         self,
         query: str,
-        limit: int = 1000,
+        limit: int = 100,
         token: Optional[str] = None,
         year_min: Optional[int] = None,
         year_max: Optional[int] = None,
@@ -394,10 +405,9 @@ class PreprocessingService:
         """
         Fetch detailed paper information in batch from Semantic Scholar.
         
-        Uses POST /graph/v1/paper/batch to get full details including:
-        - Authors with h-index, citation counts
+        This enriches the bulk search results with full author metrics:
+        - Authors with h-index, citation counts, paper counts
         - Detailed citation metrics
-        - References and citations
         - Full external IDs
         
         Args:
@@ -409,13 +419,13 @@ class PreprocessingService:
         if not paper_ids:
             return []
         
-        url = f"{self.base_url}/graph/v1/paper/batch"
+        url = f"{self.semantic_base_url}/graph/v1/paper/batch"
         
-        # Request comprehensive fields
+        # Request comprehensive fields including author metrics
         fields = [
             "paperId", "title", "abstract", "year", "publicationDate",
             "authors", "authors.authorId", "authors.name", "authors.hIndex", 
-            "authors.citationCount", "authors.paperCount",
+            "authors.citationCount", "authors.paperCount", "authors.url",
             "venue", "citationCount", "influentialCitationCount", "referenceCount",
             "url", "openAccessPdf", "isOpenAccess", "externalIds",
             "fieldsOfStudy", "s2FieldsOfStudy", "publicationTypes"
@@ -449,33 +459,6 @@ class PreprocessingService:
         except Exception as e:
             logger.error(f"Error batch fetching paper details: {e}")
             return []
-    
-    async def _fetch_openalex_by_doi(self, doi: str) -> Optional[Dict[str, Any]]:
-        """
-        Fetch paper from OpenAlex by DOI.
-        
-        Args:
-            doi: DOI of the paper
-            
-        Returns:
-            OpenAlex work dict or None
-        """
-        try:
-            doi_url = f'https://doi.org/{doi}'
-            params = {'filter': f'doi:{doi_url}'}
-            
-            response = await self.http_client.get(
-                f"{self.openalex_base_url}/works",
-                params=params,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            data = response.json()
-            results = data.get('results', [])
-            return results[0] if results else None
-        except Exception as e:
-            logger.error(f"Error fetching OpenAlex for DOI {doi}: {e}")
-            return None
     
     async def _get_or_create_state(
         self,
@@ -524,6 +507,7 @@ class PreprocessingService:
         await self.db_session.refresh(state)
         return state
     
+    
     def _state_to_stats(self, state: DBPreprocessingState) -> Dict[str, Any]:
         """Convert state to statistics dict with computed metrics."""
         papers_per_second = 0.0
@@ -557,86 +541,3 @@ class PreprocessingService:
             'updated_at': str(state.updated_at) if state.updated_at else None,
             'completed_at': str(state.completed_at) if state.completed_at else None
         }
-    
-    def _merge_normalized_results(
-        self,
-        semantic_result: NormalizedResult,
-        openalex_result: NormalizedResult
-    ) -> NormalizedResult:
-        """
-        Merge Semantic Scholar and OpenAlex normalized results.
-        Uses the same logic as PaperRetrievalService.
-        
-        Args:
-            semantic_result: Normalized result from Semantic Scholar
-            openalex_result: Normalized result from OpenAlex
-            
-        Returns:
-            Merged NormalizedResult
-        """
-        merged_dict = dict(semantic_result)
-        
-        # Add OpenAlex-specific fields
-        merged_dict['fwci'] = openalex_result.get('fwci')
-        merged_dict['cited_by_percentile_year'] = openalex_result.get('cited_by_percentile_year')
-        merged_dict['citation_normalized_percentile'] = openalex_result.get('citation_normalized_percentile')
-        merged_dict['citation_percentile'] = openalex_result.get('citation_percentile')
-        merged_dict['topics'] = openalex_result.get('topics', [])
-        merged_dict['keywords'] = openalex_result.get('keywords', [])
-        merged_dict['concepts'] = openalex_result.get('concepts', [])
-        merged_dict['mesh_terms'] = openalex_result.get('mesh_terms', [])
-        merged_dict['primary_topic'] = openalex_result.get('primary_topic')
-        merged_dict['institutions_distinct_count'] = openalex_result.get('institutions_distinct_count', 0)
-        merged_dict['countries_distinct_count'] = openalex_result.get('countries_distinct_count', 0)
-        merged_dict['is_retracted'] = openalex_result.get('is_retracted', False)
-        merged_dict['is_paratext'] = openalex_result.get('is_paratext', False)
-        merged_dict['indexed_in'] = openalex_result.get('indexed_in', [])
-        merged_dict['corresponding_author_ids'] = openalex_result.get('corresponding_author_ids', [])
-        merged_dict['language'] = openalex_result.get('language')
-        
-        # ISSN from primary_location (OpenAlex has better journal data)
-        primary_location = openalex_result.get('primary_location')
-        if primary_location and isinstance(primary_location, dict):
-            source = primary_location.get('source', {})
-            if source and isinstance(source, dict):
-                # OpenAlex uses issn as list, issn_l as string
-                issn_list = source.get('issn')
-                if issn_list and isinstance(issn_list, list) and len(issn_list) > 0:
-                    merged_dict['issn'] = issn_list[0]  # Take first ISSN
-                elif isinstance(issn_list, str):
-                    merged_dict['issn'] = issn_list
-                
-                issn_l = source.get('issn_l')
-                if issn_l:
-                    merged_dict['issn_l'] = issn_l
-        
-        # Fallback to Semantic Scholar if OpenAlex didn't provide ISSN
-        if not merged_dict.get('issn'):
-            merged_dict['issn'] = semantic_result.get('issn')
-        if not merged_dict.get('issn_l'):
-            merged_dict['issn_l'] = semantic_result.get('issn_l')
-        
-        # Authorships with institutions (from OpenAlex)
-        merged_dict['authorships'] = openalex_result.get('authorships', [])
-        
-        # Pass Semantic Scholar author stats for enrichment
-        # These contain h_index, citation_count, paper_count per author
-        merged_dict['semantic_authors'] = semantic_result.get('authors', [])
-        
-        # Use max citation count
-        merged_dict['citation_count'] = max(
-            semantic_result.get('citation_count') or 0,
-            openalex_result.get('citation_count') or 0
-        )
-        
-        # Merge external IDs from both sources
-        if 'external_ids' not in merged_dict:
-            merged_dict['external_ids'] = {}
-        semantic_ids = semantic_result.get('external_ids', {})
-        openalex_ids = openalex_result.get('external_ids', {})
-        # Start with semantic, then merge openalex (openalex takes precedence)
-        merged_dict['external_ids'].update(semantic_ids)
-        merged_dict['external_ids'].update(openalex_ids)
-        
-        from typing import cast
-        return cast(NormalizedResult, merged_dict)

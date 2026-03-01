@@ -94,14 +94,14 @@ class EmbeddingService:
     async def create_embeddings_batch(
         self,
         texts: List[str],
-        batch_size: int = 100
+        batch_size: int = 5  # Reduced from 10 for better memory management
     ) -> List[List[float]]:
         """
         Create embeddings for multiple texts in batches
         
         Args:
             texts: List of texts to embed
-            batch_size: Number of texts per batch (only used for OpenAI)
+            batch_size: Number of texts per batch (keep small to avoid OOM)
             
         Returns:
             List of embedding vectors
@@ -110,13 +110,32 @@ class EmbeddingService:
             ServiceUnavailableException: If embedding service fails
         """
         if self.provider == "ollama":
-            # Ollama doesn't support batch processing, process sequentially
+            # Ollama supports batch embeddings via embed endpoint
+            # Use smaller batches to avoid memory allocation errors
             embeddings = []
-            for i, text in enumerate(texts):
-                embedding = await self.create_embedding(text)  # Will raise if fails
-                embeddings.append(embedding)
-                if (i + 1) % 10 == 0:
-                    logger.info(f"Created {i + 1}/{len(texts)} embeddings with Ollama")
+            
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                
+                try:
+                    # Use embed endpoint with multiple inputs
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: self.ollama_client.embed(model=self.model, input=batch)  # type: ignore
+                    )
+                    
+                    # Response contains 'embeddings' (list of embeddings)   
+                    batch_embeddings = response.get('embeddings', [])
+                    embeddings.extend(batch_embeddings)
+                    
+                    logger.info(f"Created {len(embeddings)}/{len(texts)} embeddings with Ollama")
+                    
+                except Exception as e:
+                    error_msg = f"Error creating Ollama embeddings for batch {i // batch_size + 1}: {str(e)}"
+                    logger.error(error_msg)
+                    raise ServiceUnavailableException(error_msg)
+            
             return embeddings
         
         # OpenAI batch processing

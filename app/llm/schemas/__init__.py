@@ -29,10 +29,8 @@ from .chat import (
     SearchSummaryResponse,
     QuestionBreakdownResponse,
     ChatResponse,
+    QueryIntent,
     RelatedTopicsResponse,
-    Citation,
-    ThoughtStep,
-    CitationBasedResponse
 )
 from .base import (
     BaseResponse,
@@ -77,10 +75,8 @@ __all__ = [
     "SearchSummaryResponse",
     "QuestionBreakdownResponse",
     "ChatResponse",
+    "QueryIntent",
     "RelatedTopicsResponse",
-    "Citation",
-    "ThoughtStep",
-    "CitationBasedResponse",
     
     # Base
     "BaseResponse",

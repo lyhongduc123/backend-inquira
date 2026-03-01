@@ -29,45 +29,14 @@ class ColoredFormatter(logging.Formatter):
         
         return message
 
-# def create_logger(name: str, filename: str = "app.log", level=logging.INFO) -> logging.Logger:
-#     logger = logging.getLogger(name)
-#     logger.setLevel(level)
-
-#     if settings.LOG_TO_CONSOLE:
-#         # Use Rich handler for beautiful console logging
-#         class RedErrorFormatter(logging.Formatter):
-#             def format(self, record):
-#                 msg = super().format(record)
-#                 if record.levelno == logging.ERROR:
-#                     msg = msg.replace('ERROR', '[red]ERROR[/red]')
-#                 return msg
-
-#         console_handler = RichHandler(
-#             console=console,
-#             rich_tracebacks=True,
-#             tracebacks_show_locals=True,
-#             markup=True,
-#             show_time=True,
-#             show_level=True,
-#             show_path=True,
-#         )
-#         console_handler.setFormatter(RedErrorFormatter("%(message)s"))
-#         logger.addHandler(console_handler)
-#     elif not logger.handlers:
-#         # File handler remains the same
-#         handler = RotatingFileHandler(
-#             filename=os.path.join(LOG_DIR, filename),
-#             maxBytes=1_000_000,  # 1MB
-#             backupCount=5
-#         )
-#         formatter = logging.Formatter("[%(asctime)s] %(levelname)s [%(name)s]: %(message)s")
-#         handler.setFormatter(formatter)
-#         logger.addHandler(handler)
-
-#     return logger
-
-def create_logger(name: str, filename: str = "app.log", level=logging.INFO) -> logging.Logger:
+def create_logger(name: str, filename: str = "app.log", level=None) -> logging.Logger:
     logger = logging.getLogger(name)
+    
+    # Use settings LOG_LEVEL if level not explicitly provided
+    if level is None:
+        log_level_str = getattr(settings, 'LOG_LEVEL', 'INFO').upper()
+        level = getattr(logging, log_level_str, logging.INFO)
+    
     logger.setLevel(level)
     
     # Prevent duplicate handlers and prevent propagation to root logger
@@ -79,6 +48,7 @@ def create_logger(name: str, filename: str = "app.log", level=logging.INFO) -> l
 
     # Create a console handler
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)  # Set handler level too
 
     # Use the custom colored formatter
     formatter = ColoredFormatter("[%(asctime)s] %(levelname)s [%(name)s]: %(message)s")
@@ -90,6 +60,7 @@ def create_logger(name: str, filename: str = "app.log", level=logging.INFO) -> l
     log_dir = "logs"  # Example log directory
     os.makedirs(log_dir, exist_ok=True)
     file_handler = logging.FileHandler(os.path.join(log_dir, filename))
+    file_handler.setLevel(level)  # Set handler level too
     file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s [%(name)s]: %(message)s"))
     logger.addHandler(file_handler)
 

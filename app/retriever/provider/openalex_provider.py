@@ -7,7 +7,7 @@ Implements BaseRetrievalProvider for OpenAlex API.
 import httpx
 from typing import List, Dict, Any, Optional
 from app.extensions.logger import create_logger
-from app.retriever.schemas import NormalizedResult, AuthorSchema
+from app.retriever.schemas import NormalizedPaperResult, AuthorSchema, NormalizedAuthorResult
 from .base import BaseRetrievalProvider, RetrievalConfig
 
 logger = create_logger(__name__)
@@ -68,10 +68,10 @@ class OpenAlexProvider(BaseRetrievalProvider):
 
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] API error: {e}")
-            return []
+            raise e
         except Exception as e:
             logger.error(f"[{self.name}] Search error: {e}")
-            return []
+            raise e
 
     async def get_papers_by_dois(
         self, dois: List[str]
@@ -133,7 +133,7 @@ class OpenAlexProvider(BaseRetrievalProvider):
 
         return results
 
-    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedResult:
+    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedPaperResult:
         """
         Normalize OpenAlex result to standard format.
 
@@ -236,7 +236,7 @@ class OpenAlexProvider(BaseRetrievalProvider):
 
         url = raw_result.get("doi") or raw_result.get("id")
 
-        return NormalizedResult(
+        return NormalizedPaperResult(
             paper_id=raw_result.get("id", ""),
             title=raw_result.get("title", "") or raw_result.get("display_name", ""),
             abstract=raw_result.get("abstract"),
@@ -269,7 +269,6 @@ class OpenAlexProvider(BaseRetrievalProvider):
             corresponding_author_ids=corresponding_author_ids,
             institutions_distinct_count=institutions_distinct_count,
             countries_distinct_count=countries_distinct_count,
-            authorships=authorships,
         )
 
     async def get_paper_details(self, paper_id: str) -> Optional[Dict[str, Any]]:
@@ -300,3 +299,77 @@ class OpenAlexProvider(BaseRetrievalProvider):
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] Error fetching paper {paper_id}: {e}")
             return None
+    
+    async def get_author_works(
+        self,
+        author_id: str,
+        page: int = 1,
+        per_page: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Get works (papers) by an author from OpenAlex API.
+        
+        Args:
+            author_id: OpenAlex author ID (e.g., A5023888391)
+            page: Page number (1-indexed)
+            per_page: Results per page (max 200)
+            
+        Returns:
+            Dict containing author works and pagination info:
+            {
+                "results": [...papers...],
+                "meta": {"count": 60, "page": 1, "per_page": 100}
+            }
+        """
+        try:
+            # Ensure author_id has 'A' prefix
+            if not author_id.startswith('A') and not author_id.startswith('http'):
+                author_id = f"A{author_id}"
+            
+            params = {
+                "filter": f"author.id:{author_id}",
+                "per-page": min(per_page, 200),
+                "page": page
+            }
+            
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.api_url}/works",
+                    params=params
+                )
+                response.raise_for_status()
+                return response.json()
+        
+        except httpx.HTTPError as e:
+            logger.error(f"[{self.name}] Error fetching works for author {author_id}: {e}")
+            return {"results": [], "meta": {"count": 0}}
+        
+    async def get_author_details(
+        self,
+        author_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get author details by OpenAlex Author ID.
+        
+        Args:
+            author_id: OpenAlex author ID (e.g., A5023888391)
+            
+        Returns:
+            Author details dictionary
+        """
+        try:
+            # Ensure author_id has 'A' prefix
+            if not author_id.startswith('A') and not author_id.startswith('http'):
+                author_id = f"A{author_id}"
+            
+            url = f"{self.api_url}/authors/{author_id}"
+            
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.json()
+        
+        except httpx.HTTPError as e:
+            logger.error(f"[{self.name}] Error fetching author {author_id}: {e}")
+            return None
+        

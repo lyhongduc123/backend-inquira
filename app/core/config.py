@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 from pydantic_settings import BaseSettings
 
 
@@ -64,8 +65,16 @@ class Settings(BaseSettings):
 
     FRONTEND_URL: str = "http://localhost:3000"
 
+    COOKIE_SECURE: bool = False
+    COOKIE_SAMESITE: Literal["strict", "lax", "none"] = "lax"
+    COOKIE_DOMAIN: str | None = None  
+
     LOG_DIR: str = "logs"
-    LOG_TO_CONSOLE: bool = True
+    LOG_TO_CONSOLE: bool = False
+    LOG_LEVEL: str = "DEBUG"  # DEBUG, INFO, WARNING, ERROR, CRITICAL (default: DEBUG for development)
+    
+    # CUDA/GPU settings
+    USE_CUDA: bool = True  # Set to False to disable CUDA and use CPU only
 
     class Config:
         env_file = ".env"

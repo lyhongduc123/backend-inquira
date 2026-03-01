@@ -1,7 +1,6 @@
 from .stream import (
     stream_event,
-    stream_token,
-    stream_paper_metadata,
+    stream_chunk,
     stream_error,
     stream_done,
     stream_heartbeat,
@@ -19,8 +18,7 @@ __all__ = [
     "get_stream_response_reasoning",
     
     "stream_event",
-    "stream_token",
-    "stream_paper_metadata",
+    "stream_chunk",
     "stream_error",
     "stream_done",
     "stream_heartbeat",

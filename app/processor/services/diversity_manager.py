@@ -30,7 +30,7 @@ class DiversityConfig:
     # Exploration vs Exploitation
     exploration_ratio: float = 0.2  # Ratio of results to prioritize exploration
 
-
+                            
 class DiversityManager:
     """Manage diversity and explorability in search results."""
     
@@ -226,10 +226,18 @@ class DiversityManager:
             # Fallback to first in list
             return authorships[0].get('author', {}).get('id')
         
-        # Semantic Scholar format
+        # DB format or Semantic Scholar format
         authors = paper.get('authors', [])
         if authors:
-            return authors[0].get('authorId')
+            # Check if sorted by author_position (DB format)
+            authors_sorted = sorted(
+                [a for a in authors if a.get('author_position') is not None],
+                key=lambda x: x.get('author_position', 999)
+            )
+            if authors_sorted:
+                return str(authors_sorted[0].get('authorId'))
+            # Fallback to first author in list
+            return str(authors[0].get('authorId'))
         
         return None
     
@@ -244,6 +252,14 @@ class DiversityManager:
                 inst_id = inst.get('id')
                 if inst_id:
                     institutions.append(inst_id)
+        
+        # DB format - get institution_id from authors
+        if not institutions:
+            authors = paper.get('authors', [])
+            for author in authors:
+                inst_id = author.get('institution_id')
+                if inst_id:
+                    institutions.append(str(inst_id))
         
         return institutions
     

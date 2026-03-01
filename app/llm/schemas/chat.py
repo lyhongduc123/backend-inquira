@@ -3,15 +3,15 @@ Chat and conversation response schemas
 """
 from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel, Field
+from enum import Enum
 
 
-class LLMParameterOverrides(BaseModel):
-    """Optional LLM parameter overrides for API requests"""
-    temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Sampling temperature")
-    max_tokens: Optional[int] = Field(None, ge=1, description="Maximum tokens in response")
-    top_p: Optional[float] = Field(None, ge=0.0, le=1.0, description="Nucleus sampling threshold")
-    presence_penalty: Optional[float] = Field(None, ge=-2.0, le=2.0, description="Penalize new topics")
-    frequency_penalty: Optional[float] = Field(None, ge=-2.0, le=2.0, description="Penalize repetition")
+class QueryIntent(str, Enum):
+    """Query intent types for pipeline optimization"""
+    COMPREHENSIVE_SEARCH = "comprehensive_search"  # Full pipeline: retrieve, rank, filter, embed
+    AUTHOR_PAPERS = "author_papers"  # Author-specific: simple retrieval, skip scoring
+    COMPARISON = "comparison"  # Compare specific papers: targeted retrieval
+    FOUNDATIONAL = "foundational"  # Original/seminal papers: use specific paper titles
 
 
 class SearchSummaryResponse(BaseModel):
@@ -24,28 +24,33 @@ class SearchSummaryResponse(BaseModel):
 
 
 class QuestionBreakdownResponse(BaseModel):
-    """Response model for question breakdown into search queries"""
+    """Response model for question breakdown with intent classification"""
     original_question: str = Field(..., description="Original user question")
     clarified_question: str = Field(..., description="Clarified/refined question")
     search_queries: List[str] = Field(..., description="Optimized search queries for academic retrieval")
+    keyword_queries: Optional[List[str]] = Field(default=None, description="Keyword queries for title/abstract matching")
+    semantic_queries: Optional[List[str]] = Field(default=None, description="Semantic queries for contextual retrieval")
+    specific_papers: Optional[List[str]] = Field(default=None, description="Specific paper titles to search for exact matches")
     num_queries: int = Field(..., description="Number of search queries")
     complexity: Literal["simple", "intermediate", "advanced"] = Field(..., description="Question complexity level")
-    explanations: Optional[List[str]] = Field(None, description="Optional explanations for each query")
+    explanations: Optional[List[str]] = Field(None, description="Optional explanations for each subtopic")
     has_explanations: bool = Field(..., description="Whether explanations are included")
-    reasoning_content: Optional[str] = Field(None, description="LLM's reasoning process for generating queries")
-    model_used: str = Field(..., description="Model used for query generation")
-    llm_params_used: Optional[Dict[str, Any]] = Field(None, description="LLM parameters used for generation")
+    reasoning_content: Optional[str] = Field(None, description="LLM's reasoning process for generating the breakdown")
+    model_used: str = Field(..., description="Model used for breakdown")
     
-    # Backward compatibility
-    @property
-    def subtopics(self) -> List[str]:
-        """Backward compatibility alias for search_queries"""
-        return self.search_queries
+    # Query Intent Classification (merged from QueryIntentResponse)
+    intent: Optional[QueryIntent] = Field(default=None, description="Classified query intent")
+    intent_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Intent classification confidence")
     
-    @property
-    def num_subtopics(self) -> int:
-        """Backward compatibility alias for num_queries"""
-        return self.num_queries
+    # Pipeline optimization flags
+    skip_ranking: bool = Field(default=False, description="Skip paper ranking step")
+    skip_title_abstract_filter: bool = Field(default=False, description="Skip title/abstract similarity filter")
+    # skip_pdf_processing: bool = Field(default=False, description="Skip PDF extraction and chunking")
+    # skip_embedding: bool = Field(default=False, description="Skip content embedding")
+    needs_diversity: bool = Field(default=False, description="Enable diversity in ranking")
+    
+    # Extracted filters
+    filters: Optional[Dict[str, Any]] = Field(default=None, description="Extracted filters (author, year, venue)")
 
 
 class ChatResponse(BaseModel):
@@ -64,33 +69,3 @@ class RelatedTopicsResponse(BaseModel):
     suggestions: List[str] = Field(..., description="Related topic suggestions")
     num_suggestions: int = Field(..., description="Number of suggestions")
     model_used: str = Field(..., description="Model used for suggestions")
-
-
-class Citation(BaseModel):
-    """Citation reference from a paper or source"""
-    paper_id: str = Field(..., description="Unique identifier for the paper")
-    title: str = Field(..., description="Title of the paper")
-    authors: Optional[List[str]] = Field(None, description="Authors of the paper")
-    year: Optional[int] = Field(None, description="Publication year")
-    quote: Optional[str] = Field(None, description="Direct quote from the paper")
-    relevance: Optional[str] = Field(None, description="Why this citation is relevant")
-    page: Optional[str] = Field(None, description="Page number or section")
-
-
-class ThoughtStep(BaseModel):
-    """Individual thought step in the reasoning process"""
-    step_number: int = Field(..., description="Order of this thought step")
-    thought: str = Field(..., description="The reasoning or thought process")
-    citations: List[Citation] = Field(default_factory=list, description="Citations supporting this thought")
-    confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="Confidence level (0-1)")
-
-
-class CitationBasedResponse(BaseModel):
-    """Response with thought process and citations"""
-    query: str = Field(..., description="User's original question")
-    thought_process: List[ThoughtStep] = Field(..., description="Step-by-step thought process")
-    final_answer: str = Field(..., description="Final synthesized answer")
-    all_citations: List[Citation] = Field(..., description="All citations used in response")
-    sources_count: int = Field(..., description="Number of unique sources cited")
-    model_used: str = Field(..., description="Model used for generation")
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")

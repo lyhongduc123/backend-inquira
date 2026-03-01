@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime
 from typing import TYPE_CHECKING
 from typing import List
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -32,10 +33,10 @@ class DBMessage(Base):
         Enum("pending", "sent", "failed", name="message_status"), default="pending"
     )
 
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-    updated_at: Mapped[DateTime] = mapped_column(
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 

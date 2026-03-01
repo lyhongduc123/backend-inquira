@@ -20,7 +20,8 @@ class AuthorSchema(BaseModel):
     )
     h_index: Optional[int] = Field(default=None, description="Author h-index")
     paper_count: Optional[int] = Field(default=None, description="Number of papers")
-    profile_url: Optional[str] = Field(
+    url: Optional[str] = Field(default=None, description="Author profile URL")
+    homepage_url: Optional[str] = Field(
         default=None, description="URL to author's profile"
     )
     # OpenAlex-specific fields
@@ -36,11 +37,11 @@ class AuthorSchema(BaseModel):
         extra = "allow"  # Allow additional fields from providers
 
 
-class NormalizedResult(BaseModel):
+class NormalizedPaperResult(BaseModel):
     """
     Normalized paper result from any provider.
 
-    This schema standardizes data across Semantic Scholar and OpenAlex,
+    This schema standardizes paper data across Semantic Scholar and OpenAlex,
     supporting rich metadata for author trust scoring and citation analysis.
     """
 
@@ -81,7 +82,7 @@ class NormalizedResult(BaseModel):
     citation_styles: Optional[Dict[str, str]] = Field(
         default=None, description="Citation styles in various formats"
     )
-    external_ids: Optional[Dict[str, str]] = Field(
+    external_ids: Optional[Dict[str, str | int]] = Field(
         default=None,
         description='External IDs {"DOI": str, "ArXiv": str, "OpenAlex": str, ...}',
     )
@@ -114,8 +115,8 @@ class NormalizedResult(BaseModel):
     language: Optional[str] = Field(default=None, description="Paper language code")
 
     # Publication metadata
-    biblio: Optional[Dict[str, str]] = Field(
-        default=None, description="Bibliographic info (volume, issue, pages)"
+    biblio: Optional[Dict[str, Any]] = Field(
+        default=None, description="Bibliographic info (volume, issue, pages) - values can be strings or None"
     )
     primary_location: Optional[Dict[str, Any]] = Field(
         default=None, description="Primary publication location"
@@ -137,18 +138,7 @@ class NormalizedResult(BaseModel):
     countries_distinct_count: Optional[int] = Field(
         default=None, description="Number of unique countries"
     )
-    authorships: Optional[List[Dict[str, Any]]] = Field(
-        default=None, description="Raw authorship data (OpenAlex)"
-    )
-    semantic_authors: Optional[List[Dict[str, Any]]] = Field(
-        default=None,
-        description="Semantic Scholar author stats (h_index, citation_count)",
-    )
 
-    # Raw provider data (for debugging and future enrichment)
-    raw_data: Optional[Dict[str, Any]] = Field(
-        default=None, description="Raw provider response data"
-    )
     openalex_data: Optional[Dict[str, Any]] = Field(
         default=None, description="OpenAlex enrichment data"
     )
@@ -176,5 +166,72 @@ class NormalizedResult(BaseModel):
                 "venue": "Nature",
                 "citation_count": 42,
                 "is_open_access": True,
+            }
+        }
+
+
+class NormalizedAuthorResult(BaseModel):
+    """
+    Normalized author result from any provider.
+
+    This schema standardizes author data across Semantic Scholar and OpenAlex,
+    supporting author profile enrichment and paper fetching.
+    """
+
+    # Core fields (required)
+    author_id: str = Field(..., description="Unique author identifier (primary)")
+    name: str = Field(..., description="Author display name")
+    source: str = Field(
+        ..., description="Provider name (e.g., 'semantic_scholar', 'openalex')"
+    )
+
+    # Alternative identifiers
+    openalex_id: Optional[str] = Field(
+        default=None, description="OpenAlex author ID (stored separately)"
+    )
+    orcid: Optional[str] = Field(default=None, description="ORCID identifier")
+
+    # Metrics
+    h_index: Optional[int] = Field(default=None, description="Author h-index")
+    citation_count: Optional[int] = Field(
+        default=None, description="Total citation count"
+    )
+    paper_count: Optional[int] = Field(
+        default=None, description="Total number of papers"
+    )
+
+    # Affiliation information
+    institutions: Optional[List[Dict[str, Any]]] = Field(
+        default=None, description="Author's institutions"
+    )
+    last_known_institution: Optional[Dict[str, Any]] = Field(
+        default=None, description="Most recent institution"
+    )
+
+    # External IDs and URLs
+    external_ids: Optional[Dict[str, str]] = Field(
+        default=None,
+        description='External IDs {"openalex": str, "orcid": str, "semantic_scholar": str, ...}',
+    )
+    profile_url: Optional[str] = Field(
+        default=None, description="URL to author's profile"
+    )
+
+    # Paper list (for enrichment)
+    papers: Optional[List[Dict[str, Any]]] = Field(
+        default=None, description="Author's papers (when fetching paper list)"
+    )
+
+    class Config:
+        extra = "allow"  # Allow additional provider-specific fields
+        json_schema_extra = {
+            "example": {
+                "author_id": "A5023888391",
+                "name": "Jane Smith",
+                "source": "openalex",
+                "h_index": 42,
+                "citation_count": 8500,
+                "paper_count": 125,
+                "orcid": "0000-0002-1234-5678",
             }
         }

@@ -1,7 +1,6 @@
 from typing import Dict, Any, List, Optional
 from app.models.papers import DBPaper
-from app.retriever.paper_schemas import Paper, PaperResponse, Author
-from app.retriever.schemas import NormalizedResult
+from app.retriever.schemas import NormalizedPaperResult
 from datetime import datetime
 
 

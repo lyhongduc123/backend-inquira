@@ -1,14 +1,10 @@
 """
 Centralized prompts for LLM services
 """
-from .analysis_prompts import AnalysisPrompts
-from .reading_prompts import ReadingPrompts
-from .summary_prompts import SummaryPrompts
-from .base_prompts import PromptTemplate
+from .prompt_configs import PromptConfig, PromptPresets
+from .prompt import PromptDefinition, PromptBuilder, PROMPT_REGISTRY
 
 __all__ = [
-    'AnalysisPrompts',
-    'ReadingPrompts',
-    'SummaryPrompts',
-    'PromptTemplate'
+    'PromptDefinition', 'PromptBuilder', 'PROMPT_REGISTRY',
+    'PromptConfig', 'PromptPresets'
 ]

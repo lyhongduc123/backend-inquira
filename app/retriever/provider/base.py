@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol
 from enum import Enum
 from dataclasses import dataclass
 
-from app.retriever.schemas import NormalizedResult
+from app.retriever.schemas import NormalizedPaperResult
 
 @dataclass
 class RetrievalConfig:
@@ -80,7 +80,7 @@ class BaseRetrievalProvider(ABC):
         raise NotImplementedError(f"{self.name} must implement search_papers()")
 
     @abstractmethod
-    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedResult:
+    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedPaperResult:
         """
         Normalize provider-specific result to standard format.
 
@@ -91,7 +91,7 @@ class BaseRetrievalProvider(ABC):
             raw_result: Provider-specific result dictionary
 
         Returns:
-            NormalizedResult Pydantic model with standardized fields
+            NormalizedPaperResult Pydantic model with standardized fields
 
         Raises:
             NotImplementedError: Must be implemented by subclass
@@ -104,7 +104,7 @@ class BaseRetrievalProvider(ABC):
         limit: Optional[int] = None,
         offset: int = 0,
         filters: Optional[Dict[str, Any]] = None,
-    ) -> List[NormalizedResult]:
+    ) -> List[NormalizedPaperResult]:
         """
         Search papers and normalize results to standard format.
 
@@ -151,7 +151,7 @@ class RetrievalProvider(Protocol):
     ) -> List[Dict[str, Any]]:
         ...
 
-    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedResult:
+    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedPaperResult:
         ...
     
     async def get_paper_details(self, paper_id: str) -> Optional[Dict[str, Any]]:
@@ -163,5 +163,5 @@ class RetrievalProvider(Protocol):
         limit: Optional[int] = None,
         offset: int = 0,
         filters: Optional[Dict[str, Any]] = None,
-    ) -> List[NormalizedResult]:
+    ) -> List[NormalizedPaperResult]:
         ...

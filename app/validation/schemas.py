@@ -3,10 +3,11 @@ Pydantic Schemas for Validation Module
 """
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
+from app.core.model import CamelModel
 from datetime import datetime
 
 
-class ValidationRequest(BaseModel):
+class ValidationRequest(CamelModel):
     """Request for answer validation inspection"""
     query: str
     context: str  # Context with chunks, paper IDs, and prompt
@@ -16,7 +17,7 @@ class ValidationRequest(BaseModel):
     message_id: Optional[int] = None
 
 
-class CitationAccuracy(BaseModel):
+class CitationAccuracy(CamelModel):
     """Citation accuracy metrics"""
     total_citations: int
     correct_citations: int
@@ -25,7 +26,7 @@ class CitationAccuracy(BaseModel):
     accuracy: float
 
 
-class TextMatchAnalysis(BaseModel):
+class TextMatchAnalysis(CamelModel):
     """Detailed text matching analysis for frontend diff display"""
     matched_terms: List[str]  # Terms from answer found in context
     missing_terms: List[str]  # Terms from answer NOT in context
@@ -33,7 +34,7 @@ class TextMatchAnalysis(BaseModel):
     suspicious_sentences: List[str]  # Sentences with low term match
 
 
-class ValidationResult(BaseModel):
+class ValidationResult(CamelModel):
     """Detailed validation result for inspection"""
     query: str
     generated_answer: str
@@ -59,7 +60,7 @@ class ValidationResult(BaseModel):
     validation_id: Optional[int] = None  # DB record ID
 
 
-class ValidationInspection(BaseModel):
+class ValidationInspection(CamelModel):
     """Complete validation inspection response"""
     validation_id: int
     timestamp: datetime
@@ -71,7 +72,7 @@ class ValidationInspection(BaseModel):
     summary: Dict[str, Any]  # Quick stats for display
 
 
-class ValidationHistoryItem(BaseModel):
+class ValidationHistoryItem(CamelModel):
     """Summary of a validation record"""
     id: int
     message_id: Optional[int]
@@ -84,7 +85,7 @@ class ValidationHistoryItem(BaseModel):
     validated_at: Optional[datetime]
 
 
-class ValidationStats(BaseModel):
+class ValidationStats(CamelModel):
     """Aggregate validation statistics"""
     total_validations: int
     hallucination_rate: float

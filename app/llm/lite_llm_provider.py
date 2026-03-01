@@ -8,14 +8,12 @@ from litellm.exceptions import (
     Timeout,
     ServiceUnavailableError,
 )
+from app.core.config import settings
 
 from litellm.files.main import ModelResponse
 from typing import Generator, List, Dict, Any, Optional, Union, Literal, Type
 from typing_extensions import TypedDict
 from pydantic import BaseModel
-from .summarizer import Summarizer
-from .analyzer import Analyzer
-from .reader import Reader
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
@@ -45,79 +43,121 @@ class CompletionParams(TypedDict, total=False):
 
 
 class LiteLLMProvider:
-    def __init__(self, model: str, **kwargs):
-        self.model = model
+    def __init__(self, **kwargs):
         self.kwargs = kwargs
-        print(f"Kwargs: {self.kwargs}")
+        self.providers = [
+            {
+                "model": provider,
+                "api_key": self._get_api_key_for_model(provider),
+            }
+            for provider in settings.LLM_MODEL
+        ]
+        self.current_provider_index = 0
 
-        self._summarizer = None
-        self._analyzer = None
-        self._reader = None
+    def _get_api_key_for_model(self, model_name: str) -> str:
+        """Determine API key based on model name prefix"""
+        if model_name.startswith("openrouter/"):
+            return settings.OPENROUTER_API_KEY
+        elif model_name.startswith("gemini/"):
+            return settings.GEMINI_API_KEY
+        elif model_name.startswith("mistral/"):
+            return settings.MISTRALAI_API_KEY
+        else:
+            return settings.OPENAI_API_KEY
 
     def simple_prompt(self, messages: List[Dict[str, Any]], **kwargs: CompletionParams):
-        """Simple completion without streaming
-
+        """Get a simple completion response from the LLM provider
+        
         Args:
-            messages: List of messages for the conversation
-            tools: Optional list of tools in OpenAI format
-            **kwargs: Additional arguments for completion
-
-        Returns:
-            ModelResponse: completion response
-
+            messages (List[Dict[str, Any]]): List of messages for the LLM prompt
+            
         Raises:
-            Exception: If the LLM call fails after retries
+            Exception: If all providers fail, raises an exception with the last error encountered
+            
+        Returns:
+            The response from the LLM provider
         """
-        params = {**self.kwargs, **kwargs}
+        total_providers = len(self.providers)
+        attempts = 0
+        last_error = None
 
-        return litellm.completion(
-            self.model, messages=messages, drop_params=True, **params
-        )
+        while attempts < total_providers:
+            provider = self.providers[self.current_provider_index]
+
+            try:
+                params = {**self.kwargs, **kwargs}
+
+                response = litellm.completion(
+                    model=provider["model"],
+                    api_key=provider["api_key"],
+                    messages=messages,
+                    drop_params=True,
+                    **params,
+                )
+
+                return response  # ✅ success → stay on this provider
+
+            except (RateLimitError, APIError, Timeout, ServiceUnavailableError) as e:
+                logger.error(
+                    f"Error with provider {provider['model']}: {e}. Switching..."
+                )
+
+                last_error = e
+                self.current_provider_index = (
+                    self.current_provider_index + 1
+                ) % total_providers
+                attempts += 1
+
+        raise Exception(f"All LLM providers failed. Last error: {last_error}")
 
     def stream_completion(
         self, messages: List[Dict[str, Any]], **kwargs: CompletionParams
-    ) -> Generator[Union[tuple[str, Any], Any], Any, Any]:
-        """Completion with stream enabled
+    ) -> Generator[Any, None, None]:
+        """Stream completion
 
         Args:
-            messages: List of messages for the conversation
-            tools: Optional list of tools in OpenAI format
-            **kwargs: Additional arguments for completion
-
-        Yields:
-            tuple[str, Any] | ModelResponseStream: streamed response chunks
+            messages (List[Dict[str, Any]]): List of messages for the LLM prompt
 
         Raises:
-            Exception: If the LLM streaming call fails
+            Exception: If all providers fail, raises an exception with the last error encountered
+
+        Yields:
+            Generator([Any, None, None]): The streaming response chunks from the LLM
         """
-        params = {**self.kwargs, **kwargs}
+        total_providers = len(self.providers)
+        attempts = 0
+        last_error = None
 
-        for chunk in litellm.completion(
-            self.model, messages=messages, stream=True, drop_params=True, **params
-        ):
-            yield chunk
+        while attempts < total_providers:
+            provider = self.providers[self.current_provider_index]
+            params = {**self.kwargs, **kwargs}
 
-    @property
-    def summarizer(self) -> Summarizer:
-        """Get summarizer service"""
-        if self._summarizer is None:
-            self._summarizer = Summarizer(self.base_client)  # type: ignore
-        return self._summarizer
+            try:
+                for chunk in litellm.completion(
+                    model=provider["model"],
+                    api_key=provider["api_key"],
+                    messages=messages,
+                    stream=True,
+                    drop_params=True,
+                    **params,
+                ):
+                    yield chunk
 
-    @property
-    def analyzer(self) -> Analyzer:
-        """Get analyzer service"""
-        if self._analyzer is None:
-            self._analyzer = Analyzer(self.base_client)  # type: ignore
-        return self._analyzer
+                return  # ✅ success → stop here
 
-    @property
-    def reader(self) -> Reader:
-        """Get reader service"""
-        if self._reader is None:
-            self._reader = Reader(self.base_client)  # type: ignore
-        return self._reader
+            except (RateLimitError, APIError, Timeout, ServiceUnavailableError) as e:
+                logger.error(
+                    f"Error with provider {provider['model']}: {e}. Switching..."
+                )
+
+                last_error = e
+                self.current_provider_index = (
+                    self.current_provider_index + 1
+                ) % total_providers
+                attempts += 1
+
+        raise Exception(f"All LLM providers failed. Last error: {last_error}")
 
     def get_model(self) -> str:
         """Get the default model used by the base client"""
-        return self.model
+        return self.providers[0]["model"] if self.providers else "default"

@@ -2,15 +2,15 @@ from typing import Dict, Any, Optional, List
 import re
 import json
 from app.models.papers import DBPaper
-from app.retriever.paper_schemas import Paper
+from app.core.dtos import PaperDTO
 from app.extensions.logger import create_logger
-from app.llm import get_llm_service
 from app.extensions.stream import get_simple_response_content
-from app.llm.configs import PromptPresets
+from app.llm.prompts import PromptPresets
 
 logger = create_logger(__name__)
 
 def _get_llm():
+    from app.llm import get_llm_service
     return get_llm_service()
 
 class SummarizerService:
@@ -85,7 +85,7 @@ class SummarizerService:
         
         return sections
     
-    async def generate_summary(self, paper: Paper, full_text: str, doc_dict: Optional[Dict[str, Any]] = None) -> str:
+    async def generate_summary(self, paper: PaperDTO, full_text: str, doc_dict: Optional[Dict[str, Any]] = None) -> str:
         """
         Generate structured summary of the paper.
         Returns JSON string with: {input, output, methodology, solutions, key_findings}

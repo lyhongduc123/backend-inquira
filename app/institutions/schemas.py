@@ -4,9 +4,10 @@ Pydantic schemas for Institution API
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
+from app.core.model import CamelModel
 
 
-class InstitutionBase(BaseModel):
+class InstitutionBase(CamelModel):
     """Base institution schema"""
     name: str
     display_name: Optional[str] = None
@@ -23,7 +24,7 @@ class InstitutionCreate(InstitutionBase):
     wikipedia_url: Optional[str] = None
 
 
-class InstitutionUpdate(BaseModel):
+class InstitutionUpdate(CamelModel):
     """Schema for updating an institution"""
     name: Optional[str] = None
     display_name: Optional[str] = None
@@ -34,7 +35,7 @@ class InstitutionUpdate(BaseModel):
     wikipedia_url: Optional[str] = None
 
 
-class InstitutionResponse(BaseModel):
+class InstitutionResponse(CamelModel):
     """Detailed institution response"""
     id: int
     institution_id: str
@@ -57,7 +58,7 @@ class InstitutionResponse(BaseModel):
         from_attributes = True
 
 
-class InstitutionListResponse(BaseModel):
+class InstitutionListResponse(CamelModel):
     """List response for institutions"""
     total: int
     page: int
@@ -65,7 +66,7 @@ class InstitutionListResponse(BaseModel):
     institutions: List[InstitutionResponse]
 
 
-class InstitutionStatsResponse(BaseModel):
+class InstitutionStatsResponse(CamelModel):
     """Institution statistics"""
     total_institutions: int
     by_country: Dict[str, int]

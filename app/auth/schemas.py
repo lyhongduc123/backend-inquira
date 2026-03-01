@@ -2,14 +2,14 @@
 OAuth authentication schemas
 """
 from pydantic import BaseModel, EmailStr
+from app.core.model import CamelModel
 from typing import Optional
 from datetime import datetime
 
 
-class Token(BaseModel):
-    """Schema for JWT token response with refresh token"""
+class Token(CamelModel):
+    """Schema for JWT token response (refresh token sent as httpOnly cookie)"""
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # seconds until access token expires
 
@@ -20,12 +20,12 @@ class TokenData(BaseModel):
     email: str | None = None
 
 
-class RefreshTokenRequest(BaseModel):
-    """Schema for refresh token request"""
-    refresh_token: str
+class RefreshTokenRequest(CamelModel):
+    """Schema for refresh token request (optional body, primary source is cookie)"""
+    refresh_token: Optional[str] = None
 
 
-class UserResponse(BaseModel):
+class UserResponse(CamelModel):
     """Schema for user data in responses"""
     id: int
     email: str
@@ -39,10 +39,9 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
-class OAuthCallbackResponse(BaseModel):
-    """Schema for OAuth callback response"""
+class OAuthCallbackResponse(CamelModel):
+    """Schema for OAuth callback response (refresh token sent as httpOnly cookie)"""
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     expires_in: int
     user: UserResponse

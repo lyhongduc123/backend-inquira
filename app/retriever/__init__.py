@@ -10,18 +10,16 @@ from .provider import (
     SemanticScholarProvider,
     OpenAlexProvider,
     RetrievalConfig,
-    RetrievalMode,
     BaseRetrievalProvider,
 )
-from .schemas import NormalizedResult, AuthorSchema
-from .paper_schemas import Paper, PaperChunk, Author, Citation
-from .paper_retriever import PaperRetriever
-from .paper_service import PaperRetrievalService, RetrievalServiceType
+from .schemas import NormalizedPaperResult, NormalizedAuthorResult, AuthorSchema
+from .retriever import PaperRetriever
+from .service import RetrievalService, RetrievalServiceType
 
 # Export all components
 __all__ = [
     # Main service
-    'PaperRetrievalService',
+    'RetrievalService',
     'RetrievalServiceType',
     
     # Providers
@@ -31,17 +29,11 @@ __all__ = [
     
     # Configuration
     'RetrievalConfig',
-    'RetrievalMode',
-    
+
     # Schemas
-    'NormalizedResult',
+    'NormalizedPaperResult',
+    'NormalizedAuthorResult',
     'AuthorSchema',
-    
-    # Data models
-    'Paper',
-    'PaperChunk',
-    'Author',
-    'Citation',
     
     # Utilities
     'PaperRetriever',

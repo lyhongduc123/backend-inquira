@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.chat.schemas import (
     ChatMessageRequest, 
     FeedbackRequest,
-    FeedbackResponse
+    FeedbackResponse,
+    PaperDetailChatRequest
 )
-from app.llm.schemas import CitationBasedResponse
 from app.chat.services import ChatService
 from app.db.database import get_db_session
 from app.extensions.stream import stream_event
@@ -19,7 +19,8 @@ from app.extensions.logger import create_logger
 from app.auth.dependencies import get_current_user
 from app.models.users import DBUser
 from app.core.responses import ApiResponse, success_response
-from app.core.exceptions import InternalServerException
+from app.core.exceptions import InternalServerException, NotFoundException
+
 
 router = APIRouter()
 logger = create_logger(__name__)
@@ -75,93 +76,86 @@ async def stream_message(
         logger.error(f"Stream endpoint error: {e}", exc_info=True)
         raise InternalServerException(f"Failed to stream message: {str(e)}")
 
-
-@router.post("/feedback", response_model=ApiResponse[FeedbackResponse])
-async def submit_feedback(
+@router.post("/stream/paper/{paper_id}")
+async def stream_paper_detail(
     http_request: Request,
-    request: FeedbackRequest,
-    db: AsyncSession = Depends(get_db_session),
-    current_user: DBUser = Depends(get_current_user)
-) -> ApiResponse[FeedbackResponse]:
-    """
-    Submit feedback/rating for a chat message
-    
-    - **message_id**: ID of the message being rated
-    - **rating**: Rating from 1-5
-    - **comment**: Optional feedback comment
-    """
-    try:
-        chat_service = ChatService(db_session=db)
-        success = await chat_service.save_feedback(
-            message_id=request.message_id,
-            rating=request.rating,
-            comment=request.comment
-        )
-        
-        feedback_response = FeedbackResponse(
-            success=success,
-            message="Feedback submitted successfully" if success else "Failed to submit feedback"
-        )
-        
-        request_id = getattr(http_request.state, 'request_id', None)
-        return success_response(feedback_response, request_id=request_id)
-    except Exception as e:
-        logger.error(f"Feedback submission error: {e}", exc_info=True)
-        raise InternalServerException(f"Failed to submit feedback: {str(e)}")
-
-
-@router.post("/stream-with-tools")
-async def stream_message_with_tools(
-    http_request: Request,
-    request: ChatMessageRequest,
+    paper_id: str,
+    request: PaperDetailChatRequest,
     db: AsyncSession = Depends(get_db_session),
     current_user: DBUser = Depends(get_current_user)
 ) -> StreamingResponse:
     """
-    Stream chat message response with AI tool calling support
+    Chat about a specific paper with full-text context.
     
-    This endpoint enables the AI to autonomously use tools when needed:
-    - **compare_papers**: Compare research papers when user asks for comparisons
-    - **opinion_meter**: Analyze opinion distribution when user asks about consensus
-    - **citation_analysis**: Analyze paper impact when user asks about influence
-    - **research_trends**: Analyze trends when user asks about temporal patterns
+    This endpoint enables deep-dive conversations about a single paper:
+    - Retrieves full PDF/TEI content if available
+    - Uses paper's chunks for precise context
+    - Maintains conversation history specific to this paper
+    - Auto-creates conversation on first message
     
     Returns Server-Sent Events (SSE) stream with:
-    1. event: conversation - Conversation metadata
-    2. event: phase - Processing phase updates
-    3. event: thought - AI reasoning and analysis
-    4. event: sources - Paper metadata
-    5. event: tool_call - Tool execution events (start, end, error)
-    6. event: chunk - Response text chunks
-    7. event: done - Completion signal
+    1. event: conversation - Conversation metadata (with conversation_type and primary_paper_id)
+    2. event: paper - Full paper metadata
+    3. event: chunk - Response text chunks
+    4. event: done - Completion signal
     
-    Tool events include:
-    - tool_call_start: When AI decides to use a tool
-    - tool_call_end: When tool execution completes with results
-    - tool_call_error: When tool execution fails
-    
-    - **query**: User's message/question
-    - **conversation_id**: Optional ID of existing conversation
+    - **paper_id**: The paper's unique identifier
+    - **query**: User's question about the paper
+    - **conversation_id**: Optional ID of existing conversation (null = create new)
     """
-    chat_service = ChatService(db_session=db)
+    from app.conversations.service import ConversationService
+    from app.core.dependencies import get_container
+    from app.core.container import ServiceContainer
+    from app.chat.paper_detail_service import PaperDetailChatService
+    
+    conversation_service = ConversationService(db)
+    container: ServiceContainer = get_container()
+    paper_chat_service = PaperDetailChatService(db_session=db)
+    
     try:
         request_id = getattr(http_request.state, 'request_id', None)
         logger.info(
-            f"Tool-enabled stream called by user {current_user.id}",
-            extra={"user_id": current_user.id, "query_preview": request.query[:50], "request_id": request_id}
+            f"Paper detail chat called by user {current_user.id} for paper {paper_id}",
+            extra={"user_id": current_user.id, "paper_id": paper_id, "request_id": request_id}
         )
-        return StreamingResponse(
-            chat_service.stream_message_with_tools(
-                request=request,
+        
+        # Verify paper exists
+        paper = await container.paper_service.get_paper(paper_id)
+        if not paper:
+            raise NotFoundException(f"Paper {paper_id} not found")
+        
+        # Get or create conversation for this paper
+        if request.conversation_id:
+            conversation = await conversation_service.get_conversation(
+                conversation_id=request.conversation_id,
+                user_id=current_user.id
+            )
+            if not conversation:
+                raise NotFoundException(f"Conversation {request.conversation_id} not found")
+        else:
+            # Auto-create conversation
+            conversation = await conversation_service.get_or_create_paper_conversation(
                 user_id=current_user.id,
-                db_session=db,
-                enable_tools=True
+                paper_id=paper_id,
+                paper_title=paper.title
+            )
+        
+        # Stream paper detail chat
+        return StreamingResponse(
+            paper_chat_service.stream_chat(
+                paper_id=paper_id,
+                query=request.query,
+                conversation_id=conversation.id,
+                user_id=current_user.id,
+                model=request.model
             ),
             media_type="text/event-stream"
         )
+    except NotFoundException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Tool-enabled stream error: {e}", exc_info=True)
-        raise InternalServerException(f"Failed to stream with tools: {str(e)}")
+        logger.error(f"Paper detail chat error: {e}", exc_info=True)
+        raise InternalServerException(f"Failed to stream paper chat: {str(e)}")
 
 
 @router.post("/test-stream")

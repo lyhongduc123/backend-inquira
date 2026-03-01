@@ -4,9 +4,6 @@ Main LLM Provider - Factory for all LLM services
 from typing import Optional, Union
 from .openai_client import OpenaiClient, ModelType
 from .ollama_client import OllamaClient
-from .summarizer import Summarizer
-from .analyzer import Analyzer
-from .reader import Reader
 from app.core.config import settings
 
 class LLMProvider:
@@ -40,31 +37,6 @@ class LLMProvider:
             if not api_key:
                 raise ValueError("api_key is required for OpenAI provider")
             self.base_client = OpenaiClient(api_key=api_key, default_model=default_model)  # type: ignore
-        
-        self._summarizer = None
-        self._analyzer = None
-        self._reader = None
-    
-    @property
-    def summarizer(self) -> Summarizer:
-        """Get summarizer service"""
-        if self._summarizer is None:
-            self._summarizer = Summarizer(self.base_client)  # type: ignore
-        return self._summarizer
-    
-    @property
-    def analyzer(self) -> Analyzer:
-        """Get analyzer service"""
-        if self._analyzer is None:
-            self._analyzer = Analyzer(self.base_client)  # type: ignore
-        return self._analyzer
-    
-    @property
-    def reader(self) -> Reader:
-        """Get reader service"""
-        if self._reader is None:
-            self._reader = Reader(self.base_client)  # type: ignore
-        return self._reader
     
     def get_base_client(self) -> Union[OpenaiClient, OllamaClient]:
         """Access the underlying base LLM client"""

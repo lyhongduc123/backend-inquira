@@ -101,3 +101,10 @@ async def get_admin_user(
     
     logger.warning(f"Admin endpoint accessed by user {current_user.id} - TODO: Add proper admin role check")
     return current_user
+
+async def get_fake_user() -> DBUser:
+    return DBUser(
+        id="dev-user",
+        email="dev@example.com",
+        is_active=True,
+    )

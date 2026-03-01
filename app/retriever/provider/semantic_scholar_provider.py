@@ -8,9 +8,9 @@ import httpx
 from typing import List, Dict, Any, Optional
 from app.core.config import settings
 from app.extensions.logger import create_logger
-from app.retriever.schemas import NormalizedResult, AuthorSchema
+from app.retriever.schemas import NormalizedPaperResult, AuthorSchema
 from .base import BaseRetrievalProvider, RetrievalConfig
-from ..paper_retriever import PaperRetriever
+from ..schemas import S2AuthorPapersResponse
 
 logger = create_logger(__name__)
 
@@ -48,7 +48,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             query: Search query
             limit: Max results (default from config)
             offset: Pagination offset
-            filters: Optional filters (yearRange, category, openAccessOnly, excludePreprints, topJournalsOnly)
+            filters: Optional filters (year range, category, open access)
 
         Returns:
             List of raw API response dictionaries
@@ -61,6 +61,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "abstract",
             "year",
             "authors",
+            "authors.name",
             "authors.citationCount",
             "authors.hIndex",
             "authors.paperCount",
@@ -79,7 +80,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
 
         params = {
             "query": query,
-            "limit": min(limit, 20),
+            "limit": min(limit, 100),
             "offset": offset,
             "fields": ",".join(fields),
         }
@@ -116,10 +117,10 @@ class SemanticScholarProvider(BaseRetrievalProvider):
 
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] API error: {e}")
-            return []
+            raise e
         except Exception as e:
             logger.error(f"[{self.name}] Search error: {e}")
-            return []
+            raise e
 
     async def get_paper_details(self, paper_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -137,6 +138,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "abstract",
             "year",
             "authors",
+            "authors.name",
             "authors.citationCount",
             "authors.hIndex",
             "authors.paperCount",
@@ -209,7 +211,172 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             logger.error(f"[{self.name}] Search error: {e}")
             return []
 
-    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedResult:
+    async def get_citations(
+        self,
+        paper_id: str,
+        offset: int = 0,
+        limit: int = 100,
+        fields: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get papers that cite this paper.
+
+        Args:
+            paper_id: S2 paper ID
+            offset: Pagination offset
+            limit: Max results (up to 1000)
+            fields: Optional comma-separated S2 fields
+
+        Returns:
+            {
+                "offset": 0,
+                "next": 100,
+                "data": [...citing papers...]
+            }
+        """
+        default_fields = "paperId,corpusId,title,abstract,authors,year,citationCount,venue,isInfluential,contexts,intents"
+        field_param = fields or default_fields
+
+        params = {"offset": offset, "limit": limit, "fields": field_param}
+
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                response = await client.get(
+                    f"{self.api_url}/paper/{paper_id}/citations",
+                    params=params,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPError as e:
+            logger.error(f"[{self.name}] Error fetching citations for {paper_id}: {e}")
+            return {"offset": offset, "data": []}
+
+    async def get_references(
+        self,
+        paper_id: str,
+        offset: int = 0,
+        limit: int = 100,
+        fields: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get papers referenced by this paper.
+
+        Args:
+            paper_id: S2 paper ID
+            offset: Pagination offset
+            limit: Max results (up to 1000)
+            fields: Optional comma-separated S2 fields
+
+        Returns:
+            {
+                "offset": 0,
+                "next": 100,
+                "data": [...referenced papers...]
+            }
+        """
+        default_fields = "paperId,corpusId,title,abstract,authors,year,citationCount,venue,isInfluential,contexts,intents"
+        field_param = fields or default_fields
+
+        params = {"offset": offset, "limit": limit, "fields": field_param}
+
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                response = await client.get(
+                    f"{self.api_url}/paper/{paper_id}/references",
+                    params=params,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPError as e:
+            logger.error(f"[{self.name}] Error fetching references for {paper_id}: {e}")
+            return {"offset": offset, "data": []}
+
+    async def get_author_papers(
+        self,
+        author_id: str,
+        offset: int = 0,
+        limit: int = 100,
+        fields: Optional[str] = None,
+    ) -> S2AuthorPapersResponse:
+        """
+        Get papers by an author from Semantic Scholar API.
+
+        Args:
+            author_id: Semantic Scholar author ID
+            offset: Pagination offset
+            limit: Max results per page (max 1000 per S2 API)
+            fields: Comma-separated field list
+
+        Returns:
+            S2AuthorPapersResponse containing author papers and pagination info:
+            {
+                "offset": 0,
+                "next": 100,
+                "data": [...papers...]
+            }
+        """
+        default_fields = [
+            "paperId",
+            "title",
+            "abstract",
+            "authors",
+            "authors.name",
+            "authors.citationCount",
+            "authors.hIndex",
+            "authors.paperCount",
+            "authors.url",
+            "authors.homepage",
+            "year",
+            "venue",
+            "publicationDate",
+            "citationCount",
+            "url",
+            "openAccessPdf",
+            "isOpenAccess",
+            "externalIds",
+            "influentialCitationCount",
+            "citationStyles",
+        ]
+        params_fields = fields.split(",") if fields else default_fields
+
+        params = {"offset": offset, "limit": min(limit, 100), "fields": ",".join(params_fields)}
+
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                response = await client.get(
+                    f"{self.api_url}/author/{author_id}/papers",
+                    params=params,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return S2AuthorPapersResponse(
+                    offset=offset, next=data.get("next"), data=data.get("data", [])
+                )
+
+        except httpx.HTTPError as e:
+            logger.error(
+                f"[{self.name}] Error fetching papers for author {author_id}: {e}"
+            )
+            return S2AuthorPapersResponse(offset=offset, next=None, data=[])
+
+    def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedPaperResult:
         """
         Normalize Semantic Scholar result to standard format.
 
@@ -247,11 +414,13 @@ class SemanticScholarProvider(BaseRetrievalProvider):
                 citation_count=author.get("citationCount"),
                 h_index=author.get("hIndex"),
                 paper_count=author.get("paperCount"),
+                homepage_url=author.get("url"),
+                url=author.get("url"),
             )
             for author in authors_raw
         ]
 
-        return NormalizedResult(
+        return NormalizedPaperResult(
             paper_id=raw_result.get("paperId", ""),
             title=raw_result.get("title", ""),
             abstract=raw_result.get("abstract"),

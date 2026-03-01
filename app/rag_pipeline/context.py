@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from app.models.papers import DBPaper, DBPaperChunk
-from typing import Dict, List, Any
+from app.processor.schemas import RankedPaper
+from typing import Dict, List, Any, Union
 
 
 @dataclass
@@ -10,7 +11,7 @@ class RAGContext:
     Contains paper metadata, relevant chunks, and fallback abstracts when necessary.
     """
 
-    papers: List[DBPaper]
+    papers: List[Union[DBPaper, RankedPaper]]  # Can accept both types
     chunks: List[DBPaperChunk]
     used_fallback: bool = False
         
@@ -39,10 +40,20 @@ class RAGContext:
             if not paper:
                 continue
 
+            # Extract authors - works for both DBPaper and RankedPaper
+            authors = []
+            if hasattr(paper, 'authors'):
+                authors = paper.authors if isinstance(paper.authors, list) else []
+            elif hasattr(paper, 'paper_authors') and paper.paper_authors:
+                authors = [{
+                    'name': pa.author.name,
+                    'author_id': pa.author.author_id
+                } for pa in paper.paper_authors if pa.author]
+
             blocks.append({
                 "paper_id": str(paper.paper_id),
                 "title": paper.title,
-                "authors": paper.authors or [],
+                "authors": authors,
                 "year": paper.publication_date,
                 "abstract": paper.abstract,
                 "url": paper.url,
@@ -57,10 +68,20 @@ class RAGContext:
     def _build_fallback_blocks(self) -> List[Dict]:
         blocks = []
         for paper in self.papers[:5]:  # limit to top 5
+            # Extract authors - works for both DBPaper and RankedPaper
+            authors = []
+            if hasattr(paper, 'authors'):
+                authors = paper.authors if isinstance(paper.authors, list) else []
+            elif hasattr(paper, 'paper_authors') and paper.paper_authors:
+                authors = [{
+                    'name': pa.author.name,
+                    'author_id': pa.author.author_id
+                } for pa in paper.paper_authors if pa.author]
+            
             blocks.append({
                 "paper_id": str(paper.paper_id),
                 "title": paper.title,
-                "authors": paper.authors or [],
+                "authors": authors,
                 "year": paper.publication_date,
                 "abstract": paper.abstract,
                 "url": paper.url,
@@ -77,5 +98,19 @@ class RAGContext:
 
     def to_sources(self) -> List[Dict]:
         """Frontend expects full paper metadata."""
-        from app.chat.services import db_paper_to_dict
-        return [db_paper_to_dict(p) for p in self.papers]
+        sources = []
+        for p in self.papers:
+            # RankedPaper has dict() method, DBPaper needs conversion
+            if hasattr(p, 'dict'):
+                sources.append(p.dict())
+            else:
+                # DBPaper - convert to dict manually
+                sources.append({
+                    'paper_id': p.paper_id,
+                    'title': p.title,
+                    'abstract': p.abstract,
+                    'url': p.url,
+                    'citation_count': p.citation_count,
+                    # Add other fields as needed
+                })
+        return sources

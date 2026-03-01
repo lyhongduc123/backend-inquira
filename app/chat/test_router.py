@@ -1,291 +1,357 @@
 """
 Test router for simulating streaming events
 """
+
 import asyncio
+from datetime import datetime
 from typing import AsyncGenerator
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from app.extensions.citation_extractor import CitationExtractor
-from app.extensions.stream import (
-    stream_event,
-    stream_token,
-    stream_paper_metadata,
-    stream_done,
-)
+from app.extensions.stream import stream_event, StreamEventType
+from app.extensions.logger import create_logger
+from app.chat.event_emitter import EventEmitter, EventType
+from app.papers.schemas import PaperMetadata, SJRMetadata
+from app.authors.schemas import AuthorMetadata
 
 router = APIRouter(prefix="/test", tags=["test"])
+logger = create_logger(__name__)
 
 
 class TestQueryRequest(BaseModel):
     """Test query request"""
+
     query: str
+    conversation_id: str | None = None
 
 
-def create_sse_message(name: str, data: dict) -> str:
-    """Create a Server-Sent Event message"""
-    import json
-    return f"event: {name}\ndata: {json.dumps(data)}\n\n"
-
-
-class MockPaper:
-    """Mock paper object for metadata streaming"""
-    def __init__(self, paper_id, title, authors, year, citations, doi, venue):
-        self.paper_id = paper_id
-        self.title = title
-        self.authors = authors
-        self.year = year
-        self.citation_count = citations
-        self.doi = doi
-        self.venue = venue
-        self.url = f"https://openalex.org/{paper_id}"
-        self.relevance_score = 0.85
-        self.publication_date = None
-
-
-async def simulate_query_stream(query: str) -> AsyncGenerator[str, None]:
+async def simulate_realistic_stream(
+    query: str, conversation_id: str | None = None
+) -> AsyncGenerator[str, None]:
     """
-    Simulate a realistic query stream with all event types
-    Mimics the actual backend streaming behavior
+    Simulate a realistic query stream matching the actual backend streaming behavior.
+
+    Emits events in the same order and format as stream_message_with_citations:
+    1. conversation - Conversation metadata
+    2. progress (searching) - Searching academic databases
+    3. progress (ranking) - Filtering and ranking papers
+    4. metadata - Paper metadata for all retrieved papers
+    5. progress (reasoning) - Generating response
+    6. chunk - Response text chunks
+    7. done - Completion signal
     """
-    
-    # 1. Conversation created
-    yield create_sse_message("conversation", {"conversation_id": "test-conv-123"})
-    await asyncio.sleep(0.1)
-    
-    # 2. Phase: Query Understanding
-    yield create_sse_message("phase", {
-        "phase": "query_understanding",
-        "message": "Analyzing your question to identify key concepts",
-        "progress": 10,
-        "current_step": 1,
-        "total_steps": 5
-    })
-    await asyncio.sleep(0.3)
-    
-    yield create_sse_message("thought", {
-        "type": "Analysis",
-        "content": "Identified main topic: marine biodiversity and conservation technology",
-        "metadata": {}
-    })
-    await asyncio.sleep(0.2)
-    
-    yield create_sse_message("thought", {
-        "type": "Planning",
-        "content": "Will search for papers on marine species conservation and AI applications in ecology",
-        "metadata": {}
-    })
-    await asyncio.sleep(0.3)
-    
-    # 3. Phase: Search
-    yield create_sse_message("phase", {
-        "phase": "search",
-        "message": "Searching academic databases for relevant papers",
-        "progress": 30,
-        "current_step": 2,
-        "total_steps": 5
-    })
-    await asyncio.sleep(0.4)
-    
-    yield create_sse_message("thought", {
-        "type": "Search",
-        "content": "Querying OpenAlex for papers published in last 5 years",
-        "metadata": {"source": "openalex"}
-    })
-    await asyncio.sleep(0.3)
-    
-    yield create_sse_message("thought", {
-        "type": "Results",
-        "content": "Found 150 potentially relevant papers",
-        "metadata": {"count": 150}
-    })
-    await asyncio.sleep(0.3)
-    
-    # 4. Phase: Retrieval
-    yield create_sse_message("phase", {
-        "phase": "retrieval",
-        "message": "Filtering and ranking papers by relevance",
-        "progress": 50,
-        "current_step": 3,
-        "total_steps": 5
-    })
-    await asyncio.sleep(0.4)
-    
-    yield create_sse_message("thought", {
-        "type": "Filtering",
-        "content": "Applying relevance filters and citation thresholds",
-        "metadata": {}
-    })
-    await asyncio.sleep(0.2)
-    
-    yield create_sse_message("thought", {
-        "type": "Ranking",
-        "content": "Selected top 25 papers based on semantic similarity",
-        "metadata": {"selected": 25}
-    })
-    await asyncio.sleep(0.3)
-    
-    # 5. Phase: Analysis
-    yield create_sse_message("phase", {
-        "phase": "analysis",
-        "message": "Analyzing paper contents and extracting insights",
-        "progress": 70,
-        "current_step": 4,
-        "total_steps": 5
-    })
-    await asyncio.sleep(0.4)
-    
-    yield create_sse_message("thought", {
-        "type": "Reading",
-        "content": "Extracting key findings from selected papers",
-        "metadata": {}
-    })
-    await asyncio.sleep(0.3)
-    
-    yield create_sse_message("analysis", {
-        "type": "stats",
-        "stats": {
-            "papers_analyzed": 25,
-            "chunks_retrieved": 87,
-            "avg_relevance": 0.78,
-            "citations": 342
-        },
-        "message": "Analysis complete"
-    })
-    await asyncio.sleep(0.3)
-    
-    yield create_sse_message("thought", {
-        "type": "Synthesis",
-        "content": "Combining insights from multiple sources",
-        "metadata": {}
-    })
-    await asyncio.sleep(0.3)
-    
-    # 7. Stream paper metadata (using real stream function) - BEFORE generation
-    mock_papers = [
-        MockPaper(
-            paper_id="W1234567890",
-            title="Climate Change Impact on Marine Mammals: A Comprehensive Analysis",
-            authors=["Dr. Sarah Johnson", "Prof. Michael Chen"],
-            year=2023,
-            citations=145,
-            doi="10.1234/marine.2023.001",
-            venue="Marine Biology Journal"
-        ),
-        MockPaper(
-            paper_id="W0987654321",
-            title="Machine Learning Applications in Ecological Conservation",
-            authors=["Dr. Alice Thompson", "Dr. Robert Kim"],
+
+    # 2. Emit searching event
+    async for evt in EventEmitter.emit_searching_event(
+        query=["machine learning", "neural networks", "deep learning"]
+    ):
+        yield evt
+    await asyncio.sleep(0.5)
+
+    # 3. Emit ranking event
+    async for evt in EventEmitter.emit_ranking_event(total_papers=45, chunks=128):
+        yield evt
+    await asyncio.sleep(0.5)
+
+    # 4. Emit paper metadata (simulating retrieved papers)
+    mock_papers = []
+    from app.papers.schemas import PaperMetadata
+
+    # Create mock papers with realistic data
+    mock_papers.append(
+        PaperMetadata(
+            paper_id="W3177828909",
+            title="Retrieval-Augmented Generation for Citation-Grounded Scientific Question Answering",
+            abstract=(
+                "This paper proposes a transformer-based retrieval-augmented generation "
+                "framework for citation-grounded academic question answering."
+            ),
+            authors=[
+                AuthorMetadata(
+                    author_id="author_001",
+                    name="Dr. Alice Nguyen",
+                    h_index=42,
+                    verified=True,
+                ),
+                AuthorMetadata(
+                    author_id="author_002",
+                    name="Prof. David Kim",
+                    h_index=37,
+                    verified=True,
+                ),
+            ],
             year=2024,
-            citations=89,
-            doi="10.1234/ecology.2024.002",
-            venue="Nature Conservation"
+            publication_date=datetime(2024, 3, 15),
+            venue="International Conference on Machine Learning (ICML)",
+            journal="Journal of Artificial Intelligence Research",
+            url="https://example.org/papers/rag-qa-2024",
+            pdf_url="https://example.org/papers/rag-qa-2024.pdf",
+            citation_count=128,
+            influential_citation_count=35,
+            reference_count=62,
+            author_trust_score=0.89,
+            institutional_trust_score=0.93,
+            fwci=1.47,
+            is_open_access=True,
+            is_retracted=False,
+            topics=[
+                {"topic": "Retrieval-Augmented Generation", "score": 0.95},
+                {"topic": "Scientific Question Answering", "score": 0.91},
+            ],
+            keywords=[
+                {"keyword": "RAG", "score": 0.98},
+                {"keyword": "transformer models", "score": 0.92},
+                {"keyword": "citation grounding", "score": 0.89},
+            ],
+            relevance_score=0.94,
+            ranking_scores={
+                "semantic_similarity": 0.96,
+                "citation_boost": 0.88,
+            },
+            sjr_data=SJRMetadata(
+                title="Journal of Artificial Intelligence Research",
+                sjr_score=2.345,
+                quartile="Q1",
+                h_index=210,
+                data_year=2023,
+            ),
         )
-    ]
-    async for evt in stream_paper_metadata(mock_papers, db=None):
-        yield evt
-    await asyncio.sleep(0.2)
-    
-    # 8. Phase: Generation
-    async for evt in stream_event(name="phase", data={
-        "phase": "generation",
-        "message": "Generating comprehensive answer with citations",
-        "progress": 90,
-        "current_step": 5,
-        "total_steps": 5
-    }):
+    )
+
+    mock_papers.append(
+        PaperMetadata(
+            paper_id="W2963909066",
+            title="Evaluating Large Language Models for Evidence-Based Scientific Reasoning",
+            abstract=(
+                "This study benchmarks large language models on evidence-based reasoning "
+                "tasks using curated scientific datasets and citation-aware evaluation metrics."
+            ),
+            authors=[
+                AuthorMetadata(
+                    author_id="author_010",
+                    name="Dr. Maria Gonzalez",
+                    h_index=58,
+                    verified=True,
+                ),
+                AuthorMetadata(
+                    author_id="author_011",
+                    name="Dr. Ethan Clarke",
+                    h_index=44,
+                    verified=True,
+                ),
+            ],
+            year=2022,
+            publication_date=datetime(2022, 11, 5),
+            venue=None,
+            journal="Nature Machine Intelligence",
+            url="https://example.org/papers/llm-eval-2022",
+            pdf_url=None,
+            citation_count=542,
+            influential_citation_count=120,
+            reference_count=75,
+            author_trust_score=0.94,
+            institutional_trust_score=0.97,
+            fwci=2.31,
+            is_open_access=False,
+            is_retracted=False,
+            topics=[
+                {"topic": "Large Language Models", "score": 0.97},
+                {"topic": "Scientific Evaluation", "score": 0.90},
+            ],
+            keywords=[
+                {"keyword": "LLM evaluation", "score": 0.95},
+                {"keyword": "evidence reasoning", "score": 0.91},
+                {"keyword": "benchmarking", "score": 0.88},
+            ],
+            relevance_score=0.89,
+            ranking_scores={
+                "semantic_similarity": 0.85,
+                "citation_boost": 0.93,
+            },
+            sjr_data=SJRMetadata(
+                title="Nature Machine Intelligence",
+                sjr_score=14.221,
+                quartile="Q1",
+                h_index=365,
+                data_year=2023,
+            ),
+        )
+    )
+
+    mock_papers.append(
+        PaperMetadata(
+            paper_id="W2964069224",
+            title="Dynamic Citation-Aware Retrieval for Real-Time Academic Assistants",
+            abstract=(
+                "We introduce a dynamic retrieval framework that integrates citation graphs "
+                "into real-time academic assistant systems to improve factual grounding."
+            ),
+            authors=[
+                AuthorMetadata(
+                    author_id="author_020",
+                    name="Linh Tran",
+                    h_index=18,
+                    verified=False,
+                ),
+                AuthorMetadata(
+                    author_id="author_021",
+                    name="Arjun Patel",
+                    h_index=22,
+                    verified=False,
+                ),
+            ],
+            year=2025,
+            publication_date=datetime(2025, 1, 20),
+            venue="ACL 2025",
+            journal=None,
+            url="https://example.org/papers/citation-aware-2025",
+            pdf_url="https://example.org/papers/citation-aware-2025.pdf",
+            citation_count=12,
+            influential_citation_count=3,
+            reference_count=41,
+            author_trust_score=0.71,
+            institutional_trust_score=0.79,
+            fwci=1.12,
+            is_open_access=True,
+            is_retracted=False,
+            topics=[
+                {"topic": "Citation Networks", "score": 0.93},
+                {"topic": "Academic Assistants", "score": 0.89},
+            ],
+            keywords=[
+                {"keyword": "citation graph", "score": 0.90},
+                {"keyword": "real-time retrieval", "score": 0.87},
+                {"keyword": "RAG systems", "score": 0.92},
+            ],
+            relevance_score=0.96,
+            ranking_scores={
+                "semantic_similarity": 0.97,
+                "recency_boost": 0.91,
+            },
+            sjr_data=SJRMetadata(
+                title="Computational Linguistics Conference Proceedings",
+                sjr_score=3.874,
+                quartile="Q1",
+                h_index=198,
+                data_year=2024,
+            ),
+        )
+    )
+
+    # Emit paper metadata
+    async for evt in EventEmitter.emit_paper_metadata_events(mock_papers):
         yield evt
     await asyncio.sleep(0.3)
-    
-    yield create_sse_message("thought", {
-        "type": "writing",
-        "content": "Structuring answer with proper citations",
-        "metadata": {}
-    })
-    await asyncio.sleep(0.2)
-    
-    # 9. Stream answer chunks with citation tracking (mimicking stream_message_with_citations)
-    # Initialize citation tracker exactly like the real implementation
-    
-    # Simulating how LLMs stream text with citations in format (cite:paper_id)
-    answer = """Marine biodiversity is facing unprecedented challenges due to climate change and human activities. Recent studies show that approximately 4,000 seal species are currently under threat from habitat loss and ocean warming (cite:W1234567890). This alarming statistic highlights the urgent need for conservation efforts.
 
-Deep learning models have been increasingly applied to ecological monitoring and species conservation (cite:W0987654321). These AI systems can analyze satellite imagery and acoustic data to track animal populations with remarkable accuracy. For instance, neural networks can identify individual seals from aerial photographs with over 95% accuracy (cite:W1234567890).
-
-The integration of machine learning in marine biology has enabled:
-- Real-time population monitoring through autonomous systems
-- Predictive models for migration patterns
-- Early warning systems for ecosystem disruptions (cite:W0987654321)
-- Automated classification of underwater species
-
-However, challenges remain in deploying these technologies at scale. The computational cost, need for extensive labeled datasets, and variability in environmental conditions pose significant barriers (cite:W1234567890). Future research must focus on developing more robust and efficient models that can operate in diverse marine environments (cite:W0987654321)."""
-    
-    # Split into realistic streaming chunks (simulating token-by-token generation)
-    # This mimics how OpenAI/LiteLLM streams tokens
-    # Use character-by-character streaming to preserve newlines
-    current_chunk = ""
-    
-    for char in answer:
-        current_chunk += char
-        
-        # Stream chunk at word boundaries and newlines (realistic token grouping)
-        if char in [" ", "\n", ".", ",", "!", "?", ":", ";"]:
-            async for evt in stream_token(current_chunk):
-                yield evt
-            
-            await asyncio.sleep(0.08)  # Realistic streaming delay
-            current_chunk = ""
-    
-    # Stream any remaining text
-    if current_chunk:
-        async for evt in stream_token(current_chunk):
-            yield evt
-    
-    
-    # 10. Complete
-    async for evt in stream_event(name="phase", data={
-        "phase": "complete",
-        "message": "Response generated successfully",
-        "progress": 100,
-        "current_step": 5,
-        "total_steps": 5
-    }):
+    # 5. Emit reasoning event
+    async for evt in EventEmitter.emit_reasoning_event(
+        "Synthesizing information from retrieved papers to generate a comprehensive response"
+    ):
         yield evt
-    await asyncio.sleep(0.1)
-    
-    async for evt in stream_event(name="done", data={}):
+    await asyncio.sleep(0.3)
+
+    # 6. Stream response chunks (simulating LLM token streaming)
+    response_text = f"""Based on the academic literature, here's a comprehensive overview of {query}:
+
+## Transformer Architecture
+
+The Transformer architecture, introduced by Vaswani et al. in their seminal work "Attention Is All You Need" (cite:W3177828909), revolutionized natural language processing by relying entirely on attention mechanisms. This approach eliminated the need for recurrent or convolutional layers, enabling parallel processing and better handling of long-range dependencies.
+
+Key innovations of the Transformer include:
+
+- **Self-attention mechanism**: Allows the model to weigh the importance of different parts of the input sequence
+- **Multi-head attention**: Enables the model to attend to information from different representation subspaces
+- **Positional encoding**: Provides sequence order information without recurrence
+
+## BERT and Transfer Learning
+
+Building on the Transformer architecture, BERT (Bidirectional Encoder Representations from Transformers) introduced by Devlin et al. (cite:W2964069224) demonstrated the power of pre-training deep bidirectional representations. BERT's key contributions include:
+
+1. **Masked Language Modeling**: Pre-training objective that enables bidirectional context understanding
+2. **Next Sentence Prediction**: Helps the model understand relationships between sentences
+3. **Fine-tuning for downstream tasks**: Achieved state-of-the-art results on multiple NLP benchmarks
+
+The success of BERT sparked a wave of transformer-based language models that continue to dominate NLP research.
+
+## Deep Learning Fundamentals
+
+The foundation for these advances was laid by earlier work in deep learning, such as ResNet (cite:W2963909066). The residual learning framework introduced skip connections that enabled training of much deeper networks, addressing the vanishing gradient problem. These architectural innovations have been crucial for building the large-scale models we see today.
+
+## Current Impact
+
+These papers have collectively shaped modern AI:
+- The Transformer architecture is now the backbone of large language models like GPT and Claude
+- BERT-style pre-training has become standard practice in NLP
+- ResNet principles inform architecture design across domains
+
+The field continues to evolve rapidly, with researchers building on these foundational works to create more capable and efficient models."""
+
+    # Stream in realistic chunks (word by word with some grouping)
+    words = response_text.split()
+    current_chunk = ""
+
+    for i, word in enumerate(words):
+        current_chunk += word + " "
+
+        # Stream chunks at natural boundaries (every 3-8 words, or at punctuation)
+        if (i + 1) % (3 + (i % 6)) == 0 or word.endswith((".", "!", "?", ":", "\n")):
+            async for evt in EventEmitter.emit_chunk_event(current_chunk.rstrip()):
+                yield evt
+            await asyncio.sleep(0.05)  # Realistic streaming delay
+            current_chunk = ""
+
+    # Stream any remaining text
+    if current_chunk.strip():
+        async for evt in EventEmitter.emit_chunk_event(current_chunk.rstrip()):
+            yield evt
+
+    await asyncio.sleep(0.2)
+
+    # 7. Emit done event
+    async for evt in EventEmitter.emit_done_event():
         yield evt
 
 
 @router.post("/stream")
-async def test_stream(request: TestQueryRequest):
+async def test_stream(request: TestQueryRequest) -> StreamingResponse:
     """
-    Test endpoint that simulates a realistic query stream
-    
-    Usage:
-    ```
-    POST /api/test/stream
+    Test endpoint that simulates the real streaming chat endpoint.
+
+    This endpoint mimics `/api/v1/chat/stream` behavior for frontend testing without
+    requiring database, LLM, or paper retrieval services.
+
+    **Usage:**
+    ```bash
+    POST /api/v1/chat/test/stream
     {
-        "query": "test query"
+        "query": "Explain transformer architecture in deep learning",
+        "conversation_id": "optional-test-conv-id"
     }
     ```
-    
-    This endpoint simulates all the streaming events that occur during
-    a real query processing:
-    - conversation: Conversation ID
-    - phase: Processing phase updates (query_understanding, search, retrieval, analysis, generation, complete)
-    - thought: Internal processing thoughts and updates
-    - analysis: Statistics about the analysis
-    - metadata: Paper metadata
-    - chunk: Answer text chunks
-    - done: Completion signal
+
+    **Emitted Events (in order):**
+    1. `conversation` - Conversation metadata with ID
+    2. `progress` (searching) - Searching academic databases
+    3. `progress` (ranking) - Filtering and ranking papers
+    4. `metadata` - Paper metadata for retrieved papers
+    5. `progress` (reasoning) - Generating response
+    6. `chunk` - Response text chunks (streamed token-by-token)
+    7. `done` - Completion signal
+
+    **Features:**
+    - Realistic timing delays between events
+    - Mock paper metadata with real paper information
+    - Citation markers in response text (cite:paper_id format)
+    - Progress events matching real backend phases
     """
+    logger.info(f"Test stream endpoint called with query: {request.query[:50]}...")
+
     return StreamingResponse(
-        simulate_query_stream(request.query),
+        simulate_realistic_stream(request.query, request.conversation_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
+            "X-Accel-Buffering": "no",
+        },
     )

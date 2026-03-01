@@ -1,8 +1,8 @@
 from typing import List, Any
 from app.models.papers import DBPaper
-from app.retriever.paper_schemas import Paper
+from app.core.dtos import PaperDTO
 
-def deduplicate_papers(papers: List[Paper]) -> List[Paper]:
+def deduplicate_papers(papers: List[PaperDTO]) -> List[PaperDTO]:
     """Deduplicate papers based on their paper_id."""
     seen_ids = set()
     unique_papers = []

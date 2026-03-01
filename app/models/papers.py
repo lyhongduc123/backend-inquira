@@ -1,6 +1,7 @@
 
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from datetime import date
+from typing import TYPE_CHECKING, List
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import Boolean, DateTime, Integer, String, Text, Float, ARRAY, Date, ForeignKey, func, Index
 from sqlalchemy.dialects.postgresql import JSONB
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
     from app.models.messages import DBMessage
     from app.models.message_papers import DBMessagePaper
     from app.models.journals import DBJournal
+    from app.models.bookmarks import DBBookmark
 
 
 
@@ -33,21 +35,19 @@ class DBPaper(Base):
     
     title: Mapped[str] = mapped_column(Text, nullable=False, comment="Full paper title")
     
-    authors: Mapped[dict] = mapped_column(
-        JSONB, nullable=True,
-        comment="DEPRECATED: Legacy JSONB author data. Use paper_authors relationship."
+    abstract: Mapped[str] = mapped_column(Text, nullable=True, comment="Paper abstract/summary")
+    embedding: Mapped[Vector] = mapped_column(
+        Vector(768), nullable=True,
+        comment="768-dim vector embedding of abstract and title"
     )
-    """DEPRECATED: Use paper_authors relationship for structured author data."""
-    
-    abstract: Mapped[str] = mapped_column(Text, nullable=False, comment="Paper abstract/summary")
-    publication_date: Mapped[Date] = mapped_column(Date, nullable=True, comment="Publication date")
+    publication_date: Mapped[date] = mapped_column(Date, nullable=True, comment="Publication date")
     venue: Mapped[str] = mapped_column(String, nullable=True, comment="Publication venue/conference")
-    issn: Mapped[str] = mapped_column(
-        String(20), nullable=True, index=True,
+    issn: Mapped[list[str]] = mapped_column(
+        ARRAY(String(8)), nullable=True, index=True,
         comment="Primary ISSN for journal identification"
     )
     issn_l: Mapped[str] = mapped_column(
-        String(20), nullable=True, index=True,
+        String(8), nullable=True, index=True,
         comment="Linking ISSN (OpenAlex standard)"
     )
     
@@ -60,6 +60,9 @@ class DBPaper(Base):
     open_access_pdf: Mapped[dict] = mapped_column(
         JSONB, nullable=True,
         comment="Open access PDF metadata (URL, version, license)"
+    )
+    citation_styles: Mapped[dict] = mapped_column(
+        JSONB, nullable=True,
     )
 
     source: Mapped[str] = mapped_column(
@@ -80,10 +83,10 @@ class DBPaper(Base):
         comment="768-dim vector embedding of summary (nomic-embed-text)"
     )
 
-    relevance_score: Mapped[float] = mapped_column(
-        Float, nullable=True,
-        comment="Query-specific relevance score"
-    )
+    # relevance_score: Mapped[float] = mapped_column(
+    #     Float, nullable=True,
+    #     comment="Query-specific relevance score"
+    # )
     citation_count: Mapped[int] = mapped_column(
         Integer, default=0, index=True,
         comment="Total number of citations"
@@ -235,6 +238,9 @@ class DBPaper(Base):
     
     journal: Mapped["DBJournal"] = relationship("DBJournal", foreign_keys=[journal_id])
     """Associated journal with SJR metrics."""
+    
+    bookmarks: Mapped[List["DBBookmark"]] = relationship("DBBookmark", back_populates="paper", cascade="all, delete-orphan")
+    """User bookmarks for this paper."""
     
     __table_args__ = (
         Index('idx_paper_trust', 'author_trust_score', 'institutional_trust_score'),
