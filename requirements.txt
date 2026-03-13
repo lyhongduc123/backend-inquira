@@ -16,3 +16,5 @@ litellm
 python-jose[cryptography]
 httpx
 python-multipart
+beir
+numpy
