@@ -18,6 +18,8 @@ from app.auth.dependencies import get_admin_user
 from app.models.users import DBUser
 from app.models.preprocessing_state import DBPreprocessingState
 from app.core.responses import ApiResponse, success_response
+from app.core.dependencies import get_container
+from app.core.container import ServiceContainer
 from pydantic import BaseModel, Field
 from app.extensions.logger import create_logger
 
@@ -25,22 +27,23 @@ router = APIRouter()
 logger = create_logger(__name__)
 
 
-async def run_preprocessing_task(
+async def run_bulk_search_task(
     job_id: str,
     search_query: str,
     target_count: int,
-    year_min: int = None,
-    year_max: int = None,
-    fields_of_study: list = None,
+    year_min: Optional[int] = None,
+    year_max: Optional[int] = None,
+    fields_of_study: Optional[List[str]] = None,
     resume: bool = True
 ):
     """
-    Wrapper to run preprocessing in background with its own database session.
+    Wrapper to run bulk search preprocessing in background with its own database session.
     """
     db = async_session()
     try:
-        service = PreprocessingService(db)
-        await service.process_bulk_search(
+        from app.core.container import ServiceContainer
+        container = ServiceContainer(db)
+        await container.preprocessing_service.process_bulk_search(
             job_id=job_id,
             search_query=search_query,
             target_count=target_count,
@@ -50,19 +53,65 @@ async def run_preprocessing_task(
             resume=resume
         )
     except Exception as e:
-        logger.error(f"Background preprocessing task failed: {e}", exc_info=True)
+        logger.error(f"Background bulk search task failed: {e}", exc_info=True)
     finally:
         await db.close()
 
 
-class StartPreprocessingRequest(BaseModel):
-    """Request to start preprocessing job"""
+async def run_repository_task(
+    job_id: str,
+    paper_ids: List[str],
+    resume: bool = True
+):
+    """
+    Wrapper to run repository preprocessing in background with its own database session.
+    """
+    db = async_session()
+    try:
+        from app.core.container import ServiceContainer
+        container = ServiceContainer(db)
+        service = container.preprocessing_service
+        # TODO: Implement process_repository method in PreprocessingService
+        # For now, process papers one by one
+        from app.core.dtos.paper import PaperEnrichedDTO
+        
+        for paper_id in paper_ids:
+            try:
+                # Fetch and enrich paper
+                enriched_papers = await service.retriever.get_multiple_papers([paper_id])
+                if enriched_papers:
+                    paper = enriched_papers[0]
+                    # Create paper if not exists
+                    existing = await service.repository.get_paper_by_id(paper_id)
+                    if not existing:
+                        await service.paper_service.create_paper_from_schema(paper)
+                    # Process through RAG pipeline
+                    await service.processor.process_single_paper(paper)
+                    logger.info(f"[Repository] Processed paper {paper_id}")
+            except Exception as e:
+                logger.error(f"[Repository] Error processing {paper_id}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Background repository task failed: {e}", exc_info=True)
+    finally:
+        await db.close()
+
+
+class StartBulkSearchRequest(BaseModel):
+    """Request to start bulk search preprocessing job"""
     job_id: str = Field(..., description="Unique job identifier (e.g., 'ml-papers-2026')")
     search_query: str = Field(..., description="Search query for bulk search API")
     target_count: int = Field(..., gt=0, description="Target number of papers to process")
     year_min: Optional[int] = Field(None, description="Minimum publication year")
     year_max: Optional[int] = Field(None, description="Maximum publication year")
     fields_of_study: Optional[List[str]] = Field(None, description="List of fields to filter")
+    resume: bool = Field(True, description="Resume from previous state if job exists")
+
+
+class StartRepositoryRequest(BaseModel):
+    """Request to start repository preprocessing job"""
+    job_id: str = Field(..., description="Unique job identifier (e.g., 'repository-batch-1')")
+    paper_ids: List[str] = Field(..., description="List of paper IDs to process")
     resume: bool = Field(True, description="Resume from previous state if job exists")
 
 
@@ -87,9 +136,9 @@ class PreprocessingStatusResponse(BaseModel):
     completed_at: Optional[str]
 
 
-@router.post("/preprocess/start", response_model=ApiResponse[PreprocessingStatusResponse])
-async def start_preprocessing(
-    request: StartPreprocessingRequest,
+@router.post("/preprocess/bulk-search/start", response_model=ApiResponse[PreprocessingStatusResponse])
+async def start_bulk_search_preprocessing(
+    request: StartBulkSearchRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db_session),
     # admin_user: DBUser = Depends(get_admin_user)
@@ -119,7 +168,7 @@ async def start_preprocessing(
     
     # Add to background tasks with its own session
     background_tasks.add_task(
-        run_preprocessing_task,
+        run_bulk_search_task,
         job_id=request.job_id,
         search_query=request.search_query,
         target_count=request.target_count,
@@ -163,6 +212,47 @@ async def start_preprocessing(
     
     return success_response(
         data=response_data
+    )
+
+
+@router.post("/preprocess/repository/start", response_model=ApiResponse[dict])
+async def start_repository_preprocessing(
+    request: StartRepositoryRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db_session),
+    # admin_user: DBUser = Depends(get_admin_user)
+) -> ApiResponse[dict]:
+    """
+    [Admin Only] Start repository preprocessing job for specific paper IDs.
+    
+    Processes a list of paper IDs through the RAG pipeline.
+    Useful for reprocessing specific papers or adding papers from a curated list.
+    
+    **Note:** This is a background task - the endpoint returns immediately.
+    
+    Args:
+        job_id: Unique job identifier (e.g., 'repository-batch-1')
+        paper_ids: List of paper IDs to process
+        resume: Resume from previous state (default: True)
+    
+    Returns:
+        Job status
+    """
+    # Add to background tasks with its own session
+    background_tasks.add_task(
+        run_repository_task,
+        job_id=request.job_id,
+        paper_ids=request.paper_ids,
+        resume=request.resume
+    )
+    
+    return success_response(
+        data={
+            "job_id": request.job_id,
+            "paper_count": len(request.paper_ids),
+            "status": "started",
+            "message": f"Repository preprocessing started for {len(request.paper_ids)} papers"
+        }
     )
 
 

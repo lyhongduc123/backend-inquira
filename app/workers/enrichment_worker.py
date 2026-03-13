@@ -73,7 +73,7 @@ class EnrichmentWorker:
         Returns:
             Dict with computation results
         """
-        from app.authors.repository import AuthorRepository
+        from app.domain.authors.repository import AuthorRepository
         
         async with async_session() as db:
             try:

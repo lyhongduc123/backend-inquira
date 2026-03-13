@@ -32,6 +32,9 @@ class AuthorSchema(BaseModel):
     affiliations: Optional[List[Dict[str, Any]]] = Field(
         default=None, description="Raw affiliation strings"
     )
+    openalex_id: Optional[str] = Field(
+        default=None, description="OpenAlex author ID (stored separately)"
+    )
 
     class Config:
         extra = "allow"  # Allow additional fields from providers
@@ -144,6 +147,30 @@ class NormalizedPaperResult(BaseModel):
     )
     semantic_data: Optional[Dict[str, Any]] = Field(
         default=None, description="Semantic Scholar data"
+    )
+    
+    # Semantic Scholar specific fields
+    tldr: Optional[Dict[str, Optional[str]]] = Field(
+        default=None,
+        description='TLDR summary from S2: {"model": str | None, "text": str | None}'
+    )
+    year: Optional[int] = Field(
+        default=None,
+        description="Publication year (S2 extracted)"
+    )
+    fields_of_study: Optional[List[str]] = Field(
+        default=None,
+        description="Fields of study (S2 basic list)"
+    )
+    s2_fields_of_study: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description='S2 enriched fields: [{"category": str, "source": str}]'
+    )
+    
+    # References data
+    references: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description='List of referenced papers: [{"paperId": str, "title": str, ...}]'
     )
 
     class Config:

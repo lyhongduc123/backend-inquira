@@ -1,10 +1,7 @@
 import json
-from typing import Any, AsyncGenerator, List, Dict, Optional, Union, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Optional
 
 from app.extensions.logger import create_logger
-
-if TYPE_CHECKING:
-    from app.papers.schemas import PaperMetadata
 
 logger = create_logger(__name__)
 
@@ -30,7 +27,14 @@ async def stream_event(name: str, data: Any):
     Yields:
         str: "event: {name}\\ndata: {data}\\n\\n"
     """
-    yield f"event: {name}\ndata: {data}\n\n"
+    if isinstance(data, str):
+        serialized = data
+    else:
+        serialized = json.dumps(data, ensure_ascii=False, default=str)
+
+    data_lines = serialized.splitlines() or [serialized]
+    payload = "\n".join(f"data: {line}" for line in data_lines)
+    yield f"event: {name}\n{payload}\n\n"
 
 
 async def stream_heartbeat() -> AsyncGenerator[str, None]:
@@ -65,78 +69,6 @@ async def stream_chunk(content: str) -> AsyncGenerator[str, None]:
         data=json.dumps({"type": StreamEventType.CHUNK, "content": content}),
     ):
         yield evt
-
-async def stream_done(
-    cited_paper_ids: List[str],
-    retrieved_paper_ids: List[str],
-    metadata: Optional[Dict[str, Any]] = None,
-) -> AsyncGenerator[str, None]:
-    """
-    Stream completion event with summary.
-
-    Frontend receives:
-    event: done
-    data: {
-        "type":"done",
-        "cited_paper_ids":["id1","id2"],
-        "retrieved_paper_ids":["id1",...,"id20"],
-        "metadata":{...}
-    }
-
-    Args:
-        cited_paper_ids: Papers that were cited (extracted for analytics)
-        retrieved_paper_ids: All papers retrieved (e.g., 20 papers)
-        metadata: Additional metadata (token count, processing time, etc.)
-    """
-    done_data = {
-        "type": StreamEventType.DONE,
-        "cited_paper_ids": cited_paper_ids,
-        "retrieved_paper_ids": retrieved_paper_ids,
-        "cited_count": len(cited_paper_ids),
-        "retrieved_count": len(retrieved_paper_ids),
-    }
-
-    if metadata:
-        done_data["metadata"] = metadata
-
-    async for evt in stream_event(
-        name=StreamEventType.DONE, data=json.dumps(done_data)
-    ):
-        yield evt
-
-
-async def stream_error(
-    message: str,
-    error_type: Optional[str] = None,
-    details: Optional[Dict[str, Any]] = None,
-) -> AsyncGenerator[str, None]:
-    """
-    Stream error event.
-
-    Frontend receives:
-    event: error
-    data: {"type":"error","message":"...","error_type":"..."}
-
-    Args:
-        message: Error message
-        error_type: Type of error (optional)
-        details: Additional error details (optional)
-    """
-    error_data: Dict[str, Union[str, Dict[str, Any]]] = {
-        "type": StreamEventType.ERROR,
-        "message": message,
-    }
-
-    if error_type:
-        error_data["error_type"] = error_type
-    if details:
-        error_data["details"] = details
-
-    async for evt in stream_event(
-        name=StreamEventType.ERROR, data=json.dumps(error_data)
-    ):
-        yield evt
-
 
 # ========================================
 # Response Content Extraction Helpers

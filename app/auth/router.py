@@ -40,8 +40,36 @@ logger = create_logger(__name__)
 oauth_states: dict[str, dict[str, str]] = {}
 
 # Cookie configuration constants
+ACCESS_TOKEN_COOKIE_NAME = "access_token"
 REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
+ACCESS_TOKEN_MAX_AGE = settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60  # seconds
 REFRESH_TOKEN_MAX_AGE = settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60  # seconds
+
+
+def set_access_token_cookie(response: Response, access_token: str) -> None:
+    """
+    Set access token as secure httpOnly cookie
+    
+    Security features:
+    - httpOnly: Prevents JavaScript access (XSS protection)
+    - secure: Only sent over HTTPS in production
+    - samesite: CSRF protection
+    - max_age: Auto-expires after access token lifetime
+    """
+    cookie_kwargs = {
+        "key": ACCESS_TOKEN_COOKIE_NAME,
+        "value": access_token,
+        "httponly": True,  # Cannot be accessed by JavaScript
+        "secure": settings.COOKIE_SECURE,  # HTTPS only in production
+        "samesite": settings.COOKIE_SAMESITE,  # CSRF protection
+        "max_age": ACCESS_TOKEN_MAX_AGE,
+        "path": "/",
+    }
+    # Only set domain if explicitly configured (None allows cookies to work across ports in dev)
+    if settings.COOKIE_DOMAIN:
+        cookie_kwargs["domain"] = settings.COOKIE_DOMAIN
+    
+    response.set_cookie(**cookie_kwargs)
 
 
 def set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
@@ -54,25 +82,40 @@ def set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
     - samesite: CSRF protection
     - max_age: Auto-expires after refresh token lifetime
     """
-    response.set_cookie(
-        key=REFRESH_TOKEN_COOKIE_NAME,
-        value=refresh_token,
-        httponly=True,  # Cannot be accessed by JavaScript
-        secure=settings.COOKIE_SECURE,  # HTTPS only in production
-        samesite=settings.COOKIE_SAMESITE,  # CSRF protection
-        max_age=REFRESH_TOKEN_MAX_AGE,
-        domain=settings.COOKIE_DOMAIN,
-        path="/",
-    )
+    cookie_kwargs = {
+        "key": REFRESH_TOKEN_COOKIE_NAME,
+        "value": refresh_token,
+        "httponly": True,  # Cannot be accessed by JavaScript
+        "secure": settings.COOKIE_SECURE,  # HTTPS only in production
+        "samesite": settings.COOKIE_SAMESITE,  # CSRF protection
+        "max_age": REFRESH_TOKEN_MAX_AGE,
+        "path": "/",
+    }
+    # Only set domain if explicitly configured (None allows cookies to work across ports in dev)
+    if settings.COOKIE_DOMAIN:
+        cookie_kwargs["domain"] = settings.COOKIE_DOMAIN
+    
+    response.set_cookie(**cookie_kwargs)
 
 
-def clear_refresh_token_cookie(response: Response) -> None:
-    """Clear refresh token cookie on logout"""
-    response.delete_cookie(
-        key=REFRESH_TOKEN_COOKIE_NAME,
-        domain=settings.COOKIE_DOMAIN,
-        path="/",
-    )
+def clear_auth_cookies(response: Response) -> None:
+    """Clear both access and refresh token cookies on logout"""
+    delete_kwargs_access = {
+        "key": ACCESS_TOKEN_COOKIE_NAME,
+        "path": "/",
+    }
+    delete_kwargs_refresh = {
+        "key": REFRESH_TOKEN_COOKIE_NAME,
+        "path": "/",
+    }
+    
+    # Only set domain if explicitly configured
+    if settings.COOKIE_DOMAIN:
+        delete_kwargs_access["domain"] = settings.COOKIE_DOMAIN
+        delete_kwargs_refresh["domain"] = settings.COOKIE_DOMAIN
+    
+    response.delete_cookie(**delete_kwargs_access)
+    response.delete_cookie(**delete_kwargs_refresh)
 
 
 def get_refresh_token_from_cookie_or_body(
@@ -148,10 +191,11 @@ async def google_callback(
         access_token = create_access_token(data={"sub": user.id, "email": user.email})
         refresh_token = await create_refresh_token(db, user.id)
 
-        # Set refresh token as secure httpOnly cookie
+        # Set both tokens as secure httpOnly cookies
         response = RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/auth/callback?access_token={access_token}"
+            url=f"{settings.FRONTEND_URL}/auth/callback?success=true"
         )
+        set_access_token_cookie(response, access_token)
         set_refresh_token_cookie(response, refresh_token)
         return response
 
@@ -216,10 +260,11 @@ async def github_callback(
         access_token = create_access_token(data={"sub": user.id, "email": user.email})
         refresh_token = await create_refresh_token(db, user.id)
 
-        # Set refresh token as secure httpOnly cookie
+        # Set both tokens as secure httpOnly cookies
         response = RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/auth/callback?access_token={access_token}"
+            url=f"{settings.FRONTEND_URL}/auth/callback?success=true"
         )
+        set_access_token_cookie(response, access_token)
         set_refresh_token_cookie(response, refresh_token)
         return response
 
@@ -268,11 +313,12 @@ async def refresh_access_token(
     access_token = create_access_token(data={"sub": user.id, "email": user.email})
     new_refresh_token = await create_refresh_token(db, user.id)
 
-    # Set new refresh token as httpOnly cookie
+    # Set both new tokens as httpOnly cookies
+    set_access_token_cookie(response, access_token)
     set_refresh_token_cookie(response, new_refresh_token)
 
     token_response = Token(
-        access_token=access_token,
+        access_token="",  # Empty for backward compatibility, actual token in cookie
         token_type="bearer",
         expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
@@ -312,8 +358,8 @@ async def logout(
     # Revoke refresh token
     await revoke_refresh_token(db, refresh_token)
     
-    # Clear refresh token cookie
-    clear_refresh_token_cookie(response)
+    # Clear both access and refresh token cookies
+    clear_auth_cookies(response)
     
     return LogoutResponse(message="Successfully logged out")
 
@@ -342,8 +388,8 @@ async def logout_all(
     """
     count = await revoke_all_user_tokens(db, current_user.id)
     
-    # Clear refresh token cookie
-    clear_refresh_token_cookie(response)
+    # Clear both access and refresh token cookies
+    clear_auth_cookies(response)
     
     return LogoutAllResponse(
         message=f"Successfully logged out from {count} device(s)",

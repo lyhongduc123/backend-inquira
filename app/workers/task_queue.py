@@ -129,6 +129,52 @@ class TaskQueue:
         logger.info(f"Submitted task {task_id} ({task_type})")
         return task_id
     
+    async def submit_chat_task(
+        self,
+        task_id: str,
+        user_id: int,
+        conversation_id: str,
+        query: str,
+        pipeline_type: str,
+        filters: Dict[str, Any]
+    ) -> None:
+        """
+        Submit a chat pipeline task for background execution.
+        
+        This is a high-level method that wraps the chat execution logic.
+        The task will be executed asynchronously and events will be saved to database.
+        
+        Args:
+            task_id: Pre-generated task ID from pipeline_task_service
+            user_id: User who initiated the chat
+            conversation_id: Conversation this belongs to
+            query: User's question
+            pipeline_type: Pipeline to use (database, hybrid, standard)
+            filters: Optional search filters
+        """
+        # Import here to avoid circular dependency
+        from app.domain.chat.executor import execute_chat_pipeline
+        
+        # Submit task using the pre-generated task_id
+        task = BackgroundTask(
+            task_id=task_id,
+            task_type="chat_pipeline",
+            func=execute_chat_pipeline,
+            kwargs={
+                "task_id": task_id,
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "query": query,
+                "pipeline_type": pipeline_type,
+                "filters": filters
+            }
+        )
+        
+        self.tasks[task_id] = task
+        await self.queue.put(task)
+        
+        logger.info(f"Submitted chat pipeline task {task_id} for user {user_id}")
+    
     async def get_status(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Get task status"""
         task = self.tasks.get(task_id)

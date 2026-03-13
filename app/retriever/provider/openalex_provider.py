@@ -7,7 +7,11 @@ Implements BaseRetrievalProvider for OpenAlex API.
 import httpx
 from typing import List, Dict, Any, Optional
 from app.extensions.logger import create_logger
-from app.retriever.schemas import NormalizedPaperResult, AuthorSchema, NormalizedAuthorResult
+from app.retriever.schemas import (
+    NormalizedPaperResult,
+    AuthorSchema,
+    NormalizedAuthorResult,
+)
 from .base import BaseRetrievalProvider, RetrievalConfig
 
 logger = create_logger(__name__)
@@ -73,9 +77,7 @@ class OpenAlexProvider(BaseRetrievalProvider):
             logger.error(f"[{self.name}] Search error: {e}")
             raise e
 
-    async def get_papers_by_dois(
-        self, dois: List[str]
-    ) -> List[Dict[str, Any]]:
+    async def get_papers_by_dois(self, dois: List[str]) -> List[Dict[str, Any]]:
         """
         Get multiple papers by their DOIs.
 
@@ -86,7 +88,7 @@ class OpenAlexProvider(BaseRetrievalProvider):
             List of normalized paper results
         """
         results = []
-        
+
         try:
             dois_str = "|".join([doi for doi in dois if doi])
             params = {"filter": f"doi:{dois_str}"}
@@ -120,16 +122,22 @@ class OpenAlexProvider(BaseRetrievalProvider):
             ids_str = "|".join([inst_id for inst_id in institution_ids if inst_id])
             params = {"filter": f"id:{ids_str}"}
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(f"{self.api_url}/institutions", params=params)
+                response = await client.get(
+                    f"{self.api_url}/institutions", params=params
+                )
                 response.raise_for_status()
                 data = response.json()
                 items = data.get("results", [])
                 return items
 
         except httpx.HTTPError as e:
-            logger.error(f"[{self.name}] API error for Institution IDs {institution_ids}: {e}")
+            logger.error(
+                f"[{self.name}] API error for Institution IDs {institution_ids}: {e}"
+            )
         except Exception as e:
-            logger.error(f"[{self.name}] Error fetching Institution IDs {institution_ids}: {e}")
+            logger.error(
+                f"[{self.name}] Error fetching Institution IDs {institution_ids}: {e}"
+            )
 
         return results
 
@@ -157,11 +165,13 @@ class OpenAlexProvider(BaseRetrievalProvider):
             author_info = auth.get("author", {}) or {}
             author_dict = AuthorSchema(
                 name=author_info.get("display_name", "Unknown"),
-                author_id=author_info.get("id"),
+                author_id=author_info.get("id").removeprefix("https://openalex.org/") if author_info.get("id") else None,  # type: ignore
                 orcid=author_info.get("orcid"),
                 institutions=auth.get("institutions", []),
                 affiliations=auth.get("affiliations", []),
             )
+            logger.debug(f"Extracted author: {author_dict.name}, ID: {author_dict.author_id}, ORCID: {author_dict.orcid}")
+            logger.debug(f"Institutions: {auth}")
             authors.append(author_dict)
 
         # Extract IDs
@@ -192,21 +202,17 @@ class OpenAlexProvider(BaseRetrievalProvider):
         is_oa = open_access.get("is_oa", False)
         pdf_url = open_access.get("oa_url")
 
-        # Build open access metadata
         open_access_metadata = None
         if is_oa and pdf_url:
             open_access_metadata = {
                 "url": str(pdf_url),
                 "status": str(open_access.get("oa_status", "")),
-                "license": "",  # OpenAlex doesn't provide license in open_access field
+                "license": "",
             }
 
-        # Extract primary location (journal/venue info)
         primary_location = raw_result.get("primary_location", {}) or {}
         primary_source = primary_location.get("source", {}) or {}
         venue = primary_source.get("display_name")
-
-        # Extract publication date
         year = raw_result.get("publication_year")
         pub_date = raw_result.get("publication_date")
         if not pub_date and year:
@@ -232,7 +238,6 @@ class OpenAlexProvider(BaseRetrievalProvider):
 
         locations = raw_result.get("locations", [])
         best_oa_location = raw_result.get("best_oa_location", {})
-        
 
         url = raw_result.get("doi") or raw_result.get("id")
 
@@ -299,21 +304,18 @@ class OpenAlexProvider(BaseRetrievalProvider):
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] Error fetching paper {paper_id}: {e}")
             return None
-    
+
     async def get_author_works(
-        self,
-        author_id: str,
-        page: int = 1,
-        per_page: int = 100
+        self, author_id: str, page: int = 1, per_page: int = 100
     ) -> Dict[str, Any]:
         """
         Get works (papers) by an author from OpenAlex API.
-        
+
         Args:
             author_id: OpenAlex author ID (e.g., A5023888391)
             page: Page number (1-indexed)
             per_page: Results per page (max 200)
-            
+
         Returns:
             Dict containing author works and pagination info:
             {
@@ -323,53 +325,48 @@ class OpenAlexProvider(BaseRetrievalProvider):
         """
         try:
             # Ensure author_id has 'A' prefix
-            if not author_id.startswith('A') and not author_id.startswith('http'):
+            if not author_id.startswith("A") and not author_id.startswith("http"):
                 author_id = f"A{author_id}"
-            
+
             params = {
                 "filter": f"author.id:{author_id}",
                 "per-page": min(per_page, 200),
-                "page": page
+                "page": page,
             }
-            
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(
-                    f"{self.api_url}/works",
-                    params=params
-                )
+                response = await client.get(f"{self.api_url}/works", params=params)
                 response.raise_for_status()
                 return response.json()
-        
+
         except httpx.HTTPError as e:
-            logger.error(f"[{self.name}] Error fetching works for author {author_id}: {e}")
+            logger.error(
+                f"[{self.name}] Error fetching works for author {author_id}: {e}"
+            )
             return {"results": [], "meta": {"count": 0}}
-        
-    async def get_author_details(
-        self,
-        author_id: str
-    ) -> Optional[Dict[str, Any]]:
+
+    async def get_author_details(self, author_id: str) -> Optional[Dict[str, Any]]:
         """
         Get author details by OpenAlex Author ID.
-        
+
         Args:
             author_id: OpenAlex author ID (e.g., A5023888391)
-            
+
         Returns:
             Author details dictionary
         """
         try:
             # Ensure author_id has 'A' prefix
-            if not author_id.startswith('A') and not author_id.startswith('http'):
+            if not author_id.startswith("A") and not author_id.startswith("http"):
                 author_id = f"A{author_id}"
-            
+
             url = f"{self.api_url}/authors/{author_id}"
-            
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 return response.json()
-        
+
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] Error fetching author {author_id}: {e}")
             return None
-        

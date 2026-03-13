@@ -22,6 +22,16 @@ PROMPT_REGISTRY = {
         version=1,
         system_template=load_prompt("system/decompose_query.txt"),
     ),
+    "decompose_query_v2": PromptDefinition(
+        name="decompose_query_v2",
+        version=2,
+        system_template=load_prompt("system/decompose_query_v2.txt"),
+    ),
+    "conversation_summarization": PromptDefinition(
+        name="conversation_summarization",
+        version=1,
+        system_template=load_prompt("system/summarize_conversation.txt"),
+    ),
 }
 
 class PromptBuilder:

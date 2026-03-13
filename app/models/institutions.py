@@ -25,31 +25,19 @@ class DBInstitution(Base):
     
     # Identification
     ror_id: Mapped[str] = mapped_column(String(100), nullable=True, unique=True, index=True)  # ROR ID
-    external_ids: Mapped[dict] = mapped_column(JSONB, nullable=True)  # OpenAlex, GRID, etc.
-    
-    # Geographic info
+    external_ids: Mapped[dict] = mapped_column(JSONB, nullable=True) 
     country_code: Mapped[str] = mapped_column(String(5), nullable=True, index=True)
     country: Mapped[str] = mapped_column(String(100), nullable=True)
     city: Mapped[str] = mapped_column(String(100), nullable=True)
-    region: Mapped[str] = mapped_column(String(100), nullable=True)  # State/province
-    
-    # Institution type
-    type: Mapped[str] = mapped_column(String(50), nullable=True, index=True)  # Education, Healthcare, Government, etc.
-    
-    # Reputation metrics
+    region: Mapped[str] = mapped_column(String(100), nullable=True) 
+    type: Mapped[str] = mapped_column(String(50), nullable=True, index=True)
     total_papers: Mapped[int] = mapped_column(Integer, default=0)
     total_citations: Mapped[int] = mapped_column(Integer, default=0, index=True)
     h_index: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # Trust signals
-    reputation_score: Mapped[float] = mapped_column(Float, nullable=True, index=True)  # 0-100 composite score
-    avg_paper_quality: Mapped[float] = mapped_column(Float, nullable=True)  # Average FWCI of papers
-    retraction_rate: Mapped[float] = mapped_column(Float, default=0.0)  # % of papers retracted
-    
-    # Research profile
-    top_concepts: Mapped[list] = mapped_column(JSONB, nullable=True)  # Top research areas
-    
-    # Homepage
+    reputation_score: Mapped[float] = mapped_column(Float, nullable=True, index=True) 
+    avg_paper_quality: Mapped[float] = mapped_column(Float, nullable=True) 
+    retraction_rate: Mapped[float] = mapped_column(Float, default=0.0) 
+    top_concepts: Mapped[list] = mapped_column(JSONB, nullable=True)  
     homepage_url: Mapped[str] = mapped_column(Text, nullable=True)
     wikipedia_url: Mapped[str] = mapped_column(Text, nullable=True)
     

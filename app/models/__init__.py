@@ -21,6 +21,13 @@ from app.models.preprocessing_state import DBPreprocessingState
 from app.models.answer_vaidations import DBAnswerValidation
 from app.models.message_contexts import DBMessageContext
 from app.models.author_relationships import DBAuthorRelationship
+from app.models.benchmarks import (
+    DBGroundTruthDataset,
+    DBPaperRelevanceBenchmark,
+    DBChunkQualityBenchmark,
+    DBBreakdownQualityBenchmark,
+    DBPipelineBenchmark,
+)
 
 __all__ = [
     "DatabaseBase",
@@ -44,4 +51,11 @@ __all__ = [
     "DBAnswerValidation",
     "DBJournal",
     "DBPreprocessingState",
+    
+    # Benchmarking
+    "DBGroundTruthDataset",
+    "DBPaperRelevanceBenchmark",
+    "DBChunkQualityBenchmark",
+    "DBBreakdownQualityBenchmark",
+    "DBPipelineBenchmark",
 ]

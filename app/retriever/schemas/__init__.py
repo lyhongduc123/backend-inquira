@@ -5,7 +5,7 @@ Exports all schema models for the retriever module.
 """
 from .base import AuthorSchema, NormalizedPaperResult, NormalizedAuthorResult
 from .openalex import OAMeta, OAResponse
-from .semantic_scholar import S2RelevanceResponse, S2AuthorPapersResponse
+from .semantic_scholar import S2RelevanceResponse, S2AuthorPapersResponse, S2PaperCitationsResponse, S2PaperReferencesResponse
 
 __all__ = [
     "AuthorSchema",
@@ -15,4 +15,6 @@ __all__ = [
     "OAResponse",
     "S2RelevanceResponse",
     "S2AuthorPapersResponse",
+    "S2PaperCitationsResponse",
+    "S2PaperReferencesResponse",
 ]

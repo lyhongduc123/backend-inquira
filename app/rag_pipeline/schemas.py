@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from app.core.dtos import PaperEnrichedDTO
-from app.chunks.schemas import ChunkRetrieved
+from app.domain.chunks.schemas import ChunkRetrieved
 from app.models.papers import DBPaper
 from app.processor.schemas import RankedPaper
 from app.retriever.schemas.openalex import OAAuthorResponse
+from app.llm.schemas import QuestionBreakdownResponse
 
 class RAGEventType:
     RESULT = "result"
@@ -33,11 +34,12 @@ class RAGPipelineContext:
     search_queries: List[str] = field(default_factory=list)
     papers: List[PaperEnrichedDTO] = field(default_factory=list)
     filtered_papers: List[PaperEnrichedDTO] = field(default_factory=list)
+    papers_with_hybrid_scores: List[tuple] = field(default_factory=list)  # New: (DBPaper, score)
     processed_paper_ids: List[str] = field(default_factory=list)
     result_papers: List[RankedPaper] = field(default_factory=list)  # Changed from DBPaper
     chunks: List[Any] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    breakdown_response: Any = None  # QuestionBreakdownResponse with intent classification
+    breakdown_response: QuestionBreakdownResponse | None = None
     
 @dataclass
 class PipelineResult:

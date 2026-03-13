@@ -33,8 +33,6 @@ class QuestionBreakdownResponse(BaseModel):
     specific_papers: Optional[List[str]] = Field(default=None, description="Specific paper titles to search for exact matches")
     num_queries: int = Field(..., description="Number of search queries")
     complexity: Literal["simple", "intermediate", "advanced"] = Field(..., description="Question complexity level")
-    explanations: Optional[List[str]] = Field(None, description="Optional explanations for each subtopic")
-    has_explanations: bool = Field(..., description="Whether explanations are included")
     reasoning_content: Optional[str] = Field(None, description="LLM's reasoning process for generating the breakdown")
     model_used: str = Field(..., description="Model used for breakdown")
     
@@ -42,14 +40,8 @@ class QuestionBreakdownResponse(BaseModel):
     intent: Optional[QueryIntent] = Field(default=None, description="Classified query intent")
     intent_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Intent classification confidence")
     
-    # Pipeline optimization flags
     skip_ranking: bool = Field(default=False, description="Skip paper ranking step")
     skip_title_abstract_filter: bool = Field(default=False, description="Skip title/abstract similarity filter")
-    # skip_pdf_processing: bool = Field(default=False, description="Skip PDF extraction and chunking")
-    # skip_embedding: bool = Field(default=False, description="Skip content embedding")
-    needs_diversity: bool = Field(default=False, description="Enable diversity in ranking")
-    
-    # Extracted filters
     filters: Optional[Dict[str, Any]] = Field(default=None, description="Extracted filters (author, year, venue)")
 
 

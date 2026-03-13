@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from app.models.message_papers import DBMessagePaper
     from app.models.journals import DBJournal
     from app.models.bookmarks import DBBookmark
+    from app.models.conferences import DBConference
 
 
 
@@ -74,13 +75,13 @@ class DBPaper(Base):
         comment="External IDs (DOI, PubMed, ArXiv, etc.)"
     )
     
-    summary: Mapped[str] = mapped_column(
+    tldr: Mapped[str] = mapped_column(
         Text, nullable=True,
-        comment="AI-generated summary for semantic search"
+        comment="TL;DR summary from Semantic Scholar (replaces AI-generated summary)"
     )
-    summary_embedding: Mapped[Vector] = mapped_column(
+    tldr_embedding: Mapped[Vector] = mapped_column(
         Vector(768), nullable=True,
-        comment="768-dim vector embedding of summary (nomic-embed-text)"
+        comment="768-dim vector embedding of TLDR (nomic-embed-text)"
     )
 
     # relevance_score: Mapped[float] = mapped_column(
@@ -98,6 +99,20 @@ class DBPaper(Base):
     reference_count: Mapped[int] = mapped_column(
         Integer, default=0,
         comment="Number of references cited by this paper"
+    )
+    
+    # Semantic Scholar specific fields
+    year: Mapped[int] = mapped_column(
+        Integer, nullable=True, index=True,
+        comment="Publication year extracted by Semantic Scholar"
+    )
+    fields_of_study: Mapped[list[str]] = mapped_column(
+        ARRAY(String(100)), nullable=True,
+        comment="Research fields from Semantic Scholar classification"
+    )
+    s2_fields_of_study: Mapped[dict] = mapped_column(
+        JSONB, nullable=True,
+        comment="Enriched S2 fields with source attribution [{category, source}]"
     )
 
     topics: Mapped[list] = mapped_column(
@@ -142,6 +157,10 @@ class DBPaper(Base):
     journal_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("journals.id"), nullable=True, index=True,
         comment="Foreign key to journals table (SJR data)"
+    )
+    conference_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conferences.id"), nullable=True, index=True,
+        comment="Foreign key to conferences table (CORE ranking data)"
     )
     
     is_retracted: Mapped[bool] = mapped_column(
@@ -197,31 +216,23 @@ class DBPaper(Base):
         back_populates="paper",
         cascade="all, delete-orphan"
     )
-    """Structured author-paper relationships with affiliations and roles."""
-    
-    citations_made: Mapped[list["DBCitation"]] = relationship(
+    references: Mapped[list["DBCitation"]] = relationship(
         "DBCitation",
         foreign_keys="[DBCitation.citing_paper_id]",
         back_populates="citing_paper",
         cascade="all, delete-orphan"
     )
-    """Papers cited by this paper (outgoing citations)."""
-    
-    citations_received: Mapped[list["DBCitation"]] = relationship(
+    citations: Mapped[list["DBCitation"]] = relationship(
         "DBCitation",
         foreign_keys="[DBCitation.cited_paper_id]",
         back_populates="cited_paper",
         cascade="all, delete-orphan"
     )
-    """Papers that cite this paper (incoming citations)."""
-    
     message_papers: Mapped[list] = relationship(
         "DBMessagePaper",
         back_populates="paper",
         cascade="all, delete-orphan"
     )
-    """Association records linking papers to messages."""
-    
     messages: Mapped[list] = relationship(
         "DBMessage",
         secondary="message_papers",
@@ -229,16 +240,14 @@ class DBPaper(Base):
         overlaps="message_papers",
         viewonly=True,
     )
-    """Messages that reference this paper (view-only)."""
-    
     chunks: Mapped[list["DBPaperChunk"]] = relationship(
         "DBPaperChunk", back_populates="paper", cascade="all, delete-orphan"
     )
-    """Text chunks for semantic search and citation verification."""
-    
+    conference: Mapped["DBConference"] = relationship(
+        "DBConference", foreign_keys=[conference_id]
+    )
     journal: Mapped["DBJournal"] = relationship("DBJournal", foreign_keys=[journal_id])
-    """Associated journal with SJR metrics."""
-    
+
     bookmarks: Mapped[List["DBBookmark"]] = relationship("DBBookmark", back_populates="paper", cascade="all, delete-orphan")
     """User bookmarks for this paper."""
     
@@ -246,6 +255,8 @@ class DBPaper(Base):
         Index('idx_paper_trust', 'author_trust_score', 'institutional_trust_score'),
         Index('idx_paper_quality', 'fwci', 'citation_count'),
         Index('idx_paper_status', 'is_retracted', 'is_open_access'),
+        # GIN index for fields_of_study array searches
+        Index('ix_papers_fields_of_study_gin', 'fields_of_study', postgresql_using='gin'),
     )
 
 

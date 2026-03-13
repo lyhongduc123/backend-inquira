@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime
 from typing import TYPE_CHECKING
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import (
@@ -56,53 +57,47 @@ class DBAuthor(Base):
 
     h_index: Mapped[int] = mapped_column(Integer, nullable=True, default=None)
     i10_index: Mapped[int] = mapped_column(Integer, nullable=True, default=None)
+    g_index: Mapped[int] = mapped_column(Integer, nullable=True, default=None, comment="g-index: largest number g where top g papers have at least g² citations")
     total_citations: Mapped[int] = mapped_column(Integer, nullable=True, default=None, index=True)
     total_papers: Mapped[int] = mapped_column(Integer, nullable=True, default=None)
+    retracted_papers_count: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    has_retracted_papers: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     url: Mapped[str] = mapped_column(Text, nullable=True)
     
-    retracted_papers_count: Mapped[int] = mapped_column(Integer, default=0, index=True)
     first_publication_year: Mapped[int] = mapped_column(Integer, nullable=True)
     last_known_institution_id: Mapped[int] = mapped_column(
         ForeignKey("institutions.id"), nullable=True
     )
-
-    # Reputation scores (computed)
     reputation_score: Mapped[float] = mapped_column(Float, nullable=True, index=True)
     field_weighted_citation_impact: Mapped[float] = mapped_column(
         Float, nullable=True
-    )  # Average FWCI across papers
-    collaboration_diversity_score: Mapped[float] = mapped_column(
-        Float, nullable=True
-    )  # Network breadth
-
-    # Academic seniority indicators
+    )  # This might be not computable
     is_corresponding_author_frequently: Mapped[bool] = mapped_column(
         Boolean, default=False
-    )  # >50% of papers
+    )  
     average_author_position: Mapped[float] = mapped_column(
         Float, nullable=True
-    )  # 1.0 = always first, 0.0 = always last
-
-    # Red flags
-    has_retracted_papers: Mapped[bool] = mapped_column(
-        Boolean, default=False, index=True
-    )
+    ) 
     self_citation_rate: Mapped[float] = mapped_column(
         Float, nullable=True
-    )  # % of citations from own papers
-
-    # Homepage & social
+    ) 
     homepage_url: Mapped[str] = mapped_column(Text, nullable=True)
+    is_processed: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, comment="Whether author has been processed for conflict detection"
+    )
+    is_conflict: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, comment="Whether author profile has significant data conflicts (>50% citation difference between sources)"
+    )
 
     # Timestamps
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-    updated_at: Mapped[DateTime] = mapped_column(
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
-    last_paper_indexed_at: Mapped[DateTime] = mapped_column(
+    last_paper_indexed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -119,7 +114,7 @@ class DBAuthor(Base):
 
     __table_args__ = (
         Index("idx_author_reputation", "reputation_score", "total_citations"),
-        Index("idx_author_trust", "verified", "has_retracted_papers"),
+        Index("verified"),
     )
 
 
@@ -144,20 +139,16 @@ class DBAuthorPaper(Base):
         Integer, nullable=True
     )  # 1 = first author, etc.
     is_corresponding: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    # Affiliation at time of paper
     institution_id: Mapped[int] = mapped_column(
         ForeignKey("institutions.id"), nullable=True, index=True
     )
     institution_raw: Mapped[str] = mapped_column(
         Text, nullable=True
-    )  # Raw affiliation string
-
-    # Author string as appeared in paper (for disambiguation tracking)
+    )  
     author_string: Mapped[str] = mapped_column(String(255), nullable=True)
 
     # Timestamps
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
@@ -206,10 +197,10 @@ class DBAuthorInstitution(Base):
     )  # Confidence in this affiliation
 
     # Timestamps
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-    updated_at: Mapped[DateTime] = mapped_column(
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 

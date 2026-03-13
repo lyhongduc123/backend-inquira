@@ -11,7 +11,7 @@ class ValidationRequest(CamelModel):
     """Request for answer validation inspection"""
     query: str
     context: str  # Context with chunks, paper IDs, and prompt
-    generated_answer: Optional[str] = None  # If provided, validate this answer; otherwise generate new one
+    generated_answer: Optional[str] = None 
     model_name: str = "gpt-4o-mini"
     conversation_id: Optional[int] = None
     message_id: Optional[int] = None

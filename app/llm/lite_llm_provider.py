@@ -86,6 +86,8 @@ class LiteLLMProvider:
 
             try:
                 params = {**self.kwargs, **kwargs}
+                # Remove 'model' from params to avoid conflict with explicit model argument
+                params.pop('model', None)
 
                 response = litellm.completion(
                     model=provider["model"],
@@ -95,7 +97,7 @@ class LiteLLMProvider:
                     **params,
                 )
 
-                return response  # ✅ success → stay on this provider
+                return response
 
             except (RateLimitError, APIError, Timeout, ServiceUnavailableError) as e:
                 logger.error(

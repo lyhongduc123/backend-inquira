@@ -1,9 +1,19 @@
-from typing import List, Literal, Optional, Dict, Any, Tuple, Union, TYPE_CHECKING
+from typing import (
+    TypeVar,
+    Type,
+    List,
+    Literal,
+    Optional,
+    Dict,
+    Any,
+    Tuple,
+    Union,
+    TYPE_CHECKING,
+)
 from enum import Enum
 from litellm import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.papers import DBPaper, DBPaperChunk
-from app.chunks.schemas import ChunkRetrieved
+from app.domain.chunks.schemas import ChunkRetrieved
 from app.extensions.logger import create_logger
 from app.core.config import settings
 from app.retriever.provider import (
@@ -14,17 +24,17 @@ from app.retriever.provider import (
 )
 from app.retriever.schemas import NormalizedPaperResult
 from app.processor.services.embeddings import EmbeddingService, get_embedding_service
-from app.chunks.service import ChunkService
-from app.chunks.repository import ChunkRepository
-from .retriever import PaperRetriever
+from app.domain.chunks import ChunkService, ChunkRepository
 from app.core.dtos.paper import PaperEnrichedDTO
+from app.utils.transformers import batch_normalized_to_papers
+from app.utils.string import surname
+
+from .retriever import PaperRetriever
 from .result_logger import save_retrieval_results
 from .schemas.openalex import OAAuthorResponse
 
 if TYPE_CHECKING:
-    from app.papers.service import PaperService
-    from app.papers.repository import PaperRepository
-    from app.processor.services.transformer import TransformerService
+    from app.domain.papers.service import PaperService
 
 logger = create_logger(__name__)
 
@@ -58,7 +68,6 @@ class RetrievalService:
         db: AsyncSession,
         paper_retriever: Optional[PaperRetriever] = None,
         embedding_service: Optional[EmbeddingService] = None,
-        paper_service: Optional["PaperService"] = None,
         chunk_service: Optional[ChunkService] = None,
         config: Optional[RetrievalConfig] = None,
     ):
@@ -69,39 +78,18 @@ class RetrievalService:
             db: Database session
             paper_retriever: Optional paper retriever (for fetching from external APIs)
             embedding_service: Optional embedding service
-            paper_service: Optional paper service (uses repository internally)
             chunk_service: Optional chunk service (uses repository internally)
             config: Optional retrieval configuration
         """
-        from app.papers.service import PaperService
-        from app.papers.repository import PaperRepository
-        from app.processor.services.transformer import TransformerService
-        
-        # Use injected dependencies or defaults
         self.paper_retriever = paper_retriever or PaperRetriever()
         self.embedding_service = embedding_service or get_embedding_service()
-        
-        # Create local transformer instance to avoid circular import with singletons
-        self.transformer = TransformerService()
-
-        # Use PaperService as main interface (creates repository internally)
-        if paper_service:
-            self.paper_service = paper_service
-        else:
-            repository = PaperRepository(db)
-            self.paper_service = PaperService(repository)
-
-        # Use ChunkService for chunk operations
         if chunk_service:
             self.chunk_service = chunk_service
         else:
             chunk_repository = ChunkRepository(db)
             self.chunk_service = ChunkService(chunk_repository)
 
-        # Use injected config or default
         retrieval_config = config or RetrievalConfig(max_results=100, timeout=30.0)
-
-        # Initialize providers with config
         self.providers: Dict[RetrievalServiceType, RetrievalProvider] = {
             RetrievalServiceType.SEMANTIC: SemanticScholarProvider(
                 api_url=settings.SEMANTIC_API_URL,
@@ -158,7 +146,7 @@ class RetrievalService:
             except Exception as e:
                 logger.warning(f"Failed to save retrieval results: {e}")
 
-        papers = self.transformer.batch_normalized_to_papers(results)
+        papers = batch_normalized_to_papers(results)
         return papers
 
     async def hybrid_search(
@@ -224,7 +212,7 @@ class RetrievalService:
         else:
             enriched_papers = semantic_results
 
-        papers = self.transformer.batch_normalized_to_papers(enriched_papers[:final_limit])
+        papers = batch_normalized_to_papers(enriched_papers)
 
         metadata = {
             "semantic_scholar_count": len(semantic_results),
@@ -232,18 +220,58 @@ class RetrievalService:
             "final_returned": len(papers),
         }
         return papers, metadata
+
+    async def get_multiple_papers(self, paper_ids: List[str]) -> List[PaperEnrichedDTO]:
+        semantic_provider = self.get_provider_as(
+            RetrievalServiceType.SEMANTIC, SemanticScholarProvider
+        )
+
+        normalized_results = []
+        try:
+            result = await semantic_provider.get_multiple_papers_details(paper_ids)
+            if result:
+                normalized_results = [
+                    semantic_provider.normalize_result(r) for r in result
+                ]
+        except Exception as e:
+            logger.error(f"Error fetching papers: {e}")
+            return []
+
+        enriched_papers = await self._enrich_with_openalex(normalized_results)
+        papers = batch_normalized_to_papers(enriched_papers)
+
+        return papers
+
+    async def get_paper_citations(
+        self, paper_id: str, limit: int= 100, offset: int = 0
+    ) -> Dict[str, Any]:
+        semantic_provider = self.get_provider_as(
+            RetrievalServiceType.SEMANTIC, SemanticScholarProvider
+        )
+       
+        result = await semantic_provider.get_citations(
+            paper_id, limit=limit, offset=offset
+        )
+        return result.model_dump() if result else {}
     
+    async def get_paper_references(
+        self, paper_id: str, limit: int= 100, offset: int = 0
+    ) -> Dict[str, Any]:
+        semantic_provider = self.get_provider_as(
+            RetrievalServiceType.SEMANTIC, SemanticScholarProvider
+        )
+       
+        result = await semantic_provider.get_references(
+            paper_id, limit=limit, offset=offset
+        )
+        logger.debug(f"Fetched {len(result.data) if result else 0} references for paper {paper_id}")
+        return result.model_dump() if result else {}
+   
+
     async def get_author(self, oa_id: str) -> Optional[OAAuthorResponse]:
-        """
-        Get detailed author information from OpenAlex.
-
-        Args:
-            author_id: OpenAlex author ID
-
-        Returns:
-            OAAuthorResponse object with author details
-        """
-        openalex_provider: OpenAlexProvider = self.providers[RetrievalServiceType.OPENALEX]  # type: ignore[assignment]
+        openalex_provider: OpenAlexProvider = self.get_provider_as(
+            RetrievalServiceType.OPENALEX, OpenAlexProvider
+        )
         try:
             raw_author = await openalex_provider.get_author_details(oa_id)
             if not raw_author:
@@ -254,9 +282,7 @@ class RetrievalService:
             logger.error(f"Error fetching OpenAlex author {oa_id}: {e}")
             return None
 
-    async def get_author_papers(
-        self, author_id: str
-    ) -> List[PaperEnrichedDTO]:
+    async def get_author_papers(self, author_id: str) -> List[PaperEnrichedDTO]:
         """
         Fetch detailed author information from specified provider.
 
@@ -279,7 +305,7 @@ class RetrievalService:
             return []
 
         enriched_papers = await self._enrich_with_openalex(normalized_results)
-        papers = self.transformer.batch_normalized_to_papers(enriched_papers)
+        papers = batch_normalized_to_papers(enriched_papers)
 
         return papers
 
@@ -310,18 +336,21 @@ class RetrievalService:
                 doi_to_semantic[doi] = result
         openalex_data = {}
         if dois:
-            openalex_id_results = await openalex_provider.get_papers_by_dois(dois)
+            openalex_id_results = []
+            try:
+                openalex_id_results = await openalex_provider.get_papers_by_dois(dois)
+            except Exception as e:
+                logger.error(f"Error fetching OpenAlex data for enrichment: {e}")
             for oa_result in openalex_id_results:
                 doi = oa_result.get("doi")
                 if isinstance(doi, str):
                     doi = doi.removeprefix("https://doi.org/")
                     openalex_data[doi] = oa_result
 
-        logger.info(
-            f"[HybridSearch] Fetched {len(openalex_data)} OpenAlex records for enrichment"
+        logger.debug(
+            f"Fetched {len(openalex_data)} OpenAlex records for enrichment"
         )
 
-        # Merge data
         enriched = []
         for doi, normalized_semantic_result in doi_to_semantic.items():
             openalex_result = openalex_data.get(doi)
@@ -355,111 +384,49 @@ class RetrievalService:
         Returns:
             Merged NormalizedResult with unified author data
         """
-        merged_dict = semantic_result.model_dump()
-        oa_dict = openalex_result.model_dump()
+        logger.debug(openalex_result)
+        merged_model = semantic_result.model_copy()
 
-        merged_dict["citation_count"] = semantic_result.citation_count
-
-        # OpenAlex metadata (these don't exist in Semantic Scholar)
-        merged_dict["fwci"] = oa_dict.get("fwci")
-        merged_dict["is_retracted"] = oa_dict.get("is_retracted", False)
-        merged_dict["citation_percentile"] = oa_dict.get("citation_percentile")
-        merged_dict["language"] = oa_dict.get("language")
-        merged_dict["topics"] = oa_dict.get("topics", [])
-        merged_dict["keywords"] = oa_dict.get("keywords", [])
-        merged_dict["concepts"] = oa_dict.get("concepts", [])
-        merged_dict["mesh_terms"] = oa_dict.get("mesh_terms", [])
-        merged_dict["has_content"] = oa_dict.get("has_content", {})
+        merged_model.fwci = openalex_result.fwci
+        merged_model.is_retracted = openalex_result.is_retracted
+        merged_model.citation_percentile = openalex_result.citation_percentile
+        merged_model.language = openalex_result.language
+        merged_model.topics = openalex_result.topics
+        merged_model.keywords = openalex_result.keywords
+        merged_model.concepts = openalex_result.concepts
+        merged_model.mesh_terms = openalex_result.mesh_terms
+        merged_model.has_content = openalex_result.has_content
 
         # Author collaboration metadata
-        merged_dict["corresponding_author_ids"] = oa_dict.get(
-            "corresponding_author_ids", []
-        )
-        merged_dict["institutions_distinct_count"] = oa_dict.get(
-            "institutions_distinct_count", 0
-        )
-        merged_dict["countries_distinct_count"] = oa_dict.get(
-            "countries_distinct_count", 0
-        )
-
-        # Merge authors: combine Semantic Scholar author stats with OpenAlex authorships
+        merged_model.corresponding_author_ids = openalex_result.corresponding_author_ids
+        merged_model.institutions_distinct_count = openalex_result.institutions_distinct_count
+        merged_model.countries_distinct_count = openalex_result.countries_distinct_count
+        
         merged_authors = []
-        semantic_authors = [author.model_dump() for author in semantic_result.authors]
-        oa_authorships = oa_dict.get("authorships", [])
+        semantic_authors = semantic_result.authors or []
+        oa_authors = openalex_result.authors or []
 
-        # Create author lookup by name for matching
-        oa_authors_by_name = {}
-        for authorship in oa_authorships:
-            author_data = authorship.get("author", {})
-            name = author_data.get("display_name", "")
-            if name:
-                oa_authors_by_name[name.lower()] = authorship
-
-        # Merge authors from both sources
-        for s2_author in semantic_authors:
-            merged_author = s2_author.copy()
-            name = s2_author.get("name", "")
-
-            oa_authorship = oa_authors_by_name.get(name.lower())
-            if oa_authorship:
-                author_data = oa_authorship.get("author", {})
-                merged_author["institutions"] = oa_authorship.get("institutions", [])
-                merged_author["affiliations"] = oa_authorship.get(
-                    "raw_affiliation_strings", []
-                )
-                if "id" in author_data:
-                    merged_author["author_id"] = author_data["id"].removeprefix(
-                        "https://openalex.org/"
-                    )
-                if "orcid" in author_data:
-                    merged_author["orcid"] = author_data["orcid"]
-
+        for i, s2_author in enumerate(semantic_authors):
+            oa_author = self._find_matching_author(s2_author, oa_authors, i)
+            merged_author = s2_author.model_copy()
+            if oa_author:
+                merged_author.affiliations = oa_author.affiliations
+                merged_author.openalex_id = oa_author.author_id
+                merged_author.orcid = oa_author.orcid
             merged_authors.append(merged_author)
 
-        merged_dict["authors"] = merged_authors
+        merged_model.authors = merged_authors
         if openalex_result.venue:
-            merged_dict["venue"] = semantic_result.venue or openalex_result.venue
+            merged_model.venue = semantic_result.venue or openalex_result.venue
 
-        if "external_ids" not in merged_dict or not merged_dict["external_ids"]:
-            merged_dict["external_ids"] = {}
+        if not merged_model.external_ids:
+            merged_model.external_ids = {}
 
-        # Merge OpenAlex external IDs (OA takes precedence)
-        if openalex_result.paper_id:
-            merged_dict["external_ids"]["OpenAlex"] = (
-                openalex_result.paper_id.removeprefix("https://openalex.org/")
-            )
-
-        return NormalizedPaperResult(**merged_dict)
-
-    def _normalize_title(self, title: str) -> str:
-        """Normalize title for deduplication."""
-        if not title:
-            return ""
-        # Remove punctuation and extra spaces
-        normalized = title.lower().strip()
-        normalized = (
-            normalized.replace(".", "")
-            .replace(",", "")
-            .replace(":", "")
-            .replace(";", "")
+        merged_model.external_ids["OpenAlex"] = (
+            openalex_result.paper_id.removeprefix("https://openalex.org/")
         )
-        normalized = " ".join(normalized.split())
-        return normalized
 
-    async def get_paper_by_external_ids(
-        self, external_ids: Dict[str, str], source: str
-    ) -> Optional[DBPaper]:
-        """
-        Check if a paper exists in the database by external IDs and source
-
-        Args:
-            external_ids: External paper IDs dict (e.g., {"DOI": "...", "ArXiv": "..."})
-            source: Source/provider name
-        Returns:
-            DBPaper object if exists, else None
-        """
-        paper = await self.paper_service.get_paper_by_external_ids(external_ids, source)
-        return paper
+        return merged_model
 
     async def resolve_paper_content(
         self, paper: PaperEnrichedDTO
@@ -594,7 +561,7 @@ class RetrievalService:
         Returns:
             List of relevant chunks with relevance_score attribute set
         """
-        query_embedding = await self.embedding_service.create_embedding(query)
+        query_embedding = await self.embedding_service.create_embedding(query, task="search_query")
 
         if not query_embedding:
             logger.error("Failed to generate query embedding")
@@ -606,40 +573,32 @@ class RetrievalService:
 
         return chunks_with_scores
 
-    async def get_paper_summaries(self, query: str, limit: int = 10) -> List[DBPaper]:
-        """
-        Get relevant paper summaries for a query
+    T = TypeVar("T", bound=RetrievalProvider)
 
-        Args:
-            query: Query text
-            limit: Number of papers to return
+    def get_provider_as(
+        self, service_type: RetrievalServiceType, provider_class: Type[T]
+    ) -> T:
+        provider = self.providers.get(service_type)
+        if not isinstance(provider, provider_class):
+            raise TypeError(
+                f"Provider {service_type} is not of type {provider_class.__name__}"
+            )
+        return provider
 
-        Returns:
-            List of relevant papers with summaries
-        """
-        # Generate query embedding
-        query_embedding = await self.embedding_service.create_embedding(query)
+    def _find_matching_author(self, s2_author, oa_authors, index):
+        s2_last = surname(s2_author.name)
+        
+        if index < len(oa_authors):
+            oa_author = oa_authors[index]
+            if surname(oa_author.name) == s2_last:
+                return oa_author
 
-        if not query_embedding:
-            logger.error("Failed to generate query embedding")
-            return []
+        # Try nearby positions (handles missing authors)
+        for shift in (-1, 1):
+            new_i = index + shift
+            if 0 <= new_i < len(oa_authors):
+                oa_author = oa_authors[new_i]
+                if surname(oa_author.name) == s2_last:
+                    return oa_author
 
-        # Use paper service to search for similar papers
-        papers = await self.paper_service.search_similar_papers(
-            query_embedding, limit=limit
-        )
-
-        return papers
-
-    def get_provider(
-        self, service_type: RetrievalServiceType
-    ) -> Optional[RetrievalProvider]:
-        """
-        Get the provider instance for a given service type
-
-        Args:
-            service_type: RetrievalServiceType enum value
-        Returns:
-            Provider instance or None
-        """
-        return self.providers[service_type]
+        return None

@@ -1,8 +1,6 @@
 from .stream import (
     stream_event,
     stream_chunk,
-    stream_error,
-    stream_done,
     stream_heartbeat,
     StreamEventType,
     get_simple_response_content,
@@ -19,8 +17,6 @@ __all__ = [
     
     "stream_event",
     "stream_chunk",
-    "stream_error",
-    "stream_done",
     "stream_heartbeat",
     "StreamEventType",
 ]

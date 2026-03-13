@@ -13,6 +13,7 @@ class AuthorDTO(BaseModel):
     """
     name: str
     author_id: Optional[str] = None
+    openalex_id: Optional[str] = None  # OpenAlex ID stored separately
     citation_count: Optional[int] = None
     h_index: Optional[int] = None
     paper_count: Optional[int] = None

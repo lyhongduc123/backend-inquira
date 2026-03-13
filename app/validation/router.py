@@ -1,6 +1,9 @@
 """
 Validation Router
-API endpoints for LLM answer validation, citation verification, and hallucination detection.
+API endpoints for viewing validation statistics and benchmarking results.
+
+Validation happens automatically after each chat response.
+These endpoints are for viewing and analyzing the validation results.
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,52 +22,6 @@ logger = create_logger(__name__)
 router = APIRouter()
 
 
-@router.post("/validate", response_model=schemas.ValidationInspection)
-async def validate_answer(
-    request: schemas.ValidationRequest,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """
-    Validate an LLM-generated answer with detailed inspection.
-    
-    Returns detailed analysis for frontend visualization:
-    - Text matching (terms found/missing)
-    - Citation verification
-    - Hallucination detection
-    - Relevance scoring
-    """
-    try:
-        # Perform validation
-        validation_result = await service.validate_answer(request)
-        
-        # Save to database
-        db_record = await service.save_validation_result(db, request, validation_result)
-        validation_result.validation_id = db_record.id
-        
-        logger.info(f"Validation completed and saved with ID: {db_record.id}")
-        
-        # Create summary
-        summary = {
-            "has_issues": validation_result.has_hallucination or 
-                         (validation_result.citation_accuracy.hallucinated_citations > 0 if validation_result.citation_accuracy else False),
-            "text_match_percentage": validation_result.text_match.match_percentage,
-            "citation_accuracy": validation_result.citation_accuracy.accuracy if validation_result.citation_accuracy else 0.0,
-            "relevance": validation_result.relevance_score,
-            "issues_count": validation_result.hallucination_count + 
-                          (validation_result.citation_accuracy.hallucinated_citations if validation_result.citation_accuracy else 0)
-        }
-        
-        return schemas.ValidationInspection(
-            validation_id=db_record.id,
-            timestamp=datetime.now(),
-            result=validation_result,
-            summary=summary
-        )
-    except Exception as e:
-        logger.error(f"Validation error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Validation failed: {str(e)}")
-
-
 @router.get("/history")
 async def get_validation_history(
     skip: int = 0,
@@ -73,7 +30,12 @@ async def get_validation_history(
     has_hallucination: Optional[bool] = None,
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Get validation history with filtering."""
+    """
+    Get validation history with filtering.
+    
+    Validations are created automatically after each chat response.
+    Use this endpoint to view and analyze validation results for benchmarking.
+    """
     try:
         result = await service.get_validation_history(
             db=db,
@@ -111,7 +73,12 @@ async def get_validation_detail(
     validation_id: int,
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Get detailed information about a specific validation."""
+    """
+    Get detailed information about a specific validation.
+    
+    View full validation results including hallucination details,
+    citation accuracy, and relevance scores.
+    """
     result = await db.execute(
         select(DBAnswerValidation).where(DBAnswerValidation.id == validation_id)
     )
@@ -147,12 +114,21 @@ async def get_validation_stats(
     message_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Get aggregate statistics for validations."""
+    """
+    Get aggregate validation statistics for benchmarking.
+    
+    Returns:
+    - Total validations
+    - Hallucination rate
+    - Average relevance score
+    - Average citation accuracy
+    - Statistics by pipeline type (if available)
+    """
     try:
         stats = await service.get_validation_stats(db=db, message_id=message_id)
         return stats
     except Exception as e:
-        logger.error(f"Error fetching validation stats: {str(e)}", exc_info=True)
+        logger.error(f"Errorecord r fetching validation stats: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -416,8 +416,16 @@ async def get_validation_stats(
     db: AsyncSession,
     message_id: int | None = None
 ):
-    """Get aggregate validation statistics."""
-    query = select(DBAnswerValidation)
+    """
+    Get aggregate validation statistics.
+    Includes breakdown by pipeline type for comparison.
+    """
+    from app.models.messages import DBMessage
+    from sqlalchemy.orm import joinedload
+    
+    query = select(DBAnswerValidation).options(
+        joinedload(DBAnswerValidation.message)
+    )
     
     if message_id is not None:
         query = query.where(DBAnswerValidation.message_id == message_id)
@@ -429,11 +437,12 @@ async def get_validation_stats(
         return {
             "total_validations": 0,
             "hallucination_rate": 0.0,
-            "average_relevance_score": 0.0,
-            "average_factual_accuracy": 0.0,
-            "average_citation_accuracy": 0.0,
+            "avg_relevance_score": 0.0,
+            "avg_factual_accuracy": 0.0,
+            "avg_citation_accuracy": 0.0,
             "total_hallucinations": 0,
             "total_incorrect_citations": 0,
+            "by_pipeline": {}
         }
     
     total = len(validations)
@@ -445,12 +454,36 @@ async def get_validation_stats(
     avg_factual = sum(v.factual_accuracy_score or 0.0 for v in validations) / total
     avg_citation = sum(v.citation_accuracy or 0.0 for v in validations) / total
     
+    # Group by pipeline type
+    by_pipeline = {}
+    pipeline_groups = {}
+    
+    for v in validations:
+        if v.message and v.message.pipeline_type:
+            pipeline_type = v.message.pipeline_type
+            if pipeline_type not in pipeline_groups:
+                pipeline_groups[pipeline_type] = []
+            pipeline_groups[pipeline_type].append(v)
+    
+    # Calculate stats per pipeline
+    for pipeline_type, pipeline_validations in pipeline_groups.items():
+        p_total = len(pipeline_validations)
+        p_with_hallucination = sum(1 for v in pipeline_validations if v.has_hallucination)
+        
+        by_pipeline[pipeline_type] = {
+            "count": p_total,
+            "hallucination_rate": p_with_hallucination / p_total if p_total > 0 else 0.0,
+            "avg_relevance": sum(v.relevance_score or 0.0 for v in pipeline_validations) / p_total,
+            "avg_citation_accuracy": sum(v.citation_accuracy or 0.0 for v in pipeline_validations) / p_total,
+        }
+    
     return {
         "total_validations": total,
         "hallucination_rate": with_hallucination / total,
-        "average_relevance_score": avg_relevance,
-        "average_factual_accuracy": avg_factual,
-        "average_citation_accuracy": avg_citation,
+        "avg_relevance_score": avg_relevance,
+        "avg_factual_accuracy": avg_factual,
+        "avg_citation_accuracy": avg_citation,
         "total_hallucinations": total_hallucination_count,
         "total_incorrect_citations": total_incorrect_citations,
+        "by_pipeline": by_pipeline
     }

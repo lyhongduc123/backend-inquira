@@ -3,18 +3,16 @@ from typing import AsyncGenerator, Dict, List, Optional, TYPE_CHECKING, Union, T
 import asyncio
 from app.core.dtos.paper import PaperEnrichedDTO
 from app.core.singletons import (
-    get_transformer_service,
     get_extractor_service,
     get_chunker_service,
     get_embedding_service,
     get_summarizer_service,
 )
 from .services.chunker import ChunkWithMetadata
-from app.papers.repository import PaperRepository
-from app.papers.service import PaperService
-from app.chunks.repository import ChunkRepository
-from app.authors.service import AuthorService
-from app.institutions.service import InstitutionService
+from app.domain.papers import PaperRepository, PaperService
+from app.domain.chunks.repository import ChunkRepository
+from app.domain.authors import AuthorService
+from app.domain.institutions import InstitutionService
 from numpy import dot
 from numpy.linalg import norm
 
@@ -53,17 +51,13 @@ class PaperProcessor:
             summarizer_service: Optional SummarizerService (singleton if not provided)
         """
         self.repository = repository
-        self.paper_service = PaperService(repository)
-        self.transformer = get_transformer_service()  # Use singleton
-
-        # Services for author/institution enrichment
+        
+        self.retrieval_service = retrieval_service
+        self.paper_service = PaperService(repository, self.retrieval_service)
+        
         self.author_service = AuthorService(self.repository.db)
         self.institution_service = InstitutionService(self.repository.db)
-
         self.chunk_repository = chunk_repository or ChunkRepository(self.repository.db)
-
-        # Use RetrievalService if provided, otherwise will be lazy-loaded when needed
-        self.retrieval_service = retrieval_service
 
         # Use singletons for stateless services
         self.extractor_service = extractor_service or get_extractor_service()
@@ -147,36 +141,32 @@ class PaperProcessor:
             del resolved
 
             logger.info(f"[{paper_id_str}] Generated {len(chunks)} chunks from content")
-
-            # Create embeddings in smaller batches to avoid memory issues
-            chunk_texts = [c.text for c in chunks]
+            
+            # Prepare chunk texts with section titles for better embeddings
+            chunk_texts = []
+            for chunk in chunks:
+                # Prepend section title if available for better semantic context
+                if chunk.section_title:
+                    chunk_text = f"Section: {chunk.section_title}\n\n{chunk.text}"
+                else:
+                    chunk_text = chunk.text
+                chunk_texts.append(chunk_text)
+            
             embeddings = await self.embedding_service.create_embeddings_batch(
-                chunk_texts, batch_size=10  # Smaller batch size for Ollama
+                chunk_texts, batch_size=10, task="search_document"  # Use search_document task
             )
-
-            # Clear chunk texts after embedding
+            
             del chunk_texts
 
             await self._store_chunks(paper_id_str, chunks, embeddings)
 
-            # Clear chunks and embeddings from memory after storage
             del chunks
             del embeddings
-            # Generate summary from chunks (now returns structured JSON)
-            # combined_text = "\n\n".join([c.text for c in chunks])
-            # summary = await self.summarizer_service.generate_summary(
-            #     paper, combined_text, doc_structure
-            # )
-            # summary_emb = await self.embedding_service.create_embedding(summary)
-            # await self.repository.update_paper_summary(
-            #     paper_id_str, summary, summary_emb if summary_emb else []
-            # )
 
             await self.repository.update_paper_processing_status(
                 paper_id_str, "completed"
             )
 
-            # Force garbage collection to release memory from PDF/chunks/embeddings
             gc.collect()
 
             return True
@@ -287,6 +277,12 @@ class PaperProcessor:
                     token_count=chunk.token_count,
                     section_title=chunk.section_title,
                     chunk_index=idx,
+                    page_number=chunk.page_number,
+                    label=chunk.label,
+                    level=chunk.level,
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    docling_metadata=chunk.docling_metadata,
                     embedding=emb if emb is not None else [],
                     defer_commit=True,  # Don't commit until all chunks are added
                 )
@@ -374,7 +370,7 @@ class PaperProcessor:
             logger.warning("Some papers missing embeddings, generating now...")
             papers = await self.generate_paper_embeddings(papers)
 
-        query_embedding = await self.embedding_service.create_embedding(query)
+        query_embedding = await self.embedding_service.create_embedding(query, task="search_query")
 
         scored_papers = []
         for paper in papers:
@@ -531,7 +527,37 @@ class PaperProcessor:
         gc.collect()
 
         return results
+    
+    async def process_papers_v2(
+        self,
+        papers: List[PaperEnrichedDTO],
+        filtered_papers: Optional[List[PaperEnrichedDTO]] = None,
+        max_workers: int = 4,
+    ) -> Dict[str, bool]:
+        """Process a list of papers concurrently."""
+        if filtered_papers is not None and len(filtered_papers) > 0:
+            filtered_ids = {str(p.paper_id) for p in filtered_papers}
+            papers = [p for p in papers if str(p.paper_id) in filtered_ids]
+            logger.info(f"{len(papers)} papers after filtering by similarity")
 
+        if not papers:
+            logger.info("No papers to process after filtering")
+            return {}
+
+        semaphore = asyncio.Semaphore(max_workers)
+        tasks = [self.process_content_only(paper, semaphore) for paper in papers]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        result_dict = {}
+        for result in results:
+            if isinstance(result, tuple) and len(result) == 2:
+                paper_id, success = result
+                result_dict[paper_id] = success
+            elif isinstance(result, Exception):
+                logger.error(f"Error processing paper: {result}")
+        return result_dict
+        
+    
     async def process_content_only(
         self, paper: PaperEnrichedDTO, semaphore: asyncio.Semaphore
     ) -> Tuple[str, bool]:

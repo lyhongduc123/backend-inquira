@@ -45,8 +45,8 @@ class DBAnswerValidation(Base):
         comment="The assistant message being validated (message.content has the answer)",
     )
 
-    model_name: Mapped[str] = mapped_column(
-        String(100), nullable=False, default="gpt-4o-mini"
+    model_name: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, server_default="gpt-oss", comment="Model used for validation"
     )
 
     # Validation results

@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm import get_llm_service
 from app.processor.paper_processor import PaperProcessor
 from app.retriever.service import RetrievalService, RetrievalServiceType
-from app.papers.repository import PaperRepository, LoadOptions
-from app.chunks.repository import ChunkRepository
-from app.chunks.schemas import ChunkRetrieved
+from app.domain.papers.repository import PaperRepository, LoadOptions
+from app.domain.chunks.repository import ChunkRepository
+from app.domain.chunks.schemas import ChunkRetrieved
 from app.core.singletons import get_ranking_service
 from app.models.papers import DBPaper
 from app.processor.schemas import RankedPaper
@@ -29,9 +29,7 @@ from app.rag_pipeline.schemas import (
 )
 from app.extensions.logger import create_logger
 
-from app.rag_pipeline.utils import deduplicate_papers
-from app.processor.services import transformer
-from app.trust import compute_scores
+from app.rag_pipeline.utils import deduplicate_papers, deduplicate_papers_with_rrf
 
 if TYPE_CHECKING:
     from app.processor.paper_processor import PaperProcessor
@@ -104,6 +102,7 @@ class Pipeline:
         relevance_threshold: float = 0.3,
         similarity_top_k: Optional[int] = 20,
         auto_optimize: bool = True,
+        conversation_id: Optional[str] = None,
     ):
         """
         Paper RAG workflow: Retrieve papers, filter by embedding similarity, process content.
@@ -121,18 +120,40 @@ class Pipeline:
             auto_optimize: Enable automatic pipeline optimization based on query intent (default: True)
         """
         ctx = RAGPipelineContext(query)
-        
-        ctx = await self._break_down_query(ctx, max_subtopics)
+
+        # Load conversation history if conversation_id provided
+        conversation_history = None
+        if conversation_id:
+            try:
+                from app.domain.conversations.context_manager import ConversationContextManager
+
+                context_mgr = ConversationContextManager()
+                conversation_history, _ = await context_mgr.get_conversation_context(
+                    conversation_id=conversation_id,
+                    db_session=self.db_session,
+                    include_current_query=False,
+                )
+                logger.info(
+                    f"Loaded {len(conversation_history)} messages for query decomposition context"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load conversation history for decomposition: {e}"
+                )
+
+        ctx = await self._break_down_query(ctx, max_subtopics, conversation_history)
         breakdown_response = ctx.breakdown_response
         if auto_optimize and breakdown_response and breakdown_response.intent:
-            logger.info(f"Query intent: {breakdown_response.intent.value} (confidence: {breakdown_response.intent_confidence or 'N/A'})")
-            
+            logger.info(
+                f"Query intent: {breakdown_response.intent.value} (confidence: {breakdown_response.intent_confidence or 'N/A'})"
+            )
+
             if breakdown_response.filters:
                 filters = {**(filters or {}), **breakdown_response.filters}
-            
+
             if breakdown_response.skip_ranking:
                 enable_paper_ranking = False
-        
+
         yield RAGPipelineEvent(
             type=RAGEventType.SEARCHING,
             data={"queries": ctx.search_queries, "original": query},
@@ -145,24 +166,34 @@ class Pipeline:
         )
 
         should_filter = True
-        if auto_optimize and breakdown_response and breakdown_response.skip_title_abstract_filter:
+        if (
+            auto_optimize
+            and breakdown_response
+            and breakdown_response.skip_title_abstract_filter
+        ):
             logger.info("Skipping title/abstract filter based on query intent")
             should_filter = False
-        
+
         if should_filter:
             yield RAGPipelineEvent(
                 type=RAGEventType.PROCESSING,
-                data={"message": "Generating embeddings and filtering papers by relevance", "total_papers": len(ctx.papers)},
+                data={
+                    "message": "Generating embeddings and filtering papers by relevance",
+                    "total_papers": len(ctx.papers),
+                },
             )
-            
-            ctx = await self._embed_and_filter_papers(ctx, query, similarity_top_k, relevance_threshold)
-            
+
+            ctx = await self._embed_and_filter_papers(
+                ctx, query, similarity_top_k, relevance_threshold
+            )
+
             if not ctx.papers:
                 logger.warning("No papers passed similarity filtering")
-                yield RAGPipelineEvent(type=RAGEventType.RESULT, data=RAGResult(papers=[], chunks=[]))
+                yield RAGPipelineEvent(
+                    type=RAGEventType.RESULT, data=RAGResult(papers=[], chunks=[])
+                )
                 return
 
-        
         async for event in self._process_papers(ctx):
             if isinstance(event, RAGPipelineEvent):
                 yield event
@@ -171,25 +202,32 @@ class Pipeline:
 
         # Check if any papers were successfully processed
         if not ctx.processed_paper_ids:
-            logger.warning("No papers were successfully processed (all failed PDF/content retrieval)")
+            logger.warning(
+                "No papers were successfully processed (all failed PDF/content retrieval)"
+            )
             if not ctx.papers:
                 yield RAGPipelineEvent(
-                    type=RAGEventType.RESULT,
-                    data=RAGResult(papers=[], chunks=[])
+                    type=RAGEventType.RESULT, data=RAGResult(papers=[], chunks=[])
                 )
                 return
             else:
-                logger.info(f"Continuing with {len(ctx.papers)} papers using abstracts only (no chunks available)")
+                logger.info(
+                    f"Continuing with {len(ctx.papers)} papers using abstracts only (no chunks available)"
+                )
 
         if ctx.processed_paper_ids:
-            logger.info(f"Successfully processed {len(ctx.processed_paper_ids)} papers with full content, {len(ctx.papers) - len(ctx.processed_paper_ids)} papers with abstracts only")
+            logger.info(
+                f"Successfully processed {len(ctx.processed_paper_ids)} papers with full content, {len(ctx.papers) - len(ctx.processed_paper_ids)} papers with abstracts only"
+            )
             self._write_log(ctx)
-        
+
         # Only retrieve chunks if we have processed papers
         if ctx.processed_paper_ids:
             try:
                 ctx = await self._retrieve_chunks(ctx, top_chunks)
-                logger.info(f"Retrieved {len(ctx.chunks)} chunks from {len(ctx.processed_paper_ids)} processed papers")
+                logger.info(
+                    f"Retrieved {len(ctx.chunks)} chunks from {len(ctx.processed_paper_ids)} processed papers"
+                )
             except Exception as e:
                 logger.error(f"Error retrieving chunks: {e}", exc_info=True)
                 ctx.chunks = []
@@ -213,19 +251,20 @@ class Pipeline:
             try:
                 enriched_papers, total = await self.repository.get_papers(
                     paper_ids=[p.paper_id for p in ctx.papers],
-                    load_options=LoadOptions(authors=True, journal=True, institutions=True),
+                    load_options=LoadOptions(
+                        authors=True, journal=True, institutions=True
+                    ),
                 )
 
                 logger.info(
                     f"Loaded {len(enriched_papers)} enriched papers from DB for ranking"
                 )
-                await self._compute_trust_scores_lazy(enriched_papers)
+                weights = {"authority": 0.4, "relevance": 0.6}
                 ranked_papers = self.ranking_service.rank_papers(
                     query=query,
                     papers=enriched_papers,
                     chunks=ctx.chunks,
-                    enable_diversity=True,
-                    relevance_threshold=relevance_threshold,
+                    weights=weights,
                 )
                 logger.info(f"Ranked to {len(ranked_papers)} papers")
                 ctx.result_papers = ranked_papers
@@ -236,13 +275,17 @@ class Pipeline:
         else:
             try:
                 if should_filter:
-                    logger.info(f"Skipping paper ranking, loading {len(ctx.filtered_papers)} filtered papers with default scores")
+                    logger.info(
+                        f"Skipping paper ranking, loading {len(ctx.filtered_papers)} filtered papers with default scores"
+                    )
                     ctx.papers = ctx.filtered_papers
                 enriched_papers, total = await self.repository.get_papers(
                     paper_ids=[p.paper_id for p in ctx.papers],
-                    load_options=LoadOptions(authors=True, journal=True, institutions=True),
+                    load_options=LoadOptions(
+                        authors=True, journal=True, institutions=True
+                    ),
                 )
-                
+
                 # Create RankedPaper objects with default/neutral scores
                 ctx.result_papers = [
                     RankedPaper(
@@ -256,24 +299,31 @@ class Pipeline:
                             "author_reputation": 0.0,
                             "recency": 0.0,
                             "institution_trust": 0.0,
-                        }
+                        },
                     )
                     for paper in enriched_papers
                 ]
-                logger.info(f"Created {len(ctx.result_papers)} papers with default scores")
+                logger.info(
+                    f"Created {len(ctx.result_papers)} papers with default scores"
+                )
             except Exception as e:
                 logger.error(f"Error loading papers for result: {e}", exc_info=True)
                 ctx.result_papers = []
 
         # Final validation before returning results
         if not ctx.result_papers:
-            logger.warning("No papers available for final result (all processing/ranking failed)")
-        
+            logger.warning(
+                "No papers available for final result (all processing/ranking failed)"
+            )
+
         if not ctx.chunks:
-            logger.warning(f"No chunks available (processed {len(ctx.processed_paper_ids)} papers but chunks may be empty)")
+            logger.warning(
+                f"No chunks available (processed {len(ctx.processed_paper_ids)} papers but chunks may be empty)"
+            )
 
         yield RAGPipelineEvent(
-            type=RAGEventType.RESULT, data=RAGResult(papers=ctx.result_papers, chunks=ctx.chunks)
+            type=RAGEventType.RESULT,
+            data=RAGResult(papers=ctx.result_papers, chunks=ctx.chunks),
         )
 
     async def run(self, *args, **kwargs):
@@ -328,14 +378,14 @@ class Pipeline:
 
         logger.info(f"Processed {processed_count}/{len(papers)} papers successfully")
 
-        from app.authors.service import AuthorService
+        from app.domain.authors import AuthorService
 
         author_service = AuthorService(self.db_session)
 
         logger.info(f"Computing career metrics for author {author_id}")
         await author_service.compute_career_metrics(author_id)
 
-        from app.authors.repository import AuthorRepository
+        from app.domain.authors import AuthorRepository
 
         author_repository = AuthorRepository(self.db_session)
         i10_index = (
@@ -343,24 +393,28 @@ class Pipeline:
             if author and author.summary_stats
             else None
         )
-        
+
         await author_repository.update_author(
             author_id, {"i10_index": i10_index, "last_paper_indexed_at": datetime.now()}
         )
 
         try:
-            import asyncio
-            asyncio.create_task(author_repository.compute_author_relationships(author_id))
-            logger.info(f"Queued author relationships computation for {author_id}")
+            # Compute relationships synchronously since we're already in a background worker
+            # Fire-and-forget with asyncio.create_task() causes session conflicts
+            await author_repository.compute_author_relationships(author_id)
+            logger.info(f"Computed author relationships for {author_id}")
         except Exception as e:
-            logger.warning(f"Failed to queue author relationships computation: {e}")
+            logger.warning(f"Failed to compute author relationships: {e}", exc_info=True)
 
         logger.info(f"Author enrichment workflow completed for {author_id}")
 
         return PipelineResult(papers=papers, author=author)
 
     async def _break_down_query(
-        self, ctx: RAGPipelineContext, max_subtopics: int = 3
+        self,
+        ctx: RAGPipelineContext,
+        max_subtopics: int = 3,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
     ) -> RAGPipelineContext:
         """
         Use LLM to break down user query into subtopics/search queries.
@@ -369,12 +423,15 @@ class Pipeline:
         Args:
             ctx: Pipeline context
             max_subtopics: Max subtopics to generate
+            conversation_history: Optional conversation history for context
 
         Returns:
             Updated context with search queries and breakdown response
         """
         breakdown = await self.llm.decompose_user_query(
-            user_question=ctx.query, max_subtopics=max_subtopics
+            user_question=ctx.query,
+            max_subtopics=max_subtopics,
+            conversation_history=conversation_history,
         )
         ctx.search_queries = breakdown.search_queries[:max_subtopics]
         ctx.breakdown_response = breakdown  # Store full response for intent access
@@ -390,29 +447,33 @@ class Pipeline:
         filters: Optional[Dict[str, Any]] = None,
     ) -> RAGPipelineContext:
         """
-        Retrieve papers for given search queries.
+        Retrieve papers for given search queries using Reciprocal Rank Fusion (RRF).
+        
+        Uses RRF to combine rankings from multiple search queries, which gives higher
+        scores to papers that appear in multiple result sets and/or rank highly.
 
         Args:
             ctx: RAGPipelineContext containing search queries
             per_subtopic_limit: Max papers per subtopic
             filters: Optional filters
         Returns:
-            Updated RAGPipelineContext with retrieved papers
+            Updated RAGPipelineContext with retrieved papers ranked by RRF
         """
-        all_papers = []
+        paper_rankings = []
 
-        for idx, search_query in enumerate(ctx.search_queries, 1):  
+        for idx, search_query in enumerate(ctx.search_queries, 1):
             papers, metadata = await self.retriever.hybrid_search(
                 query=search_query,
                 semantic_limit=per_subtopic_limit,
                 filters=filters,
             )
-            all_papers.extend(papers)
-            logger.info(metadata)
+            paper_rankings.append(papers)
+            logger.info(f"Query {idx}: {metadata}")
             await asyncio.sleep(1)
 
-        papers = deduplicate_papers(all_papers)
-        logger.info(f"Total unique papers: {len(papers)}")
+        # Use RRF to deduplicate and rank papers from multiple queries
+        papers = deduplicate_papers_with_rrf(paper_rankings)
+        logger.info(f"Total unique papers after RRF fusion: {len(papers)}")
 
         ctx.papers = papers  # type: ignore
         return ctx
@@ -432,31 +493,37 @@ class Pipeline:
         """
         MAX_SUCCESSFUL_PAPERS = 5
         BATCH_SIZE = 3  # Process 3 papers at a time for efficiency
-        
+
         successful_paper_ids = []
         attempted_count = 0
         batch_start_idx = 0
-        
-        logger.info(f"Starting sequential processing - target: {MAX_SUCCESSFUL_PAPERS} successful papers")
-        
+
+        logger.info(
+            f"Starting sequential processing - target: {MAX_SUCCESSFUL_PAPERS} successful papers"
+        )
+
         # Process papers in batches until we reach target or run out of papers
-        while len(successful_paper_ids) < MAX_SUCCESSFUL_PAPERS and batch_start_idx < len(ctx.papers):
+        while len(
+            successful_paper_ids
+        ) < MAX_SUCCESSFUL_PAPERS and batch_start_idx < len(ctx.papers):
             batch_end_idx = min(batch_start_idx + BATCH_SIZE, len(ctx.papers))
             batch_papers = ctx.papers[batch_start_idx:batch_end_idx]
-            
-            logger.info(f"Processing batch {batch_start_idx//BATCH_SIZE + 1}: papers {batch_start_idx+1}-{batch_end_idx} (need {MAX_SUCCESSFUL_PAPERS - len(successful_paper_ids)} more successes)")
-            
+
+            logger.info(
+                f"Processing batch {batch_start_idx//BATCH_SIZE + 1}: papers {batch_start_idx+1}-{batch_end_idx} (need {MAX_SUCCESSFUL_PAPERS - len(successful_paper_ids)} more successes)"
+            )
+
             # Process this batch concurrently
             processed_results = await self.processor.process_papers_concurrent(
                 batch_papers, ctx.filtered_papers, max_workers=2
             )
-            
+
             # Check results in order and collect successful papers
             for paper in batch_papers:
                 paper_id_str = str(paper.paper_id)
                 success = processed_results.get(paper_id_str, False)
                 attempted_count += 1
-                
+
                 yield RAGPipelineEvent(
                     type="processing",
                     data={
@@ -468,25 +535,29 @@ class Pipeline:
                         "message": f"Processed paper {attempted_count}/{len(ctx.papers)} - {len(successful_paper_ids)}/{MAX_SUCCESSFUL_PAPERS} successful",
                     },
                 )
-                
+
                 # Add to successful list if processed and we haven't reached limit
                 if success and len(successful_paper_ids) < MAX_SUCCESSFUL_PAPERS:
                     successful_paper_ids.append(paper_id_str)
-                    logger.info(f"Paper {paper_id_str} successfully processed ({len(successful_paper_ids)}/{MAX_SUCCESSFUL_PAPERS})")
-                
+                    logger.info(
+                        f"Paper {paper_id_str} successfully processed ({len(successful_paper_ids)}/{MAX_SUCCESSFUL_PAPERS})"
+                    )
+
                 # Stop if we've reached our target
                 if len(successful_paper_ids) >= MAX_SUCCESSFUL_PAPERS:
-                    logger.info(f"Reached target of {MAX_SUCCESSFUL_PAPERS} successful papers, stopping processing")
+                    logger.info(
+                        f"Reached target of {MAX_SUCCESSFUL_PAPERS} successful papers, stopping processing"
+                    )
                     break
-            
+
             batch_start_idx = batch_end_idx
-        
+
         logger.info(
             f"Processing complete: {len(successful_paper_ids)} papers with full content, "
             f"{len(ctx.papers) - len(successful_paper_ids)} papers with abstracts only "
             f"(attempted {attempted_count}/{len(ctx.papers)} papers)"
         )
-        
+
         ctx.processed_paper_ids = successful_paper_ids
         yield ctx
 
@@ -511,7 +582,7 @@ class Pipeline:
 
         all_chunks = []
         queries_for_chunks = [ctx.query] + ctx.search_queries
-        
+
         for chunk_query in queries_for_chunks:
             try:
                 query_chunks = await self.retriever.get_relevant_chunks(
@@ -522,14 +593,18 @@ class Pipeline:
                 )
                 all_chunks.extend(query_chunks)
             except Exception as e:
-                logger.error(f"Error retrieving chunks for query '{chunk_query[:50]}...': {e}")
+                logger.error(
+                    f"Error retrieving chunks for query '{chunk_query[:50]}...': {e}"
+                )
                 continue
 
         ctx.chunks = self._dedup_chunks(all_chunks)
-        
+
         if not ctx.chunks:
-            logger.warning(f"No chunks retrieved from {len(ctx.processed_paper_ids)} processed papers")
-        
+            logger.warning(
+                f"No chunks retrieved from {len(ctx.processed_paper_ids)} processed papers"
+            )
+
         return ctx
 
     async def _rank_papers(self, ctx: RAGPipelineContext) -> RAGPipelineContext:
@@ -558,20 +633,18 @@ class Pipeline:
         """
         if not ctx.papers:
             return ctx
-        
+
         logger.info(f"Generating embeddings for {len(ctx.papers)} papers")
         ctx.papers = await self.processor.generate_paper_embeddings(ctx.papers)
-        
+
         paper_embeddings = {
-            str(p.paper_id): p.embedding
-            for p in ctx.papers
-            if p.embedding is not None
+            str(p.paper_id): p.embedding for p in ctx.papers if p.embedding is not None
         }
-        
+
         if paper_embeddings:
             await self.repository.bulk_update_paper_embeddings(paper_embeddings)
             logger.info(f"Cached {len(paper_embeddings)} embeddings to database")
-        
+
         logger.info(f"Filtering papers by similarity to: {query}")
         filtered_papers = await self.processor.filter_papers_by_similarity(
             papers=ctx.papers,
@@ -580,90 +653,14 @@ class Pipeline:
             min_score=min_score,
             prefer_open_access=True,
         )
-        
+
         logger.info(
             f"Filtered from {len(ctx.papers)} to {len(filtered_papers)} papers "
             f"based on semantic similarity"
         )
-        
+
         ctx.filtered_papers = filtered_papers
         return ctx
-
-    async def _compute_trust_scores_lazy(self, papers: List[DBPaper]) -> None:
-        """
-        Compute trust scores for papers missing them using lazy evaluation.
-        Computes from already-loaded relationships and persists to database.
-
-        Args:
-            papers: List of DBPaper objects with author/institution relationships loaded
-        """
-        papers_without_trust = [
-            p
-            for p in papers
-            if p.author_trust_score is None or p.institutional_trust_score is None
-        ]
-
-        if not papers_without_trust:
-            logger.debug("All papers have trust scores, skipping lazy computation")
-            return
-
-        logger.info(
-            f"{len(papers_without_trust)} papers missing trust scores - computing with lazy scoring"
-        )
-
-        for paper in papers_without_trust:
-            author_papers = getattr(paper, "paper_authors", [])
-
-            if author_papers:
-                author_papers_data = [
-                    {
-                        "author_reputation_score": (
-                            ap.author.reputation_score if ap.author else None
-                        ),
-                        "institution_reputation_score": (
-                            ap.institution.reputation_score if ap.institution else None
-                        ),
-                        "institution_id": ap.institution_id,
-                        "country_code": (
-                            ap.institution.country_code if ap.institution else None
-                        ),
-                    }
-                    for ap in author_papers
-                ]
-
-                scores = compute_scores.compute_paper_trust_scores(author_papers_data)
-
-                # Update paper fields in-memory
-                paper.author_trust_score = scores["author_trust_score"]
-                paper.institutional_trust_score = scores["institutional_trust_score"]
-                paper.network_diversity_score = scores["network_diversity_score"]
-                paper.institutions_distinct_count = scores[
-                    "institutions_distinct_count"
-                ]
-                paper.countries_distinct_count = scores["countries_distinct_count"]
-
-                await self.repository.update_paper(
-                    paper_id=str(paper.paper_id),
-                    update_data={
-                        "author_trust_score": scores["author_trust_score"],
-                        "institutional_trust_score": scores[
-                            "institutional_trust_score"
-                        ],
-                        "network_diversity_score": scores["network_diversity_score"],
-                        "institutions_distinct_count": scores[
-                            "institutions_distinct_count"
-                        ],
-                        "countries_distinct_count": scores["countries_distinct_count"],
-                    },
-                )
-            else:
-                logger.warning(
-                    f"Paper {paper.paper_id} has no author relationships loaded - skipping lazy scoring"
-                )
-
-        logger.info(
-            f"Computed and persisted trust scores for {len(papers_without_trust)} papers"
-        )
 
     def _write_log(self, ctx: RAGPipelineContext):
         """Writing processed datas for debug

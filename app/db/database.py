@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from app.core.config import settings
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
@@ -15,6 +17,14 @@ async def get_db_session():
         yield db
     finally:
         await db.close()
+
+@asynccontextmanager
+async def db_session_context():
+    session = async_session()
+    try:
+        yield session
+    finally:
+        await session.close()
 
 async def init_db():
     """Verify database connectivity and ensure required extensions exist"""

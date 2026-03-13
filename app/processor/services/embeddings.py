@@ -48,12 +48,19 @@ class EmbeddingService:
         
         self.__class__._initialized = True
     
-    async def create_embedding(self, text: str) -> List[float]:
+    async def create_embedding(self, text: str, task: str = "search_document") -> List[float]:
         """
-        Create embedding for a single text
+        Create embedding for a single text with task-aware prefix.
+        
+        For nomic-embed-text, prefixes improve retrieval quality:
+        - 'search_query:' for user queries (asymmetric search)
+        - 'search_document:' for document chunks (default)
+        - 'clustering:' for clustering tasks
+        - 'classification:' for classification tasks
         
         Args:
             text: Text to embed
+            task: Task type ('search_query', 'search_document', 'clustering', 'classification')
             
         Returns:
             Embedding vector
@@ -62,20 +69,26 @@ class EmbeddingService:
             ServiceUnavailableException: If embedding service fails
         """
         try:
+            # Add task prefix for nomic-embed-text (improves retrieval quality)
+            if self.provider == "ollama" and "nomic" in self.model.lower():
+                prefixed_text = f"{task}: {text}"
+            else:
+                prefixed_text = text
+            
             if self.provider == "ollama" and self.ollama_client:
                 # Ollama embeddings are synchronous, run in executor
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
                     None,
-                    lambda: self.ollama_client.embeddings(model=self.model, prompt=text) # type: ignore
+                    lambda: self.ollama_client.embeddings(model=self.model, prompt=prefixed_text) # type: ignore
                 )
                 embedding = response['embedding']
                 return embedding
             elif self.openai_client:
-                # OpenAI async
+                # OpenAI async (no prefix needed)
                 response = await self.openai_client.embeddings.create(
                     model=self.model,
-                    input=text
+                    input=prefixed_text
                 )
                 embedding = response.data[0].embedding
                 return embedding
@@ -94,14 +107,16 @@ class EmbeddingService:
     async def create_embeddings_batch(
         self,
         texts: List[str],
-        batch_size: int = 5  # Reduced from 10 for better memory management
+        batch_size: int = 5,  # Reduced from 10 for better memory management
+        task: str = "search_document"  # Task type for prefix
     ) -> List[List[float]]:
         """
-        Create embeddings for multiple texts in batches
+        Create embeddings for multiple texts in batches with task-aware prefix.
         
         Args:
             texts: List of texts to embed
             batch_size: Number of texts per batch (keep small to avoid OOM)
+            task: Task type ('search_query', 'search_document', 'clustering', 'classification')
             
         Returns:
             List of embedding vectors
@@ -109,13 +124,19 @@ class EmbeddingService:
         Raises:
             ServiceUnavailableException: If embedding service fails
         """
+        # Add task prefix for nomic-embed-text
+        if self.provider == "ollama" and "nomic" in self.model.lower():
+            prefixed_texts = [f"{task}: {text}" for text in texts]
+        else:
+            prefixed_texts = texts
+        
         if self.provider == "ollama":
             # Ollama supports batch embeddings via embed endpoint
             # Use smaller batches to avoid memory allocation errors
             embeddings = []
             
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i + batch_size]
+            for i in range(0, len(prefixed_texts), batch_size):
+                batch = prefixed_texts[i:i + batch_size]
                 
                 try:
                     # Use embed endpoint with multiple inputs
@@ -146,8 +167,8 @@ class EmbeddingService:
         
         embeddings = []
         
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
+        for i in range(0, len(prefixed_texts), batch_size):
+            batch = prefixed_texts[i:i + batch_size]
             
             try:
                 response = await self.openai_client.embeddings.create(

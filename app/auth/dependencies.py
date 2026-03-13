@@ -1,7 +1,8 @@
 """
 Authentication dependencies for FastAPI route protection
 """
-from fastapi import Depends
+from typing import Optional
+from fastapi import Depends, Cookie
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.service import decode_access_token, get_user_by_id
@@ -12,19 +13,28 @@ from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
 
-# HTTP Bearer token scheme
-security = HTTPBearer()
+# HTTP Bearer token scheme (for backward compatibility)
+security = HTTPBearer(auto_error=False)
+
+# Cookie name for access token
+ACCESS_TOKEN_COOKIE_NAME = "access_token"
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    access_token_cookie: Optional[str] = Cookie(None, alias=ACCESS_TOKEN_COOKIE_NAME),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: AsyncSession = Depends(get_db_session)
 ) -> DBUser:
     """
     Dependency to get the current authenticated user from JWT token
     
+    Priority order:
+    1. HTTP-only cookie (preferred, most secure)
+    2. Authorization header (backward compatibility)
+    
     Args:
-        credentials: HTTP Authorization header with Bearer token
+        access_token_cookie: Access token from HTTP-only cookie
+        credentials: HTTP Authorization header with Bearer token (fallback)
         db: Database session
     
     Returns:
@@ -34,7 +44,18 @@ async def get_current_user(
         UnauthorizedException: If token is invalid or user not found
         ForbiddenException: If user is inactive
     """
-    token = credentials.credentials
+    # Get token from cookie (preferred) or Authorization header (fallback)
+    token = access_token_cookie
+    if not token and credentials:
+        token = credentials.credentials
+    
+    logger.debug(f"Access token cookie: {access_token_cookie[:20] if access_token_cookie else 'None'}...")
+    logger.debug(f"Authorization header: {credentials.credentials[:20] if credentials else 'None'}...")
+    logger.debug(f"Using token from: {'cookie' if access_token_cookie else 'header' if credentials else 'none'}")
+    
+    if not token:
+        raise UnauthorizedException("No authentication token provided")
+    
     logger.debug(f"Validating token: {token[:20]}...")
     token_data = decode_access_token(token)
     logger.debug(f"Decoded token data for user_id: {token_data.user_id if token_data else None}")

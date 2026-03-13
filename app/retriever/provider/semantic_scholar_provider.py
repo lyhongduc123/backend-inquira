@@ -4,13 +4,19 @@ Semantic Scholar retrieval provider.
 Implements BaseRetrievalProvider for Semantic Scholar API.
 """
 
+from urllib.parse import urlencode
+
 import httpx
 from typing import List, Dict, Any, Optional
 from app.core.config import settings
 from app.extensions.logger import create_logger
 from app.retriever.schemas import NormalizedPaperResult, AuthorSchema
 from .base import BaseRetrievalProvider, RetrievalConfig
-from ..schemas import S2AuthorPapersResponse
+from ..schemas import (
+    S2AuthorPapersResponse,
+    S2PaperCitationsResponse,
+    S2PaperReferencesResponse,
+)
 
 logger = create_logger(__name__)
 
@@ -76,6 +82,12 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "openAccessPdf",
             "citationStyles",
             "externalIds",
+            "tldr",  # NEW: TL;DR summary
+            "fieldsOfStudy",  # NEW: Basic fields of study
+            "s2FieldsOfStudy",  # NEW: Enriched fields with source
+            "references",  # NEW: References list
+            "references.paperId",  # NEW: Reference paper IDs
+            "references.title",  # NEW: Reference titles
         ]
 
         params = {
@@ -108,6 +120,84 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
                 response = await client.get(
                     f"{self.api_url}/paper/search", params=params, headers=headers
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                results = data.get("data", [])
+                return results
+
+        except httpx.HTTPError as e:
+            logger.error(f"[{self.name}] API error: {e}")
+            raise e
+        except Exception as e:
+            logger.error(f"[{self.name}] Search error: {e}")
+            raise e
+
+    async def get_bulk_paper(
+        self,
+        query: str,
+        token: Optional[str] = None,
+        fields_of_study: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get bulk paper details for a search query.
+
+        Args:
+            query: Search query
+            token: Continuation token for pagination
+            fields_of_study: Optional list of fields of study to filter
+
+        Returns:
+            List of paper details dictionaries
+        """
+
+        fields = [
+            "paperId",
+            "title",
+            "abstract",
+            "year",
+            "authors",
+            "authors.name",
+            "authors.url",
+            "venue",
+            "publicationDate",
+            "citationCount",
+            "influentialCitationCount",
+            "referenceCount",
+            "url",
+            "isOpenAccess",
+            "openAccessPdf",
+            "citationStyles",
+            "externalIds",
+            "fieldsOfStudy",
+            "s2FieldsOfStudy",
+        ]
+
+        params = {
+            "query": query,
+            "fields": ",".join(fields),
+            "sort": "citationCount:desc",
+        }
+
+        if token:
+            params["token"] = token
+
+        if fields_of_study:
+            params["fieldsOfStudy"] = ",".join(fields_of_study)
+
+        query_str = urlencode(params) + "&openAccessPdf"
+
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                response = await client.get(
+                    f"{self.api_url}/paper/search/bulk",
+                    params=query_str,
+                    headers=headers,
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -173,6 +263,76 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             logger.error(f"[{self.name}] Error fetching paper {paper_id}: {e}")
             return None
 
+    async def get_multiple_papers_details(
+        self, paper_ids: List[str]
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get details for multiple papers by their IDs.
+
+        Args:
+            paper_ids: List of Semantic Scholar paper IDs
+        Returns:
+            List of paper details dictionaries
+        """
+        """
+        Get detailed paper information by ID.
+
+        Args:
+            paper_id: Semantic Scholar paper ID
+
+        Returns:
+            Paper details dictionary or None
+        """
+        fields = [
+            "paperId",
+            "title",
+            "abstract",
+            "year",
+            "authors",
+            "authors.name",
+            "authors.citationCount",
+            "authors.hIndex",
+            "authors.paperCount",
+            "authors.url",
+            "venue",
+            "publicationDate",
+            "citationCount",
+            "url",
+            "openAccessPdf",
+            "isOpenAccess",
+            "externalIds",
+            "references",
+            "citations",
+            "influentialCitationCount",
+            "tldr",
+            "fieldsOfStudy",
+            "s2FieldsOfStudy",
+            "citationStyles",
+        ]
+
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                response = await client.post(
+                    f"{self.api_url}/paper/batch",
+                    params={"fields": ",".join(fields)},
+                    json={"ids": paper_ids},
+                    headers=headers,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"[{self.name}] Error fetching batch papers: {e}")
+            try:
+                logger.error(f"Response content: {e.response.json()}")
+            except Exception:
+                logger.error(f"Response content: {e.response.text}")
+            return None
+
     async def get_snippet(self, query: str) -> List[Dict[str, Any]]:
         """
         Get a brief snippet for the query from Semantic Scholar.
@@ -217,7 +377,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
         offset: int = 0,
         limit: int = 100,
         fields: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> S2PaperCitationsResponse:
         """
         Get papers that cite this paper.
 
@@ -251,11 +411,16 @@ class SemanticScholarProvider(BaseRetrievalProvider):
                     headers=headers,
                 )
                 response.raise_for_status()
-                return response.json()
+                json_response = response.json()
+                return S2PaperCitationsResponse(
+                    offset=offset,
+                    next=json_response.get("next", 0),
+                    data=json_response.get("data", []),
+                )
 
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] Error fetching citations for {paper_id}: {e}")
-            return {"offset": offset, "data": []}
+            return S2PaperCitationsResponse(offset=offset, next=0, data=[])
 
     async def get_references(
         self,
@@ -263,7 +428,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
         offset: int = 0,
         limit: int = 100,
         fields: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> S2PaperReferencesResponse:
         """
         Get papers referenced by this paper.
 
@@ -297,11 +462,58 @@ class SemanticScholarProvider(BaseRetrievalProvider):
                     headers=headers,
                 )
                 response.raise_for_status()
-                return response.json()
+                json_response = response.json()
+                return S2PaperReferencesResponse(
+                    offset=offset,
+                    next=json_response.get("next", 0),
+                    data=json_response.get("data", []),
+                )
 
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] Error fetching references for {paper_id}: {e}")
-            return {"offset": offset, "data": []}
+            return S2PaperReferencesResponse(offset=offset, next=0, data=[])
+        
+    async def get_multiple_authors(self, author_ids: list[str]) -> Optional[Dict[str, Any]]:
+        """
+        Get details for multiple authors by their IDs.
+
+        Args:
+            author_ids: List of Semantic Scholar author IDs
+        Returns:
+            Dictionary mapping author IDs to their details
+        """
+        fields = [
+            "authorId",
+            "externalIds",
+            "name",
+            "citationCount",
+            "hIndex",
+            "paperCount",
+            "url",
+        ]
+
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+            
+        try:
+            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                response = await client.post(
+                    f"{self.api_url}/author/batch",
+                    params={"fields": ",".join(fields)},
+                    json={"ids": author_ids},
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return {author["authorId"]: author for author in data.get("data", [])}
+        except httpx.HTTPStatusError as e:
+            logger.error(f"[{self.name}] Error fetching batch authors: {e}")
+            try:
+                logger.error(f"Response content: {e.response.json()}")
+            except Exception:
+                logger.error(f"Response content: {e.response.text}")
+            return None
 
     async def get_author_papers(
         self,
@@ -333,11 +545,6 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "abstract",
             "authors",
             "authors.name",
-            "authors.citationCount",
-            "authors.hIndex",
-            "authors.paperCount",
-            "authors.url",
-            "authors.homepage",
             "year",
             "venue",
             "publicationDate",
@@ -351,7 +558,11 @@ class SemanticScholarProvider(BaseRetrievalProvider):
         ]
         params_fields = fields.split(",") if fields else default_fields
 
-        params = {"offset": offset, "limit": min(limit, 100), "fields": ",".join(params_fields)}
+        params = {
+            "offset": offset,
+            "limit": min(limit, 100),
+            "fields": ",".join(params_fields),
+        }
 
         headers = {}
         if self.api_key:
@@ -420,6 +631,25 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             for author in authors_raw
         ]
 
+        # Extract TLDR
+        tldr_data = raw_result.get("tldr")
+        tldr = None
+        if tldr_data and isinstance(tldr_data, dict):
+            text = tldr_data.get("text")
+            # Only create tldr dict if text has an actual value
+            if text:
+                tldr = {"model": tldr_data.get("model"), "text": text}
+
+        # Extract year
+        year = raw_result.get("year")
+
+        # Extract fields of study
+        fields_of_study = raw_result.get("fieldsOfStudy", [])
+        s2_fields_of_study = raw_result.get("s2FieldsOfStudy", [])
+
+        # Extract references
+        references = raw_result.get("references", [])
+
         return NormalizedPaperResult(
             paper_id=raw_result.get("paperId", ""),
             title=raw_result.get("title", ""),
@@ -441,4 +671,10 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             citation_styles=raw_result.get("citationStyles"),
             external_ids=external_ids,
             source=self.name,
+            # Semantic Scholar specific fields
+            tldr=tldr,
+            year=year,
+            fields_of_study=fields_of_study if fields_of_study else None,
+            s2_fields_of_study=s2_fields_of_study if s2_fields_of_study else None,
+            references=references if references else None,
         )

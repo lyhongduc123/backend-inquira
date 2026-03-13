@@ -17,18 +17,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # For initializing database models
 import app.models
 
-# Import routers
-from app.chat import router as chat_router
-from app.chat.test_router import router as test_router
-from app.conversations import router as conversations_router
+# Import routers from domain modules
+from app.domain.chat.router import router as chat_router
+from app.domain.chat.test_router import router as test_router
+from app.domain.conversations.router import router as conversations_router
+from app.domain.authors.router import router as authors_router
+from app.domain.papers.router import router as papers_router
+from app.domain.institutions.router import router as institutions_router
+
+# Import routers from other modules
 from app.auth import router as auth_router
-from app.papers import router as papers_router
 from app.processor.router import router as preprocessing_router
-from app.authors.router import router as authors_router
-from app.institutions.router import router as institutions_router
 from app.validation import router as validation_router
-from app.bookmarks import router as bookmarks_router
+from app.domain.bookmarks import router as bookmarks_router
 from app.user_settings import router as user_settings_router
+from app.benchmarking import benchmark_router
+from app.rag_pipeline.router import router as rag_pipeline_router
 
 # Import core components for error handling
 from app.core.exceptions import BaseApiException
@@ -38,10 +42,27 @@ from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize database tables on startup
+    await init_db()
+    
+    # Initialize background task queue
+    from app.workers.task_queue import initialize_task_queue
+    task_queue = await initialize_task_queue()
+    logger.info("Background task queue initialized")
+    
+    yield
+    
+    # Cleanup on shutdown
+    await task_queue.stop()
+    logger.info("Background task queue stopped")
+
 app = FastAPI(
     title="Exegent API",
     description="AI-powered chatbot and research assistant",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Add Request ID middleware
@@ -73,22 +94,6 @@ app.add_middleware(
     expose_headers=["X-Request-ID", "X-Timestamp"],  # Expose custom headers
 )
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Initialize database tables on startup
-    await init_db()
-    
-    # Initialize background task queue
-    from app.workers.task_queue import initialize_task_queue
-    task_queue = await initialize_task_queue()
-    logger.info("Background task queue initialized")
-    
-    yield
-    
-    # Cleanup on shutdown
-    await task_queue.stop()
-    logger.info("Background task queue stopped")
-
 # Exception handlers - HTTP-native format (no wrapper)
 @app.exception_handler(BaseApiException)
 async def api_exception_handler(request: Request, exc: BaseApiException) -> JSONResponse:
@@ -97,7 +102,6 @@ async def api_exception_handler(request: Request, exc: BaseApiException) -> JSON
     return JSONResponse(
         status_code=exc.status_code,
         content={
-            "detail": exc.detail,
             "code": exc.code.value,
             "details": exc.details,
             "timestamp": datetime.utcnow().isoformat() + "Z"
@@ -117,7 +121,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=422,
         content={
-            "detail": "Validation error",
             "code": ErrorCode.VALIDATION_ERROR.value,
             "details": {"errors": errors},
             "timestamp": datetime.utcnow().isoformat() + "Z"
@@ -148,8 +151,6 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         }
     )
 
-
-app.router.lifespan_context = lifespan
 
 # Health check routes
 @app.get("/")
@@ -218,6 +219,18 @@ app.include_router(
     prefix="/api/v1/chat",
     tags=["test"]
 )
+app.include_router(
+    benchmark_router,
+    tags=["admin", "benchmarking"]
+)
+app.include_router(
+    rag_pipeline_router,
+    prefix="/api/v1/rag",
+    tags=["rag", "debug"]
+)
+
+from app.retriever.router import router as retriever_debug_router
+app.include_router(retriever_debug_router)
 
 def start():
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

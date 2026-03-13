@@ -1,5 +1,6 @@
 from sqlalchemy import Boolean, DateTime, Integer, String, Enum, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 from app.models.base import DatabaseBase as Base
@@ -34,6 +35,14 @@ class DBConversation(Base):
         nullable=True,
         index=True,
         comment="Primary paper for single-paper detail conversations"
+    )
+    
+    # Metadata for conversation summary and other contextual info
+    conversation_metadata: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        default={},
+        comment="Metadata including conversation summary, last summarized date, etc."
     )
     
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

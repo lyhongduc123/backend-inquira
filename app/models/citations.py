@@ -33,9 +33,7 @@ class DBCitation(Base):
     
     # Citation quality signals
     is_influential: Mapped[bool] = mapped_column(Boolean, default=False)  # Semantic Scholar influential citation
-    mention_count: Mapped[int] = mapped_column(Integer, default=1)  # How many times cited in the paper
-    
-    # Temporal info
+    mention_count: Mapped[int] = mapped_column(Integer, default=1)  # How many times cited 
     citation_year: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
     years_since_publication: Mapped[int] = mapped_column(Integer, nullable=True)  # Recency
     
@@ -46,12 +44,12 @@ class DBCitation(Base):
     citing_paper: Mapped["DBPaper"] = relationship(
         "DBPaper",
         foreign_keys=[citing_paper_id],
-        back_populates="citations_made"
+        back_populates="citations"
     )
     cited_paper: Mapped["DBPaper"] = relationship(
         "DBPaper",
         foreign_keys=[cited_paper_id],
-        back_populates="citations_received"
+        back_populates="references"
     )
     
     __table_args__ = (

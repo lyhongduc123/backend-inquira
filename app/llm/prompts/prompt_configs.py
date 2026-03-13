@@ -38,14 +38,14 @@ class PromptPresets:
     
     # Factual, deterministic tasks (citation-based responses, question breakdown)
     FACTUAL = PromptConfig(
-        temperature=0.3,
-        max_tokens=4000,
-        top_p=0.9,
+        temperature=0.2,
+        max_tokens=5000,
+        top_p=0.2,
+        reasoning_effort="medium"
         # presence_penalty=0.1,
         # frequency_penalty=0.1
     )
-    
-    # Creative, exploratory tasks (related topics, brainstorming)
+  
     CREATIVE = PromptConfig(
         temperature=0.8,
         max_tokens=2000,
@@ -53,8 +53,7 @@ class PromptPresets:
         # presence_penalty=0.3,
         # frequency_penalty=0.3
     )
-    
-    # Analytical, reasoning tasks (paper analysis, comparison)
+
     ANALYTICAL = PromptConfig(
         temperature=0.4,
         max_tokens=3000,
@@ -62,21 +61,24 @@ class PromptPresets:
         reasoning_effort="medium"
     )
     
-    # Summarization tasks
     SUMMARIZATION = PromptConfig(
         temperature=0.3,
-        max_tokens=2000,
+        max_tokens=3000,
         top_p=0.9
     )
     
-    # Reading comprehension tasks
     READING = PromptConfig(
         temperature=0.4,
         max_tokens=2500,
         top_p=0.9
     )
     
-    # Default balanced configuration
+    DETERMINISTIC = PromptConfig(
+        temperature=0.1,
+        max_tokens=2000,
+        top_p=0.8
+    )
+    
     DEFAULT = PromptConfig(
         temperature=0.7,
         max_tokens=2000,
@@ -100,6 +102,7 @@ class PromptPresets:
             "analytical": cls.ANALYTICAL,
             "summarization": cls.SUMMARIZATION,
             "reading": cls.READING,
+            "deterministic": cls.DETERMINISTIC,
             "default": cls.DEFAULT
         }
         return preset_map.get(preset_name.lower(), cls.DEFAULT)

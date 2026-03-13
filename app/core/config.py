@@ -30,11 +30,6 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "ollama"
     EMBEDDING_PROVIDER: str = "ollama"
 
-    # LLM Prompt Parameters (Environment-based overrides)
-    LLM_DEFAULT_TEMPERATURE: float = 0.7
-    LLM_FACTUAL_TEMPERATURE: float = 0.3
-    LLM_CREATIVE_TEMPERATURE: float = 0.8
-    LLM_ANALYTICAL_TEMPERATURE: float = 0.4
     LLM_MAX_TOKENS: int = 4000
     LLM_TOP_P: float = 0.95
 

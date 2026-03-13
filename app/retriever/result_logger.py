@@ -11,6 +11,22 @@ from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
 
+def save_results_to_json(
+    results: List[Dict[str, Any]],
+    output_dir: str = "retrieval_logs",
+    filename_prefix: str = "retrieval_results"
+):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Generate filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{filename_prefix}_{timestamp}.json"
+    
+    filepath = output_path / filename
+    
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
 
 def save_retrieval_results(
     results: List[NormalizedPaperResult],
