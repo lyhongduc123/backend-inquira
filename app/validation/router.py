@@ -1,18 +1,12 @@
-"""
-Validation Router
-API endpoints for viewing validation statistics and benchmarking results.
+"""Validation router with inspection, history and stats endpoints."""
 
-Validation happens automatically after each chat response.
-These endpoints are for viewing and analyzing the validation results.
-"""
 from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from datetime import datetime
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db_session
-from app.models.answer_vaidations import DBAnswerValidation
 from app.validation import schemas
 from app.validation import service
 from app.extensions.logger import create_logger
@@ -22,14 +16,40 @@ logger = create_logger(__name__)
 router = APIRouter()
 
 
-@router.get("/history")
+@router.post("/validate", response_model=schemas.ValidationInspection)
+async def validate_answer(
+    request: schemas.ValidationRequest,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Run validation v2 and optionally persist it when `message_id` is provided."""
+    try:
+        validation_result = await service.validate_answer(request)
+
+        validation_id: int | None = None
+        if request.message_id is not None:
+            db_validation = await service.save_validation_result(
+                db=db,
+                request=request,
+                result=validation_result,
+            )
+            validation_id = db_validation.id
+
+        return service.build_validation_inspection(validation_result, validation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Error validating answer: %s", str(exc), exc_info=True)
+        raise HTTPException(status_code=500, detail="Validation failed") from exc
+
+
+@router.get("/history", response_model=schemas.ValidationHistoryResponse)
 async def get_validation_history(
     skip: int = 0,
     limit: int = 50,
     message_id: Optional[int] = None,
     has_hallucination: Optional[bool] = None,
     db: AsyncSession = Depends(get_db_session)
-):
+) -> schemas.ValidationHistoryResponse:
     """
     Get validation history with filtering.
     
@@ -44,76 +64,36 @@ async def get_validation_history(
             message_id=message_id,
             has_hallucination=has_hallucination
         )
-        
-        return {
-            "total": result["total"],
-            "skip": skip,
-            "limit": limit,
-            "validations": [
-                {
-                    "id": v.id,
-                    "message_id": v.message_id,
-                    "query_text": v.query_text,
-                    "has_hallucination": v.has_hallucination,
-                    "relevance_score": v.relevance_score,
-                    "citation_accuracy": v.citation_accuracy,
-                    "created_at": v.created_at,
-                    "validated_at": v.validated_at,
-                }
-                for v in result["validations"]
-            ]
-        }
+        return result
     except Exception as e:
         logger.error(f"Error fetching validation history: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/history/{validation_id}")
+@router.get("/history/{validation_id}", response_model=schemas.ValidationDetail)
 async def get_validation_detail(
     validation_id: int,
     db: AsyncSession = Depends(get_db_session)
-):
+) -> schemas.ValidationDetail:
     """
     Get detailed information about a specific validation.
     
     View full validation results including hallucination details,
     citation accuracy, and relevance scores.
     """
-    result = await db.execute(
-        select(DBAnswerValidation).where(DBAnswerValidation.id == validation_id)
-    )
-    validation = result.scalar_one_or_none()
-    
+    validation = await service.get_validation_detail(db=db, validation_id=validation_id)
+
     if not validation:
         raise HTTPException(status_code=404, detail="Validation not found")
-    
-    return {
-        "id": validation.id,
-        "message_id": validation.message_id,
-        "query_text": validation.query_text,
-        "has_hallucination": validation.has_hallucination,
-        "hallucination_count": validation.hallucination_count,
-        "hallucination_details": validation.hallucination_details,
-        "relevance_score": validation.relevance_score,
-        "factual_accuracy_score": validation.factual_accuracy_score,
-        "citation_accuracy": validation.citation_accuracy,
-        "total_citations": validation.total_citations,
-        "correct_citations": validation.correct_citations,
-        "hallucinated_citations": validation.hallucinated_citations,
-        "missing_citations": validation.missing_citations,
-        "execution_time_ms": validation.execution_time_ms,
-        "model_name": validation.model_name,
-        "status": validation.status,
-        "created_at": validation.created_at,
-        "validated_at": validation.validated_at,
-    }
+
+    return validation
 
 
-@router.get("/stats")
+@router.get("/stats", response_model=schemas.ValidationStats)
 async def get_validation_stats(
     message_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db_session)
-):
+) -> schemas.ValidationStats:
     """
     Get aggregate validation statistics for benchmarking.
     
@@ -128,7 +108,7 @@ async def get_validation_stats(
         stats = await service.get_validation_stats(db=db, message_id=message_id)
         return stats
     except Exception as e:
-        logger.error(f"Errorecord r fetching validation stats: {str(e)}", exc_info=True)
+        logger.error(f"Error fetching validation stats: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -139,6 +119,7 @@ async def delete_validation(
 ):
     """Delete a validation from history."""
     from sqlalchemy import delete as sql_delete
+    from app.models.answer_vaidations import DBAnswerValidation
     
     result = await db.execute(
         select(DBAnswerValidation).where(DBAnswerValidation.id == validation_id)

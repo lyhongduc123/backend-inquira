@@ -140,6 +140,7 @@ class ConversationService:
         paper_ids: Optional[List[str]] = None,
         paper_snapshots: Optional[List[Dict[str, Any]]] = None,
         progress_events: Optional[List[Dict[str, Any]]] = None,
+        scoped_quote_refs: Optional[List[Dict[str, Any]]] = None,
         client_message_id: Optional[str] = None,
         pipeline_type: Optional[str] = None,
         completion_time_ms: Optional[int] = None,
@@ -155,6 +156,7 @@ class ConversationService:
             paper_ids=paper_ids,
             paper_snapshots=paper_snapshots,
             progress_events=progress_events,
+            scoped_quote_refs=scoped_quote_refs,
             client_message_id=client_message_id,
             pipeline_type=pipeline_type,
             completion_time_ms=completion_time_ms,
@@ -210,6 +212,7 @@ class ConversationService:
                     "sources": None,  # Deprecated
                     "paper_snapshots": msg_resp.paper_snapshots,
                     "progress_events": msg_resp.progress_events,
+                    "scoped_quote_refs": msg_resp.scoped_quote_refs,
                     "created_at": msg_resp.created_at,
                 }
                 message_list.append(msg_dict)
@@ -251,6 +254,9 @@ class ConversationService:
                         paper_snapshots = msg.message_metadata["paper_snapshots"]
                     if "progress_events" in msg.message_metadata:
                         progress_events = msg.message_metadata["progress_events"]
+                    scoped_quote_refs = msg.message_metadata.get("scoped_quote_refs")
+                else:
+                    scoped_quote_refs = None
 
                 # Fallback to old sources format for backward compatibility
                 # Only access msg.papers if it's already loaded (avoid lazy loading in async context)
@@ -275,6 +281,7 @@ class ConversationService:
                     "sources": sources,  # Deprecated, kept for backward compatibility
                     "paper_snapshots": paper_snapshots,  # New unified format
                     "progress_events": progress_events,  # RAG pipeline progress
+                    "scoped_quote_refs": scoped_quote_refs,
                     "created_at": msg.created_at,
                 }
                 message_list.append(msg_dict)

@@ -49,7 +49,7 @@ class DBAuthor(Base):
     display_name: Mapped[str] = mapped_column(String(255), nullable=True)
 
     orcid: Mapped[str] = mapped_column(
-        String(50), nullable=True, unique=True, index=True
+        String(50), nullable=True, index=True
     )
     external_ids: Mapped[dict] = mapped_column(
         JSONB, nullable=True

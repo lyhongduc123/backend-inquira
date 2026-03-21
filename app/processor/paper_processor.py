@@ -111,7 +111,8 @@ class PaperProcessor:
 
             elif resolved.kind == "pdf_bytes":
                 doc_structure = self.extractor_service.extract_pdf_structure(
-                    resolved.content  # pyright: ignore[reportArgumentType]
+                    resolved.content,  # pyright: ignore[reportArgumentType]
+                    paper_id=paper_id_str,
                 )
                 chunks = self.chunker_service.chunk_from_docling_structure(
                     doc_structure, paper_id_str
@@ -145,12 +146,7 @@ class PaperProcessor:
             # Prepare chunk texts with section titles for better embeddings
             chunk_texts = []
             for chunk in chunks:
-                # Prepend section title if available for better semantic context
-                if chunk.section_title:
-                    chunk_text = f"Section: {chunk.section_title}\n\n{chunk.text}"
-                else:
-                    chunk_text = chunk.text
-                chunk_texts.append(chunk_text)
+                chunk_texts.append(self.chunker_service.build_contextualized_embedding_text(chunk))
             
             embeddings = await self.embedding_service.create_embeddings_batch(
                 chunk_texts, batch_size=10, task="search_document"  # Use search_document task
@@ -587,7 +583,8 @@ class PaperProcessor:
                     del structure
                 elif resolved.kind == "pdf_bytes":
                     doc_structure = self.extractor_service.extract_pdf_structure(
-                        resolved.content  # pyright: ignore[reportArgumentType]
+                        resolved.content,  # pyright: ignore[reportArgumentType]
+                        paper_id=paper_id,
                     )
                     chunks = self.chunker_service.chunk_from_docling_structure(
                         doc_structure, paper_id
@@ -604,7 +601,10 @@ class PaperProcessor:
                     return (paper_id, False)
 
                 logger.info(f"[{paper_id}] Generated {len(chunks)} chunks")
-                chunk_texts = [c.text for c in chunks]
+                chunk_texts = [
+                    self.chunker_service.build_contextualized_embedding_text(c)
+                    for c in chunks
+                ]
                 embeddings = await self.embedding_service.create_embeddings_batch(
                     chunk_texts,
                     batch_size=5,  

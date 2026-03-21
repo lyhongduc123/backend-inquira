@@ -36,9 +36,10 @@ class Message(CamelModel):
     sources: Optional[List[Dict[str, Any]]] = None  # Deprecated: use paper_snapshots
     paper_snapshots: Optional[List[Dict[str, Any]]] = None  # Paper metadata snapshots
     progress_events: Optional[List[Dict[str, Any]]] = None  # RAG pipeline progress events
+    scoped_quote_refs: Optional[List[Dict[str, Any]]] = None  # Scoped chunk quote references
     created_at: datetime
     
-    @field_serializer('paper_snapshots', 'sources', 'progress_events')
+    @field_serializer('paper_snapshots', 'sources', 'progress_events', 'scoped_quote_refs')
     def serialize_metadata(self, value: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
         """Convert nested dict keys to camelCase"""
         if value is None:

@@ -17,6 +17,16 @@ PROMPT_REGISTRY = {
         version=1,
         system_template=load_prompt("system/generate_answer.txt"),
     ),
+    "generate_no_results_guidance": PromptDefinition(
+        name="generate_no_results_guidance",
+        version=1,
+        system_template=load_prompt("system/generate_no_results_guidance.txt"),
+    ),
+    "generate_answer_scoped": PromptDefinition(
+        name="generate_answer_scoped",
+        version=1,
+        system_template=load_prompt("system/generate_answer_scoped.txt"),
+    ),
     "decompose_query": PromptDefinition(
         name="decompose_query",
         version=1,

@@ -662,6 +662,120 @@ class PaperRepository:
         papers_with_scores = result.all()
         
         return [(paper, float(score)) for paper, score in papers_with_scores]
+
+    async def bm25_search_papers_with_filters(
+        self,
+        query: str,
+        limit: int = 100,
+        author_name: Optional[str] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        venue: Optional[str] = None,
+        min_citation_count: Optional[int] = None,
+        max_citation_count: Optional[int] = None,
+    ) -> List[tuple[DBPaper, float]]:
+        """
+        BM25-style lexical search with filters.
+
+        Returns rank-ready candidates with lexical scores only.
+        """
+        from sqlalchemy import func, text, and_
+        from app.models.authors import DBAuthor, DBAuthorPaper
+
+        ts_query = func.plainto_tsquery("english", query)
+        ts_vector = func.to_tsvector(
+            "english", func.coalesce(DBPaper.title, "") + " " + func.coalesce(DBPaper.abstract, "")
+        )
+        bm25_score = func.ts_rank_cd(ts_vector, ts_query)
+
+        query_stmt = select(DBPaper, bm25_score.label("bm25_score")).where(
+            func.coalesce(bm25_score, 0) > 0
+        )
+
+        filter_conditions = []
+
+        if author_name:
+            query_stmt = query_stmt.join(
+                DBAuthorPaper, DBPaper.paper_id == DBAuthorPaper.paper_id
+            ).join(DBAuthor, DBAuthorPaper.author_id == DBAuthor.author_id)
+            filter_conditions.append(DBAuthor.name.ilike(f"%{author_name}%"))
+
+        if year_min is not None:
+            filter_conditions.append(DBPaper.year >= year_min)
+        if year_max is not None:
+            filter_conditions.append(DBPaper.year <= year_max)
+        if venue:
+            filter_conditions.append(DBPaper.venue.ilike(f"%{venue}%"))
+        if min_citation_count is not None:
+            filter_conditions.append(DBPaper.citation_count >= min_citation_count)
+        if max_citation_count is not None:
+            filter_conditions.append(DBPaper.citation_count <= max_citation_count)
+
+        if filter_conditions:
+            query_stmt = query_stmt.where(and_(*filter_conditions))
+
+        query_stmt = query_stmt.order_by(text("bm25_score DESC")).limit(limit)
+
+        if author_name:
+            query_stmt = query_stmt.distinct(DBPaper.paper_id)
+
+        result = await self.db.execute(query_stmt)
+        return [(paper, float(score)) for paper, score in result.all()]
+
+    async def semantic_search_papers_with_filters(
+        self,
+        query_embedding: List[float],
+        limit: int = 100,
+        author_name: Optional[str] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        venue: Optional[str] = None,
+        min_citation_count: Optional[int] = None,
+        max_citation_count: Optional[int] = None,
+    ) -> List[tuple[DBPaper, float]]:
+        """
+        Pure semantic (vector) search with filters.
+
+        Returns rank-ready candidates with semantic scores only.
+        """
+        from sqlalchemy import text, and_
+        from app.models.authors import DBAuthor, DBAuthorPaper
+
+        semantic_score = 1 - DBPaper.embedding.cosine_distance(query_embedding)
+
+        query_stmt = select(DBPaper, semantic_score.label("semantic_score")).where(
+            DBPaper.embedding.isnot(None)
+        )
+
+        filter_conditions = []
+
+        if author_name:
+            query_stmt = query_stmt.join(
+                DBAuthorPaper, DBPaper.paper_id == DBAuthorPaper.paper_id
+            ).join(DBAuthor, DBAuthorPaper.author_id == DBAuthor.author_id)
+            filter_conditions.append(DBAuthor.name.ilike(f"%{author_name}%"))
+
+        if year_min is not None:
+            filter_conditions.append(DBPaper.year >= year_min)
+        if year_max is not None:
+            filter_conditions.append(DBPaper.year <= year_max)
+        if venue:
+            filter_conditions.append(DBPaper.venue.ilike(f"%{venue}%"))
+        if min_citation_count is not None:
+            filter_conditions.append(DBPaper.citation_count >= min_citation_count)
+        if max_citation_count is not None:
+            filter_conditions.append(DBPaper.citation_count <= max_citation_count)
+
+        if filter_conditions:
+            query_stmt = query_stmt.where(and_(*filter_conditions))
+
+        query_stmt = query_stmt.order_by(text("semantic_score DESC")).limit(limit)
+
+        if author_name:
+            query_stmt = query_stmt.distinct(DBPaper.paper_id)
+
+        result = await self.db.execute(query_stmt)
+        return [(paper, float(score)) for paper, score in result.all()]
     
     async def update_last_accessed(self, paper_id: str):
         """Update last accessed timestamp"""

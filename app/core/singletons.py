@@ -30,8 +30,19 @@ def get_extractor_service() -> ExtractorService:
     Extracts text/structure from PDFs and XML - stateless processing.
     """
     from app.core.config import settings
-    logger.debug(f"Initializing singleton ExtractorService (USE_CUDA={settings.USE_CUDA})")
-    return ExtractorService(use_cuda=settings.USE_CUDA)
+    logger.debug(
+        "Initializing singleton ExtractorService "
+        f"(USE_CUDA={settings.USE_CUDA}, DOC_OCR_ENABLED={settings.DOC_OCR_ENABLED}, "
+        f"DOC_GENERATE_PICTURE_IMAGES={settings.DOC_GENERATE_PICTURE_IMAGES})"
+    )
+    return ExtractorService(
+        use_cuda=settings.USE_CUDA,
+        use_ocr=settings.DOC_OCR_ENABLED,
+        generate_picture_images=settings.DOC_GENERATE_PICTURE_IMAGES,
+        assets_dir=settings.DOC_ASSETS_DIR,
+        export_hierarchical_chunks=settings.DOC_EXPORT_HIERARCHICAL_CHUNKS,
+        enable_pymupdf_crops=settings.DOC_ENABLE_PYMUPDF_CROPS,
+    )
 
 
 @lru_cache(maxsize=1)

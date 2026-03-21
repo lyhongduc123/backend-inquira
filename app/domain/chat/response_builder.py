@@ -60,6 +60,7 @@ class ChatResponseBuilder:
         for chunk in results.chunks:
             content_entries.append(
                 f"SOURCE_ID: {chunk.paper_id}\n"
+                f"CHUNK_ID: {chunk.chunk_id}\n"
                 f"SECTION: {chunk.section_title or 'Main text'}\n"
                 f"CONTENT: {chunk.text}"
             )

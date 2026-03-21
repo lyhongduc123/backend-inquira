@@ -1,9 +1,20 @@
-
 from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING, List
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, Float, ARRAY, Date, ForeignKey, func, Index
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Integer,
+    String,
+    Text,
+    Float,
+    ARRAY,
+    Date,
+    ForeignKey,
+    func,
+    Index,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from pgvector.sqlalchemy import Vector
 from app.models.base import DatabaseBase as Base
@@ -18,220 +29,246 @@ if TYPE_CHECKING:
     from app.models.conferences import DBConference
 
 
-
 class DBPaper(Base):
     """
     Academic paper entity with trust scoring and citation analysis.
-    
+
     Aggregates data from multiple sources (OpenAlex, Semantic Scholar, CrossRef)
     with computed trust metrics, citation networks, and semantic embeddings.
     """
+
     __tablename__ = "papers"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     paper_id: Mapped[str] = mapped_column(
-        String(100), unique=True, nullable=False, index=True,
-        comment="Unique identifier (Semantic Scholar preferred, OpenAlex/DOI fallback)"
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+        comment="Unique identifier (Semantic Scholar preferred, OpenAlex/DOI fallback)",
     )
-    
+
     title: Mapped[str] = mapped_column(Text, nullable=False, comment="Full paper title")
-    
-    abstract: Mapped[str] = mapped_column(Text, nullable=True, comment="Paper abstract/summary")
-    embedding: Mapped[Vector] = mapped_column(
-        Vector(768), nullable=True,
-        comment="768-dim vector embedding of abstract and title"
+
+    abstract: Mapped[str] = mapped_column(
+        Text, nullable=True, comment="Paper abstract/summary"
     )
-    publication_date: Mapped[date] = mapped_column(Date, nullable=True, comment="Publication date")
-    venue: Mapped[str] = mapped_column(String, nullable=True, comment="Publication venue/conference")
+    embedding: Mapped[Vector] = mapped_column(
+        Vector(768),
+        nullable=True,
+        comment="768-dim vector embedding of abstract and title",
+    )
+    publication_date: Mapped[date] = mapped_column(
+        Date, nullable=True, comment="Publication date"
+    )
+    venue: Mapped[str] = mapped_column(
+        String, nullable=True, comment="Publication venue/conference"
+    )
     issn: Mapped[list[str]] = mapped_column(
-        ARRAY(String(8)), nullable=True, index=True,
-        comment="Primary ISSN for journal identification"
+        ARRAY(String(8)),
+        nullable=True,
+        index=True,
+        comment="Primary ISSN for journal identification",
     )
     issn_l: Mapped[str] = mapped_column(
-        String(8), nullable=True, index=True,
-        comment="Linking ISSN (OpenAlex standard)"
+        String(8), nullable=True, index=True, comment="Linking ISSN (OpenAlex standard)"
     )
-    
-    url: Mapped[str] = mapped_column(Text, nullable=True, comment="Primary URL to paper")
-    pdf_url: Mapped[str] = mapped_column(Text, nullable=True, comment="Direct PDF download URL")
+
+    url: Mapped[str] = mapped_column(
+        Text, nullable=True, comment="Primary URL to paper"
+    )
+    pdf_url: Mapped[str] = mapped_column(
+        Text, nullable=True, comment="Direct PDF download URL"
+    )
     is_open_access: Mapped[bool] = mapped_column(
-        Boolean, default=False, index=True,
-        comment="Whether paper is open access"
+        Boolean, default=False, index=True, comment="Whether paper is open access"
     )
     open_access_pdf: Mapped[dict] = mapped_column(
-        JSONB, nullable=True,
-        comment="Open access PDF metadata (URL, version, license)"
+        JSONB, nullable=True, comment="Open access PDF metadata (URL, version, license)"
     )
     citation_styles: Mapped[dict] = mapped_column(
-        JSONB, nullable=True,
+        JSONB,
+        nullable=True,
     )
 
     source: Mapped[str] = mapped_column(
-        String(50), nullable=False, index=True,
-        comment="Data source: openalex, semanticscholar"
+        String(50),
+        nullable=False,
+        index=True,
+        comment="Data source: openalex, semanticscholar",
     )
     external_ids: Mapped[dict] = mapped_column(
-        JSONB, nullable=True,
-        comment="External IDs (DOI, PubMed, ArXiv, etc.)"
-    )
-    
-    tldr: Mapped[str] = mapped_column(
-        Text, nullable=True,
-        comment="TL;DR summary from Semantic Scholar (replaces AI-generated summary)"
-    )
-    tldr_embedding: Mapped[Vector] = mapped_column(
-        Vector(768), nullable=True,
-        comment="768-dim vector embedding of TLDR (nomic-embed-text)"
+        JSONB, nullable=True, comment="External IDs (DOI, PubMed, ArXiv, etc.)"
     )
 
-    # relevance_score: Mapped[float] = mapped_column(
-    #     Float, nullable=True,
-    #     comment="Query-specific relevance score"
-    # )
+    tldr: Mapped[str] = mapped_column(
+        Text,
+        nullable=True,
+        comment="TL;DR summary from Semantic Scholar (replaces AI-generated summary)",
+    )
+    tldr_embedding: Mapped[Vector] = mapped_column(
+        Vector(768),
+        nullable=True,
+        comment="768-dim vector embedding of TLDR (nomic-embed-text)",
+    )
     citation_count: Mapped[int] = mapped_column(
-        Integer, default=0, index=True,
-        comment="Total number of citations"
+        Integer, default=0, index=True, comment="Total number of citations"
     )
     influential_citation_count: Mapped[int] = mapped_column(
-        Integer, default=0,
-        comment="Influential citations (Semantic Scholar only)"
+        Integer, default=0, comment="Influential citations (Semantic Scholar only)"
     )
     reference_count: Mapped[int] = mapped_column(
-        Integer, default=0,
-        comment="Number of references cited by this paper"
+        Integer, default=0, comment="Number of references cited by this paper"
     )
-    
+
     # Semantic Scholar specific fields
     year: Mapped[int] = mapped_column(
-        Integer, nullable=True, index=True,
-        comment="Publication year extracted by Semantic Scholar"
+        Integer,
+        nullable=True,
+        index=True,
+        comment="Publication year extracted by Semantic Scholar",
     )
     fields_of_study: Mapped[list[str]] = mapped_column(
-        ARRAY(String(100)), nullable=True,
-        comment="Research fields from Semantic Scholar classification"
+        ARRAY(String(100)),
+        nullable=True,
+        comment="Research fields from Semantic Scholar classification",
+    )
+    publication_types: Mapped[list[str]] = mapped_column(
+        ARRAY(String(100)),
+        nullable=True,
+        comment="Publication types from Semantic Scholar (e.g., JournalArticle, Review)",
     )
     s2_fields_of_study: Mapped[dict] = mapped_column(
-        JSONB, nullable=True,
-        comment="Enriched S2 fields with source attribution [{category, source}]"
+        JSONB,
+        nullable=True,
+        comment="Enriched S2 fields with source attribution [{category, source}]",
+    )
+    paper_tags: Mapped[list] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Computed zero-shot tags with confidence scores",
     )
 
     topics: Mapped[list] = mapped_column(
-        JSONB, nullable=True,
-        comment="OpenAlex research topics with relevance scores"
+        JSONB, nullable=True, comment="OpenAlex research topics with relevance scores"
     )
     keywords: Mapped[list] = mapped_column(
-        JSONB, nullable=True,
-        comment="Extracted keywords with scores"
+        JSONB, nullable=True, comment="Extracted keywords with scores"
     )
     concepts: Mapped[list] = mapped_column(
-        JSONB, nullable=True,
-        comment="OpenAlex concepts with scores and hierarchy levels"
+        JSONB,
+        nullable=True,
+        comment="OpenAlex concepts with scores and hierarchy levels",
     )
     mesh_terms: Mapped[list] = mapped_column(
-        JSONB, nullable=True,
-        comment="MeSH terms for biomedical papers"
+        JSONB, nullable=True, comment="MeSH terms for biomedical papers"
     )
-    
+
     citation_percentile: Mapped[dict] = mapped_column(
-        JSONB, nullable=True,
-        comment="Citation percentile rankings by field and year"
+        JSONB, nullable=True, comment="Citation percentile rankings by field and year"
     )
     fwci: Mapped[float] = mapped_column(
-        Float, nullable=True, index=True,
-        comment="Field-Weighted Citation Impact (OpenAlex)"
+        Float,
+        nullable=True,
+        index=True,
+        comment="Field-Weighted Citation Impact (OpenAlex)",
     )
-    
+
     author_trust_score: Mapped[float] = mapped_column(
-        Float, nullable=True, index=True,
-        comment="Average trust score of all authors"
+        Float, nullable=True, index=True, comment="Average trust score of all authors"
     )
     institutional_trust_score: Mapped[float] = mapped_column(
-        Float, nullable=True,
-        comment="Average reputation score of affiliated institutions"
+        Float,
+        nullable=True,
+        comment="Average reputation score of affiliated institutions",
     )
     network_diversity_score: Mapped[float] = mapped_column(
-        Float, nullable=True,
-        comment="Cross-institutional collaboration diversity score"
+        Float,
+        nullable=True,
+        comment="Cross-institutional collaboration diversity score",
     )
-    
+
     journal_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("journals.id"), nullable=True, index=True,
-        comment="Foreign key to journals table (SJR data)"
+        Integer,
+        ForeignKey("journals.id"),
+        nullable=True,
+        index=True,
+        comment="Foreign key to journals table (SJR data)",
     )
     conference_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("conferences.id"), nullable=True, index=True,
-        comment="Foreign key to conferences table (CORE ranking data)"
+        Integer,
+        ForeignKey("conferences.id"),
+        nullable=True,
+        index=True,
+        comment="Foreign key to conferences table (CORE ranking data)",
     )
-    
+
     is_retracted: Mapped[bool] = mapped_column(
-        Boolean, default=False, index=True,
-        comment="Whether paper has been retracted"
+        Boolean, default=False, index=True, comment="Whether paper has been retracted"
     )
     language: Mapped[str] = mapped_column(
-        String(10), nullable=True,
-        comment="ISO 639-1 language code"
+        String(10), nullable=True, comment="ISO 639-1 language code"
     )
-    
+
     corresponding_author_ids: Mapped[list] = mapped_column(
-        ARRAY(String), nullable=True,
-        comment="IDs of corresponding authors"
+        ARRAY(String), nullable=True, comment="IDs of corresponding authors"
     )
     institutions_distinct_count: Mapped[int] = mapped_column(
-        Integer, nullable=True,
-        comment="Number of unique institutions involved"
+        Integer, nullable=True, comment="Number of unique institutions involved"
     )
     countries_distinct_count: Mapped[int] = mapped_column(
-        Integer, nullable=True,
-        comment="Number of unique countries involved"
+        Integer, nullable=True, comment="Number of unique countries involved"
     )
 
     is_processed: Mapped[bool] = mapped_column(
-        Boolean, default=False, index=True,
-        comment="Whether paper has been fully processed"
+        Boolean,
+        default=False,
+        index=True,
+        comment="Whether paper has been fully processed",
     )
     processing_status: Mapped[str] = mapped_column(
-        String(50), default="pending",
-        comment="Processing status: pending, processing, completed, failed"
+        String(50),
+        default="pending",
+        comment="Processing status: pending, processing, completed, failed",
     )
     processing_error: Mapped[str] = mapped_column(
-        Text, nullable=True,
-        comment="Error message if processing failed"
+        Text, nullable=True, comment="Error message if processing failed"
     )
 
     created_at: Mapped[DateTime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(),
-        comment="Record creation timestamp"
+        DateTime(timezone=True),
+        server_default=func.now(),
+        comment="Record creation timestamp",
     )
     updated_at: Mapped[DateTime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),
-        comment="Last update timestamp"
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        comment="Last update timestamp",
     )
     last_accessed_at: Mapped[DateTime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(),
-        comment="Last access timestamp for cache management"
+        DateTime(timezone=True),
+        server_default=func.now(),
+        comment="Last access timestamp for cache management",
     )
 
     paper_authors: Mapped[list["DBAuthorPaper"]] = relationship(
-        "DBAuthorPaper",
-        back_populates="paper",
-        cascade="all, delete-orphan"
+        "DBAuthorPaper", back_populates="paper", cascade="all, delete-orphan"
     )
     references: Mapped[list["DBCitation"]] = relationship(
         "DBCitation",
         foreign_keys="[DBCitation.citing_paper_id]",
         back_populates="citing_paper",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
     citations: Mapped[list["DBCitation"]] = relationship(
         "DBCitation",
         foreign_keys="[DBCitation.cited_paper_id]",
         back_populates="cited_paper",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
     message_papers: Mapped[list] = relationship(
-        "DBMessagePaper",
-        back_populates="paper",
-        cascade="all, delete-orphan"
+        "DBMessagePaper", back_populates="paper", cascade="all, delete-orphan"
     )
     messages: Mapped[list] = relationship(
         "DBMessage",
@@ -248,88 +285,105 @@ class DBPaper(Base):
     )
     journal: Mapped["DBJournal"] = relationship("DBJournal", foreign_keys=[journal_id])
 
-    bookmarks: Mapped[List["DBBookmark"]] = relationship("DBBookmark", back_populates="paper", cascade="all, delete-orphan")
-    """User bookmarks for this paper."""
-    
-    __table_args__ = (
-        Index('idx_paper_trust', 'author_trust_score', 'institutional_trust_score'),
-        Index('idx_paper_quality', 'fwci', 'citation_count'),
-        Index('idx_paper_status', 'is_retracted', 'is_open_access'),
-        # GIN index for fields_of_study array searches
-        Index('ix_papers_fields_of_study_gin', 'fields_of_study', postgresql_using='gin'),
+    bookmarks: Mapped[List["DBBookmark"]] = relationship(
+        "DBBookmark", back_populates="paper", cascade="all, delete-orphan"
     )
+    """User bookmarks for this paper."""
 
+    __table_args__ = (
+        Index("idx_paper_trust", "author_trust_score", "institutional_trust_score"),
+        Index("idx_paper_quality", "fwci", "citation_count"),
+        Index("idx_paper_status", "is_retracted", "is_open_access"),
+        # GIN index for fields_of_study array searches
+        Index(
+            "ix_papers_fields_of_study_gin", "fields_of_study", postgresql_using="gin"
+        ),
+        Index(
+            "ix_papers_title_abstract_gin",
+            func.to_tsvector(
+                "english",
+                func.to_tsvector("english", func.concat(title, " ", abstract)),
+            ),
+            postgresql_using="gin",
+        ),
+    )
 
 
 class DBPaperChunk(Base):
     """
     Text chunks for semantic search and citation verification.
-    
+
     Papers are split into chunks with structural metadata and embeddings
     for efficient semantic retrieval and context extraction.
     """
+
     __tablename__ = "paper_chunks"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     chunk_id: Mapped[str] = mapped_column(
-        String(150), unique=True, nullable=False, index=True,
-        comment="Unique chunk identifier (paper_id + chunk_index)"
+        String(150),
+        unique=True,
+        nullable=False,
+        index=True,
+        comment="Unique chunk identifier (paper_id + chunk_index)",
     )
     paper_id: Mapped[str] = mapped_column(
-        String(100), ForeignKey("papers.paper_id"), nullable=False, index=True,
-        comment="Reference to parent paper"
+        String(100),
+        ForeignKey("papers.paper_id"),
+        nullable=False,
+        index=True,
+        comment="Reference to parent paper",
     )
 
-    text: Mapped[str] = mapped_column(Text, nullable=False, comment="Chunk text content")
+    text: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="Chunk text content"
+    )
     token_count: Mapped[int] = mapped_column(
-        Integer, nullable=False,
-        comment="Number of tokens in chunk"
+        Integer, nullable=False, comment="Number of tokens in chunk"
     )
 
     chunk_index: Mapped[int] = mapped_column(
-        Integer, nullable=False,
-        comment="Sequential chunk number within paper"
+        Integer, nullable=False, comment="Sequential chunk number within paper"
     )
-    
+
     char_start: Mapped[int] = mapped_column(
-        Integer, nullable=True,
-        comment="Character offset start position in full text"
+        Integer, nullable=True, comment="Character offset start position in full text"
     )
     char_end: Mapped[int] = mapped_column(
-        Integer, nullable=True,
-        comment="Character offset end position in full text"
+        Integer, nullable=True, comment="Character offset end position in full text"
     )
-    
+
     section_title: Mapped[str] = mapped_column(
-        Text, nullable=True,
-        comment="Section header/title if applicable"
+        Text, nullable=True, comment="Section header/title if applicable"
     )
     page_number: Mapped[int] = mapped_column(
-        Integer, nullable=True,
-        comment="Page number in original PDF"
+        Integer, nullable=True, comment="Page number in original PDF"
     )
-    
+
     label: Mapped[str] = mapped_column(
-        String(50), nullable=True,
-        comment="Docling label: section_header, text, caption, etc."
+        String(50),
+        nullable=True,
+        comment="Docling label: section_header, text, caption, etc.",
     )
     level: Mapped[int] = mapped_column(
-        Integer, nullable=True,
-        comment="Hierarchy level for section headers"
+        Integer, nullable=True, comment="Hierarchy level for section headers"
     )
     docling_metadata: Mapped[dict] = mapped_column(
-        JSONB, nullable=True,
-        comment="Docling extraction metadata (bbox, page_no, etc.)"
+        JSONB,
+        nullable=True,
+        comment="Docling extraction metadata (bbox, page_no, etc.)",
     )
 
     embedding: Mapped[Vector] = mapped_column(
-        Vector(768), nullable=True,
-        comment="768-dim vector embedding (nomic-embed-text)"
+        Vector(768),
+        nullable=True,
+        comment="768-dim vector embedding (nomic-embed-text)",
     )
 
     created_at: Mapped[DateTime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(),
-        comment="Chunk creation timestamp"
+        DateTime(timezone=True),
+        server_default=func.now(),
+        comment="Chunk creation timestamp",
     )
 
     paper: Mapped["DBPaper"] = relationship("DBPaper", back_populates="chunks")

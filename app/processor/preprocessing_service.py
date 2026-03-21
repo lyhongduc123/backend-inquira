@@ -9,22 +9,20 @@ Clean architecture with retriever service integration for:
 - Progress tracking
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from app.extensions.logger import create_logger
 from app.domain.papers import PaperRepository, PaperService
+from app.domain.authors import AuthorService
 from app.domain.papers.journal_service import JournalService
 from app.domain.papers.conference_service import ConferenceService
 from app.domain.papers.enrichment_service import PaperEnrichmentService
 from app.retriever.service import RetrievalService
-from app.utils.transformers import batch_normalized_to_papers
 from app.processor.paper_processor import PaperProcessor
 from app.processor.preprocessing_repository import PreprocessingRepository
 from app.models.preprocessing_state import DBPreprocessingState
-from app.models.papers import DBPaper
 from app.domain.chunks import ChunkRepository
 
 logger = create_logger(__name__)
@@ -99,6 +97,7 @@ class PreprocessingService:
         self.enrichment_service = enrichment_service or PaperEnrichmentService(
             db=db_session, paper_repository=self.repository
         )
+        self.author_service = AuthorService(db_session)
 
     # ==================== Main Entry Point ====================
 
@@ -186,8 +185,10 @@ class PreprocessingService:
                 continuation_token = bulk_result.get("token")
 
                 # Update continuation token
-                state.continuation_token = continuation_token  # type: ignore
-                await self.db_session.commit()
+                await self.preprocessing_repo.set_state_continuation_token(
+                    state=state,
+                    continuation_token=continuation_token,
+                )
 
                 # Process batch
                 await self._process_batch(papers_data, state, target_count)
@@ -225,6 +226,13 @@ class PreprocessingService:
             logger.error(
                 f"[Preprocessing] Fatal error in job {job_id}: {e}", exc_info=True
             )
+            try:
+                await self.db_session.rollback()
+            except Exception as rollback_error:
+                logger.error(
+                    f"[Preprocessing] Rollback failed for job {job_id}: {rollback_error}",
+                    exc_info=True,
+                )
             state = await self._refresh_state(job_id)
             if state:
                 await self._update_state(
@@ -299,8 +307,10 @@ class PreprocessingService:
         )
 
         # Process each paper
+        job_id = state.job_id
         for paper in enriched_papers:
-            # Cache state values before any session operations to avoid greenlet errors
+            # Always refresh state from DB to avoid detached/expired object access
+            state = await self._refresh_state(job_id)
             cached_processed_count = state.processed_count
             cached_job_id = state.job_id
             
@@ -449,6 +459,13 @@ class PreprocessingService:
 
         except Exception as e:
             logger.error(f"[Preprocessing] Error processing paper: {e}")
+            try:
+                await self.db_session.rollback()
+            except Exception as rollback_error:
+                logger.error(
+                    f"[Preprocessing] Rollback failed while handling paper error: {rollback_error}",
+                    exc_info=True,
+                )
             # Cache values before operations
             try:
                 error_count = state.error_count + 1
@@ -460,7 +477,8 @@ class PreprocessingService:
                 return
             
             # Update through fresh state
-            await self._commit_and_clear_session()
+            await self.db_session.commit()
+            self.db_session.expunge_all()
             state = await self._refresh_state(job_id)
             state.error_count = error_count
             state.current_index = current_index
@@ -531,7 +549,7 @@ class PreprocessingService:
 
     # ==================== Helper Functions ====================
 
-    async def _generate_missing_embeddings(self, state: DBPreprocessingState) -> None:
+    async def _generate_missing_embeddings(self, state: Optional[DBPreprocessingState] = None) -> None:
         """
         Generate title + abstract embeddings for papers that don't have them.
 
@@ -539,7 +557,7 @@ class PreprocessingService:
         Particularly useful for papers that failed during initial processing.
 
         Args:
-            state: Preprocessing state for tracking
+            state: Optional preprocessing state for tracking
         """
         try:
             logger.info("[Preprocessing] Checking for papers missing embeddings...")
@@ -581,6 +599,216 @@ class PreprocessingService:
             logger.error(
                 f"[Preprocessing] Error generating embeddings: {e}", exc_info=True
             )
+
+    async def compute_all_author_trust_metrics(
+        self,
+        only_unprocessed: bool = False,
+        conflict_threshold_percent: float = 50.0,
+        batch_size: int = 200,
+    ) -> Dict[str, int]:
+        """
+        Compute trust metrics for all authors and process conflict flags.
+
+        Metrics computed for each author:
+        - `reputation_score`
+        - `retracted_papers_count`
+        - `g_index`
+        - `has_retracted_papers`
+        - `is_conflict`
+
+        Processing logic:
+        - If author `is_processed` is False, fetch Semantic Scholar author details.
+        - If `openalex_id` exists, fetch OpenAlex author details.
+        - Compare citation counts and flag `is_conflict` when diff >= 50%.
+        """
+        stats = {
+            "total_authors": 0,
+            "processed_authors": 0,
+            "conflicts": 0,
+            "errors": 0,
+        }
+
+        offset = 0
+        while True:
+            authors = await self.preprocessing_repo.list_authors_for_metrics(
+                limit=batch_size,
+                offset=offset,
+                only_unprocessed=only_unprocessed,
+            )
+            if not authors:
+                break
+
+            stats["total_authors"] += len(authors)
+
+            for author in authors:
+                try:
+                    has_conflict = await self._compute_single_author_trust_metrics(
+                        author=author,
+                        conflict_threshold_percent=conflict_threshold_percent,
+                    )
+                    stats["processed_authors"] += 1
+                    if has_conflict:
+                        stats["conflicts"] += 1
+                except Exception as e:
+                    stats["errors"] += 1
+                    logger.error(
+                        f"[Preprocessing] Failed author metrics for {author.author_id}: {e}",
+                        exc_info=True,
+                    )
+
+            offset += len(authors)
+
+        logger.info(
+            "[Preprocessing] Author trust metrics completed: "
+            f"total={stats['total_authors']}, processed={stats['processed_authors']}, "
+            f"conflicts={stats['conflicts']}, errors={stats['errors']}"
+        )
+        return stats
+
+    async def _compute_single_author_trust_metrics(
+        self,
+        author,
+        conflict_threshold_percent: float,
+    ) -> bool:
+        """Compute trust metrics for one author and persist updates."""
+        semantic_citations: Optional[int] = None
+        openalex_citations: Optional[int] = None
+        update_data: Dict[str, Any] = {}
+
+        # Only run external enrichment for unprocessed authors
+        if not author.is_processed:
+            semantic_data, openalex_data = await self._fetch_author_source_data(author)
+
+            if semantic_data:
+                semantic_citations = semantic_data.get("citationCount")
+                update_data["h_index"] = semantic_data.get("hIndex")
+                update_data["total_citations"] = semantic_data.get("citationCount")
+                update_data["total_papers"] = semantic_data.get("paperCount")
+                if semantic_data.get("url"):
+                    update_data["url"] = semantic_data.get("url")
+                if semantic_data.get("homepage"):
+                    update_data["homepage"] = semantic_data.get("homepage")
+
+            if openalex_data:
+                openalex_citations = int(openalex_data.cited_by_count)
+
+            has_conflict = self._has_citation_conflict(
+                semantic_citations=semantic_citations,
+                openalex_citations=openalex_citations,
+                threshold_percent=conflict_threshold_percent,
+            )
+            update_data["is_conflict"] = has_conflict
+            update_data["is_processed"] = True
+        else:
+            has_conflict = bool(author.is_conflict)
+
+        # Compute metrics from indexed papers
+        papers = await self.preprocessing_repo.get_author_papers_for_metrics(author.id)
+        paper_citations = [int(p.citation_count or 0) for p in papers]
+        total_citations_from_papers = sum(paper_citations)
+        retracted_papers_count = sum(1 for p in papers if bool(p.is_retracted))
+        has_retracted_papers = retracted_papers_count > 0
+        g_index = self._compute_g_index(paper_citations)
+
+        # Reputation score (0-100)
+        h_index = int(update_data.get("h_index") or author.h_index or 0)
+        verified_bonus = 50.0 if bool(author.verified) else 0.0
+        reputation_score = max(
+            0.0,
+            min(
+                100.0,
+                (h_index * 2.0)
+                + (float(total_citations_from_papers) / 100.0)
+                + verified_bonus
+                - (float(retracted_papers_count) * 10.0),
+            ),
+        )
+
+        update_data.update(
+            {
+                "g_index": g_index,
+                "retracted_papers_count": retracted_papers_count,
+                "has_retracted_papers": has_retracted_papers,
+                "total_citations": total_citations_from_papers,
+                "total_papers": len(papers),
+                "reputation_score": reputation_score,
+            }
+        )
+
+        await self.preprocessing_repo.update_author_metrics(author.id, update_data)
+        return bool(update_data.get("is_conflict", has_conflict))
+
+    async def _fetch_author_source_data(self, author) -> Tuple[Optional[Dict[str, Any]], Any]:
+        """Fetch Semantic Scholar and optional OpenAlex author details."""
+        from app.retriever.provider import SemanticScholarProvider
+        from app.retriever.service import RetrievalServiceType
+
+        semantic_data: Optional[Dict[str, Any]] = None
+        openalex_data = None
+
+        if author.author_id:
+            try:
+                semantic_provider = self.retriever.get_provider_as(
+                    RetrievalServiceType.SEMANTIC,
+                    SemanticScholarProvider,
+                )
+                semantic_map = await semantic_provider.get_multiple_authors(
+                    [str(author.author_id)]
+                )
+                if semantic_map:
+                    semantic_data = semantic_map.get(str(author.author_id))
+            except Exception as e:
+                logger.warning(
+                    f"[Preprocessing] Failed to fetch S2 author detail for {author.author_id}: {e}"
+                )
+
+        if author.openalex_id:
+            try:
+                openalex_data = await self.retriever.get_author(
+                    self._normalize_openalex_id(str(author.openalex_id))
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Preprocessing] Failed to fetch OpenAlex author detail for {author.author_id}: {e}"
+                )
+
+        return semantic_data, openalex_data
+
+    @staticmethod
+    def _normalize_openalex_id(openalex_id: str) -> str:
+        """Normalize OpenAlex author id (full URL -> short ID)."""
+        return openalex_id.removeprefix("https://openalex.org/")
+
+    @staticmethod
+    def _compute_g_index(citations: List[int]) -> int:
+        """Compute g-index from a list of citation counts."""
+        if not citations:
+            return 0
+
+        sorted_citations = sorted((c for c in citations if c is not None), reverse=True)
+        cumulative = 0
+        g = 0
+        for i, c in enumerate(sorted_citations, start=1):
+            cumulative += int(c)
+            if cumulative >= i * i:
+                g = i
+            else:
+                break
+        return g
+
+    @staticmethod
+    def _has_citation_conflict(
+        semantic_citations: Optional[int],
+        openalex_citations: Optional[int],
+        threshold_percent: float = 50.0,
+    ) -> bool:
+        """Detect conflict when citation delta ratio between S2 and OA >= threshold."""
+        if semantic_citations is None or openalex_citations is None:
+            return False
+
+        baseline = max(int(semantic_citations), int(openalex_citations), 1)
+        diff_ratio = abs(int(semantic_citations) - int(openalex_citations)) / baseline
+        return diff_ratio >= (threshold_percent / 100.0)
 
     async def _process_unprocessed_papers(self, state: DBPreprocessingState) -> None:
         """
@@ -751,9 +979,7 @@ class PreprocessingService:
         self, job_id: str, target_count: int, resume: bool
     ) -> DBPreprocessingState:
         """Get existing state or create new one."""
-        stmt = select(DBPreprocessingState).where(DBPreprocessingState.job_id == job_id)
-        result = await self.db_session.execute(stmt)
-        state = result.scalar_one_or_none()
+        state = await self.preprocessing_repo.get_state_by_job_id(job_id)
 
         if state and not resume:
             # Reset for fresh start
@@ -769,33 +995,26 @@ class PreprocessingService:
             state.continuation_token = None  # type: ignore
         elif not state:
             # Create new state
-            state = DBPreprocessingState(
+            state = await self.preprocessing_repo.create_state(
                 job_id=job_id,
                 target_count=target_count,
-                current_index=0,
-                processed_count=0,
-                skipped_count=0,
-                error_count=0,
-                is_completed=False,
-                is_running=False,
-                is_paused=False,
             )
-            self.db_session.add(state)
+            return state
         else:
             # Resume - clear pause flag
             if state.is_paused:
                 state.is_paused = False
                 state.status_message = "Resuming from pause..."  # type: ignore
 
-        await self.db_session.commit()
-        await self.db_session.refresh(state)
+        await self.preprocessing_repo.save_state(state, refresh=True)
         return state
 
     async def _refresh_state(self, job_id: str) -> DBPreprocessingState:
         """Re-fetch state from database."""
-        stmt = select(DBPreprocessingState).where(DBPreprocessingState.job_id == job_id)
-        result = await self.db_session.execute(stmt)
-        return result.scalar_one()
+        state = await self.preprocessing_repo.get_state_by_job_id(job_id)
+        if not state:
+            raise ValueError(f"Preprocessing state not found for job_id={job_id}")
+        return state
 
     async def _update_state(
         self,
@@ -808,7 +1027,7 @@ class PreprocessingService:
             state.is_running = is_running
         if message is not None:
             state.status_message = message  # type: ignore
-        await self.db_session.commit()
+        await self.preprocessing_repo.save_state(state)
 
     async def _complete_job(self, state: DBPreprocessingState) -> None:
         """Mark job as completed."""
@@ -818,7 +1037,7 @@ class PreprocessingService:
         state.status_message = (
             f"Completed: {state.processed_count} papers processed"
         )  # type: ignore
-        await self.db_session.commit()
+        await self.preprocessing_repo.save_state(state)
 
     async def _commit_and_clear_session(self) -> None:
         """Commit changes and clear session to free memory."""

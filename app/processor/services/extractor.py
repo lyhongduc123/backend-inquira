@@ -1,8 +1,11 @@
 import io
+import importlib
+import json
 import re
 import unicodedata
 import gc
-from typing import Dict, Any, List, Optional
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
 from docling.datamodel.pipeline_options import (
@@ -11,21 +14,50 @@ from docling.datamodel.pipeline_options import (
 from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
 from docling.datamodel.base_models import InputFormat
 from docling_core.types.io import DocumentStream
+from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
 from app.extensions.logger import create_logger
 import xml.etree.ElementTree as ET
+
+fitz = None
+try:  # pragma: no cover
+    fitz = importlib.import_module("pymupdf")
+except Exception:
+    try:
+        fitz = importlib.import_module("fitz")
+    except Exception:
+        fitz = None
 
 logger = create_logger(__name__)
 
 class ExtractorService:
-    def __init__(self, use_cuda: bool = True):
+    def __init__(
+        self,
+        use_cuda: bool = True,
+        use_ocr: bool = False,
+        generate_picture_images: bool = True,
+        assets_dir: Optional[str] = None,
+        export_hierarchical_chunks: bool = False,
+        enable_pymupdf_crops: bool = True,
+    ):
         """Initialize the extractor service with docling converter
         
         Args:
             use_cuda: Whether to attempt CUDA acceleration (falls back to CPU on error)
+            use_ocr: Whether to enable OCR in Docling pipeline
+            generate_picture_images: Whether to ask Docling to render picture images
+            assets_dir: Optional directory to persist extracted assets (figures/tables)
+            export_hierarchical_chunks: Whether to export Docling hierarchical chunks
+            enable_pymupdf_crops: Whether to crop table/figure regions from raw PDF via PyMuPDF
         """
         self._use_cuda = use_cuda
+        self._use_ocr = use_ocr
+        self._generate_picture_images = generate_picture_images
+        self._assets_dir = assets_dir
+        self._export_hierarchical_chunks = export_hierarchical_chunks
+        self._enable_pymupdf_crops = enable_pymupdf_crops
         self._cuda_failed = False
-        self.converter = None
+        self.converter: Optional[DocumentConverter] = None
+        self.hierarchical_chunker: Optional[HierarchicalChunker] = None
         self._initialize_converter()
 
     def _initialize_converter(self):
@@ -38,7 +70,8 @@ class ExtractorService:
                 accelerator_options=AcceleratorOptions(
                     device=device,
                 ),
-                do_ocr=False
+                do_ocr=self._use_ocr,
+                do_formula_enrichment=True, 
             )
             
             self.converter = DocumentConverter(
@@ -61,22 +94,32 @@ class ExtractorService:
             else:
                 raise
 
-    def extract_pdf_structure(self, pdf_bytes: bytes) -> Dict[str, Any]:
+    def extract_pdf_structure(self, pdf_bytes: bytes, paper_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Extract structured data from PDF bytes using docling.
         Returns a dictionary with document structure preserved.
         
         Args:
             pdf_bytes (bytes): The PDF file content in bytes.
+            paper_id (Optional[str]): Paper ID used to persist optional assets.
         Returns:
             Dictionary containing structured document data with sections, paragraphs, tables, etc.
         """
         try:
-            # Convert PDF bytes to file-like object
             pdf_file = DocumentStream(name="input.pdf", stream=io.BytesIO(pdf_bytes))
+            if self.converter is None:
+                raise RuntimeError("Docling converter is not initialized")
 
             result = self.converter.convert(source=pdf_file)
             doc_dict = result.document.export_to_dict()
+
+            if paper_id and self._assets_dir:
+                self._persist_docling_assets(
+                    paper_id=paper_id,
+                    doc_dict=doc_dict,
+                    document=result.document,
+                    pdf_bytes=pdf_bytes,
+                )
 
             logger.info(
                 f"Successfully extracted structured document using docling"
@@ -92,8 +135,17 @@ class ExtractorService:
                 self._initialize_converter()
                 # Retry with CPU
                 pdf_file = DocumentStream(name="input.pdf", stream=io.BytesIO(pdf_bytes))
+                if self.converter is None:
+                    raise RuntimeError("Docling converter is not initialized after CPU fallback")
                 result = self.converter.convert(source=pdf_file)
                 doc_dict = result.document.export_to_dict()
+                if paper_id and self._assets_dir:
+                    self._persist_docling_assets(
+                        paper_id=paper_id,
+                        doc_dict=doc_dict,
+                        document=result.document,
+                        pdf_bytes=pdf_bytes,
+                    )
                 logger.info("Successfully extracted document using CPU fallback")
                 return doc_dict
             else:
@@ -102,109 +154,342 @@ class ExtractorService:
         except Exception as e:
             logger.error(f"Error extracting PDF structure with docling: {e}")
             raise Exception(f"Failed to extract PDF structure: {e}")
-    
-    def extract_pdf_text(self, pdf_bytes: bytes) -> str:
-        """
-        Extract text from PDF bytes using docling (backward compatibility).
-        For new code, prefer extract_pdf_structure() for better results.
-        
-        Args:
-            pdf_bytes (bytes): The PDF file content in bytes.
-        Returns:
-            Extracted text as a string.
-        """
+
+    @staticmethod
+    def _resolve_ref_index(ref_obj: Dict[str, Any], expected: str) -> Optional[int]:
+        ref = ref_obj.get("$ref")
+        if not isinstance(ref, str):
+            return None
+        prefix = f"#/{expected}/"
+        if not ref.startswith(prefix):
+            return None
         try:
-            # Get structured document
-            doc_dict = self.extract_pdf_structure(pdf_bytes)
-            
-            # Convert to markdown for text-based processing
-            text = self._dict_to_markdown(doc_dict)
-            
-            # Clean up the text
-            text = self._fix_text_encoding(text)
+            return int(ref.split("/")[-1])
+        except Exception:
+            return None
 
-            logger.info(
-                f"Successfully extracted text using docling: {len(text)} characters"
-            )
+    @staticmethod
+    def _extract_text_value(text_item: Dict[str, Any]) -> str:
+        text = (text_item.get("text") or "").strip()
+        if text:
             return text
+        return (text_item.get("orig") or "").strip()
 
-        except Exception as e:
-            logger.error(f"Error extracting PDF text with docling: {e}")
-            raise Exception(f"Failed to extract PDF text: {e}")
+    def _persist_docling_assets(
+        self,
+        paper_id: str,
+        doc_dict: Dict[str, Any],
+        document: Any,
+        pdf_bytes: Optional[bytes] = None,
+    ) -> None:
+        """Persist figures/tables and optional markdown/chunks into per-paper assets directory."""
+        base_path = Path(self._assets_dir or "").expanduser().resolve() / paper_id
+        base_path.mkdir(parents=True, exist_ok=True)
 
-    def _dict_to_markdown(self, doc_dict: Dict[str, Any]) -> str:
-        """
-        Convert docling document dict to clean text (no markdown).
-        Extracts text from docling's structured format.
-        
-        Args:
-            doc_dict: Document dictionary from docling
-        Returns:
-            Clean text without markdown formatting
-        """
-        text_parts = []
-        
-        # Extract texts from docling structure
-        texts = doc_dict.get("texts", [])
-        
-        for text_item in texts:
-            # Skip furniture (headers, footers, page numbers)
-            if text_item.get("content_layer") == "furniture":
+        assets_manifest: Dict[str, Any] = {
+            "paper_id": paper_id,
+            "base_path": str(base_path),
+            "tables": [],
+            "figures": [],
+            "tables_crop_dir": str(base_path / "tables" / "crops"),
+            "figures_crop_dir": str(base_path / "figures" / "crops"),
+            "crop_backend": "pymupdf" if self._enable_pymupdf_crops else "disabled",
+        }
+
+        pdf_doc = None
+        if self._enable_pymupdf_crops and pdf_bytes and fitz is not None:
+            try:
+                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            except Exception as open_error:
+                logger.warning(f"Failed to open PDF with PyMuPDF for {paper_id}: {open_error}")
+        elif self._enable_pymupdf_crops and fitz is None:
+            logger.warning("PyMuPDF is not available. Skipping visual crops.")
+
+        self._persist_table_assets(
+            base_path=base_path,
+            doc_dict=doc_dict,
+            manifest=assets_manifest,
+            pdf_doc=pdf_doc,
+        )
+        self._persist_figure_assets(
+            base_path=base_path,
+            doc_dict=doc_dict,
+            document=document,
+            manifest=assets_manifest,
+            paper_id=paper_id,
+            pdf_doc=pdf_doc,
+        )
+        # self._persist_markdown_and_hierarchical_chunks(base_path=base_path, document=document, manifest=assets_manifest)
+
+        if pdf_doc is not None:
+            try:
+                pdf_doc.close()
+            except Exception:
+                pass
+
+        manifest_path = base_path / "assets_manifest.json"
+        manifest_path.write_text(
+            json.dumps(assets_manifest, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+
+        doc_dict.setdefault("asset_paths", {})
+        doc_dict["asset_paths"].update(
+            {
+                "base_path": str(base_path),
+                "manifest_path": str(manifest_path),
+                "tables_dir": str(base_path / "tables"),
+                "figures_dir": str(base_path / "figures"),
+                "tables_crop_dir": str(base_path / "tables" / "crops"),
+                "figures_crop_dir": str(base_path / "figures" / "crops"),
+            }
+        )
+
+    @staticmethod
+    def _bbox_from_prov(item: Dict[str, Any]) -> Optional[Tuple[int, Dict[str, Any]]]:
+        prov = item.get("prov", []) or []
+        if not prov:
+            return None
+        first = prov[0] or {}
+        page_no = first.get("page_no")
+        bbox = first.get("bbox")
+        if page_no is None or not isinstance(bbox, dict):
+            return None
+        return int(page_no), bbox
+
+    @staticmethod
+    def _to_pymupdf_rect(page_height: float, bbox: Dict[str, Any], pad: float = 6.0):
+        if fitz is None:
+            return None
+        l = float(bbox.get("l", 0.0))
+        r = float(bbox.get("r", 0.0))
+        t = float(bbox.get("t", 0.0))
+        b = float(bbox.get("b", 0.0))
+        origin = str(bbox.get("coord_origin") or "BOTTOMLEFT").upper()
+
+        if origin == "BOTTOMLEFT":
+            y0 = page_height - t
+            y1 = page_height - b
+        else:
+            y0 = min(t, b)
+            y1 = max(t, b)
+
+        x0 = min(l, r)
+        x1 = max(l, r)
+
+        rect = fitz.Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+        return rect
+
+    def _save_crop(
+        self,
+        pdf_doc: Any,
+        page_no: int,
+        bbox: Dict[str, Any],
+        output_path: Path,
+        zoom: float = 2.0,
+    ) -> Optional[str]:
+        if fitz is None or pdf_doc is None:
+            return None
+        try:
+            page_index = max(page_no - 1, 0)
+            page = pdf_doc.load_page(page_index)
+            rect = self._to_pymupdf_rect(page.rect.height, bbox)
+            if rect is None:
+                return None
+            clip = rect & page.rect
+            if clip.is_empty:
+                return None
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            pix.save(str(output_path))
+            return str(output_path)
+        except Exception as crop_error:
+            logger.warning(f"Failed to save crop at {output_path}: {crop_error}")
+            return None
+
+    def _persist_table_assets(
+        self,
+        base_path: Path,
+        doc_dict: Dict[str, Any],
+        manifest: Dict[str, Any],
+        pdf_doc: Any = None,
+    ) -> None:
+        tables = doc_dict.get("tables", []) or []
+        texts = doc_dict.get("texts", []) or []
+        tables_dir = base_path / "tables"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        crop_dir = tables_dir / "crops"
+
+        for idx, table in enumerate(tables):
+            data = table.get("data", {}) or {}
+            cells = data.get("table_cells", []) or []
+            if not cells:
                 continue
-            
-            # Get the text content
-            text_content = text_item.get("text", "")
-            if not text_content:
-                continue
-            
-            label = text_item.get("label", "")
-            
-            # Add section headers as plain text (no markdown)
-            if label == "section_header":
-                text_parts.append(f"\n{text_content}\n")
-            else:
-                text_parts.append(text_content)
-        
-        return "\n\n".join(text_parts)
 
-    def split_sections(self, text: str) -> dict:
-        """
-        Split text into sections based on common academic paper headings.
-        Docling preserves markdown structure, making this easier.
-        """
-        pattern = r"^#{1,3}\s*(Abstract|Introduction|Methods?|Results?|Discussion|Conclusion|Findings|Background|Related Work)"
-        sections = {}
-        current_heading = "Intro"
-        sections[current_heading] = ""
+            rows: Dict[int, List[Dict[str, Any]]] = {}
+            for cell in cells:
+                row_idx = int(cell.get("start_row_offset_idx", 0) or 0)
+                rows.setdefault(row_idx, []).append(cell)
 
-        for line in text.splitlines():
-            line_strip = line.strip()
-            match = re.match(pattern, line_strip, re.I)
-            if match:
-                current_heading = match.group(1)
-                sections[current_heading] = ""
-            else:
-                sections[current_heading] += line_strip + " "
-        return sections
+            row_lines: List[str] = []
+            for row_idx in sorted(rows.keys()):
+                ordered_cells = sorted(rows[row_idx], key=lambda c: int(c.get("start_col_offset_idx", 0) or 0))
+                values = [str(c.get("text") or "").replace("\n", " ").strip() for c in ordered_cells]
+                row_lines.append("\t".join(values))
 
-    def extract_results_conclusion(self, sections: dict) -> str:
-        result_text = ""
-        for key in sections:
-            if key.lower() in ["results", "discussion", "conclusion", "findings"]:
-                result_text += sections[key] + "\n"
-        return result_text.strip()
+            table_file = tables_dir / f"table_{idx:03d}.tsv"
+            table_file.write_text("\n".join(row_lines), encoding="utf-8")
 
-    def extract_keywords(self, text: str) -> list:
-        """
-        Extract keywords from the text using a simple regex approach.
-        Args:
-            text (str): The input text from which to extract keywords.
-        Returns:
-            List of extracted keywords.
-        """
-        # Dummy implementation: extract words longer than 5 characters
-        keywords = re.findall(r"\b\w{6,}\b", text)
-        return list(set(keywords))
+            caption_texts: List[str] = []
+            for caption_ref in table.get("captions", []) or []:
+                text_idx = self._resolve_ref_index(caption_ref, "texts")
+                if text_idx is not None and 0 <= text_idx < len(texts):
+                    caption = self._extract_text_value(texts[text_idx])
+                    if caption:
+                        caption_texts.append(caption)
+
+            manifest["tables"].append(
+                {
+                    "index": idx,
+                    "path": str(table_file),
+                    "caption": caption_texts,
+                    "cell_count": len(cells),
+                    "prov": table.get("prov"),
+                    "crop_path": None,
+                }
+            )
+
+            bbox_info = self._bbox_from_prov(table)
+            if bbox_info and pdf_doc is not None:
+                page_no, bbox = bbox_info
+                crop_path = self._save_crop(
+                    pdf_doc=pdf_doc,
+                    page_no=page_no,
+                    bbox=bbox,
+                    output_path=crop_dir / f"table_{idx:03d}.png",
+                )
+                manifest["tables"][-1]["crop_path"] = crop_path
+
+    def _persist_figure_assets(
+        self,
+        base_path: Path,
+        doc_dict: Dict[str, Any],
+        document: Any,
+        manifest: Dict[str, Any],
+        paper_id: str,
+        pdf_doc: Any = None,
+    ) -> None:
+        pictures = doc_dict.get("pictures", []) or []
+        texts = doc_dict.get("texts", []) or []
+
+        figures_dir = base_path / "figures"
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        crop_dir = figures_dir / "crops"
+
+        doc_pictures = getattr(document, "pictures", None)
+
+        for idx, picture in enumerate(pictures):
+            caption_texts: List[str] = []
+            for caption_ref in picture.get("captions", []) or []:
+                text_idx = self._resolve_ref_index(caption_ref, "texts")
+                if text_idx is not None and 0 <= text_idx < len(texts):
+                    caption = self._extract_text_value(texts[text_idx])
+                    if caption:
+                        caption_texts.append(caption)
+
+            figure_image_path: Optional[str] = None
+            if doc_pictures and idx < len(doc_pictures):
+                figure_obj = doc_pictures[idx]
+                image_obj = getattr(figure_obj, "image", None)
+                if image_obj is not None and hasattr(image_obj, "save"):
+                    image_file = figures_dir / f"figure_{idx:03d}.png"
+                    try:
+                        image_obj.save(image_file)
+                        figure_image_path = str(image_file)
+                    except Exception as image_error:
+                        logger.warning(f"Could not save figure image {idx} for {paper_id}: {image_error}")
+
+            figure_meta_path = figures_dir / f"figure_{idx:03d}.json"
+            figure_meta = {
+                "index": idx,
+                "captions": caption_texts,
+                "annotations": picture.get("annotations") or [],
+                "prov": picture.get("prov"),
+                "image_path": figure_image_path,
+            }
+            figure_meta_path.write_text(
+                json.dumps(figure_meta, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            manifest["figures"].append(
+                {
+                    "index": idx,
+                    "metadata_path": str(figure_meta_path),
+                    "image_path": figure_image_path,
+                    "crop_path": None,
+                }
+            )
+
+            bbox_info = self._bbox_from_prov(picture)
+            if bbox_info and pdf_doc is not None:
+                page_no, bbox = bbox_info
+                crop_path = self._save_crop(
+                    pdf_doc=pdf_doc,
+                    page_no=page_no,
+                    bbox=bbox,
+                    output_path=crop_dir / f"figure_{idx:03d}.png",
+                )
+                manifest["figures"][-1]["crop_path"] = crop_path
+
+    # def _persist_markdown_and_hierarchical_chunks(
+    #     self,
+    #     base_path: Path,
+    #     document: Any,
+    #     manifest: Dict[str, Any],
+    # ) -> None:
+    #     try:
+    #         markdown_text = document.export_to_markdown()
+    #         markdown_path = base_path / "document.md"
+    #         markdown_contextualized_path = base_path / "document_contextualized.md"
+    #         chunker = HierarchicalChunker()
+    #         chunks = chunker.chunk(dl_doc=document)
+    #         markdown_contextualized = []
+    #         for chunk in chunks:
+    #             markdown_contextualized.append(chunker.contextualize(chunk=chunk))
+    #         markdown_path.write_text(markdown_text, encoding="utf-8")
+    #         markdown_contextualized_path.write_text("\n\n".join(markdown_contextualized), encoding="utf-8")
+    #         manifest["markdown_path"] = str(markdown_path)
+    #     except Exception as markdown_error:
+    #         logger.warning(f"Failed to export markdown for assets at {base_path}: {markdown_error}")
+
+    #     if not self._export_hierarchical_chunks:
+    #         return
+
+    #     try:
+    #         hierarchical_chunker = HierarchicalChunker()
+    #         serialized_chunks: List[Dict[str, Any]] = []
+    #         for idx, chunk in enumerate(hierarchical_chunker.chunk(dl_doc=document)):
+    #             chunk_text = getattr(chunk, "text", None)
+    #             if chunk_text is None and hasattr(chunk, "export_json_dict"):
+    #                 chunk_text = json.dumps(chunk.export_json_dict(), ensure_ascii=False)
+
+    #             serialized_chunks.append(
+    #                 {
+    #                     "index": idx,
+    #                     "text": chunk_text or "",
+    #                     "metadata": getattr(chunk, "meta", None),
+    #                 }
+    #             )
+
+    #         chunk_path = base_path / "hierarchical_chunks.json"
+    #         chunk_path.write_text(
+    #             json.dumps(serialized_chunks, ensure_ascii=False, indent=2, default=str),
+    #             encoding="utf-8",
+    #         )
+    #         manifest["hierarchical_chunks_path"] = str(chunk_path)
+    #     except Exception as chunk_error:
+    #         logger.warning(f"Failed to export hierarchical chunks for assets at {base_path}: {chunk_error}")
 
     def _fix_text_encoding(self, text: str) -> str:
         """
@@ -389,42 +674,3 @@ class ExtractorService:
                 text_parts.append(child.tail)
         
         return " ".join(text_parts)
-    
-    def extract_tei_xml_text(self, tei_xml: str) -> str:
-        """
-        Extract plain text from GROBID TEI XML (backward compatibility).
-        For new code, prefer extract_tei_xml_structure() for better results.
-        
-        Args:
-            tei_xml (str): TEI XML string from GROBID
-            
-        Returns:
-            Extracted text as a string
-        """
-        try:
-            structure = self.extract_tei_xml_structure(tei_xml)
-            
-            # Combine title, abstract, and sections into text
-            text_parts = []
-            
-            if structure.get('title'):
-                text_parts.append(structure['title'])
-            
-            if structure.get('abstract'):
-                text_parts.append(structure['abstract'])
-            
-            for section in structure.get('sections', []):
-                text_parts.append(section['title'])
-                text_parts.extend(section['content'])
-            
-            full_text = "\n\n".join(text_parts)
-            
-            # Clean up the text
-            full_text = self._fix_text_encoding(full_text)
-            
-            logger.info(f"Successfully extracted text from TEI XML: {len(full_text)} characters")
-            return full_text
-            
-        except Exception as e:
-            logger.error(f"Error extracting text from TEI XML: {e}")
-            raise Exception(f"Failed to extract text from TEI XML: {e}")

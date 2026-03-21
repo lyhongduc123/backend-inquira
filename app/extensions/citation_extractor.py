@@ -16,6 +16,10 @@ class CitationExtractor:
     
     # Pattern to match (cite:paper_id) format
     CITATION_PATTERN = re.compile(r'\(cite:([^\)]+)\)')
+    # Pattern to match scoped format: (cite:paper_id|chunk_id|char_start|char_end)
+    SCOPED_CITATION_PATTERN = re.compile(
+        r'\(cite:(?P<paper_id>[^\|\)]+)\|(?P<chunk_id>[^\|\)]+)(?:\|(?P<char_start>\d+)\|(?P<char_end>\d+))?\)'
+    )
     
     @staticmethod
     def extract_citations_from_text(text: str) -> List[str]:
@@ -159,3 +163,31 @@ class CitationExtractor:
             grouped[paper_id]["claim"] = max(data["claims"], key=len) if data["claims"] else ""
         
         return grouped
+
+    @staticmethod
+    def extract_scoped_citation_refs(text: str) -> List[Dict[str, Any]]:
+        """
+        Extract scoped citation references with paper/chunk ids and optional spans.
+
+        Expected format:
+        - (cite:paper_id|chunk_id)
+        - (cite:paper_id|chunk_id|char_start|char_end)
+        """
+        refs: List[Dict[str, Any]] = []
+
+        for match in CitationExtractor.SCOPED_CITATION_PATTERN.finditer(text):
+            char_start_raw = match.group("char_start")
+            char_end_raw = match.group("char_end")
+
+            refs.append(
+                {
+                    "paper_id": match.group("paper_id"),
+                    "chunk_id": match.group("chunk_id"),
+                    "char_start": int(char_start_raw) if char_start_raw else None,
+                    "char_end": int(char_end_raw) if char_end_raw else None,
+                    "position": match.start(),
+                    "marker": match.group(0),
+                }
+            )
+
+        return refs

@@ -82,12 +82,13 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "openAccessPdf",
             "citationStyles",
             "externalIds",
-            "tldr",  # NEW: TL;DR summary
-            "fieldsOfStudy",  # NEW: Basic fields of study
-            "s2FieldsOfStudy",  # NEW: Enriched fields with source
-            "references",  # NEW: References list
-            "references.paperId",  # NEW: Reference paper IDs
-            "references.title",  # NEW: Reference titles
+            "tldr",
+            "fieldsOfStudy",  
+            "publicationTypes", 
+            "s2FieldsOfStudy", 
+            "references", 
+            "references.paperId", 
+            "references.title",  
         ]
 
         params = {
@@ -171,6 +172,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "citationStyles",
             "externalIds",
             "fieldsOfStudy",
+            "publicationTypes",
             "s2FieldsOfStudy",
         ]
 
@@ -243,6 +245,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "references",
             "citations",
             "influentialCitationCount",
+            "publicationTypes",
         ]
 
         headers = {}
@@ -306,6 +309,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "influentialCitationCount",
             "tldr",
             "fieldsOfStudy",
+            "publicationTypes",
             "s2FieldsOfStudy",
             "citationStyles",
         ]
@@ -506,13 +510,45 @@ class SemanticScholarProvider(BaseRetrievalProvider):
                 )
                 response.raise_for_status()
                 data = response.json()
-                return {author["authorId"]: author for author in data.get("data", [])}
+
+                # Semantic Scholar batch endpoint can return either:
+                # 1) {"data": [...]} (wrapped)
+                # 2) [...] (direct list)
+                if isinstance(data, dict):
+                    author_list = data.get("data", [])
+                elif isinstance(data, list):
+                    author_list = data
+                else:
+                    logger.warning(
+                        f"[{self.name}] Unexpected batch author response type: {type(data).__name__}"
+                    )
+                    return None
+
+                if not isinstance(author_list, list):
+                    logger.warning(
+                        f"[{self.name}] Unexpected batch author payload shape: {type(author_list).__name__}"
+                    )
+                    return None
+
+                author_map: Dict[str, Any] = {}
+                for author in author_list:
+                    if not isinstance(author, dict):
+                        continue
+                    author_id = author.get("authorId")
+                    if author_id is None:
+                        continue
+                    author_map[str(author_id)] = author
+
+                return author_map
         except httpx.HTTPStatusError as e:
             logger.error(f"[{self.name}] Error fetching batch authors: {e}")
             try:
                 logger.error(f"Response content: {e.response.json()}")
             except Exception:
                 logger.error(f"Response content: {e.response.text}")
+            return None
+        except Exception as e:
+            logger.error(f"[{self.name}] Unexpected error fetching batch authors: {e}", exc_info=True)
             return None
 
     async def get_author_papers(
@@ -554,6 +590,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "isOpenAccess",
             "externalIds",
             "influentialCitationCount",
+            "publicationTypes",
             "citationStyles",
         ]
         params_fields = fields.split(",") if fields else default_fields
@@ -625,7 +662,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
                 citation_count=author.get("citationCount"),
                 h_index=author.get("hIndex"),
                 paper_count=author.get("paperCount"),
-                homepage_url=author.get("url"),
+                homepage_url=author.get("homepage"),
                 url=author.get("url"),
             )
             for author in authors_raw
@@ -636,18 +673,14 @@ class SemanticScholarProvider(BaseRetrievalProvider):
         tldr = None
         if tldr_data and isinstance(tldr_data, dict):
             text = tldr_data.get("text")
-            # Only create tldr dict if text has an actual value
             if text:
                 tldr = {"model": tldr_data.get("model"), "text": text}
 
-        # Extract year
+
         year = raw_result.get("year")
-
-        # Extract fields of study
         fields_of_study = raw_result.get("fieldsOfStudy", [])
+        publication_types = raw_result.get("publicationTypes", [])
         s2_fields_of_study = raw_result.get("s2FieldsOfStudy", [])
-
-        # Extract references
         references = raw_result.get("references", [])
 
         return NormalizedPaperResult(
@@ -675,6 +708,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             tldr=tldr,
             year=year,
             fields_of_study=fields_of_study if fields_of_study else None,
+            publication_types=publication_types if publication_types else None,
             s2_fields_of_study=s2_fields_of_study if s2_fields_of_study else None,
             references=references if references else None,
         )

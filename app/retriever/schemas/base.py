@@ -162,6 +162,10 @@ class NormalizedPaperResult(BaseModel):
         default=None,
         description="Fields of study (S2 basic list)"
     )
+    publication_types: Optional[List[str]] = Field(
+        default=None,
+        description="Publication types from Semantic Scholar"
+    )
     s2_fields_of_study: Optional[List[Dict[str, str]]] = Field(
         default=None,
         description='S2 enriched fields: [{"category": str, "source": str}]'

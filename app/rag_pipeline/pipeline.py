@@ -57,6 +57,8 @@ class Pipeline:
     Uses dependency injection for better testability and shared instances.
 
     Note: Previously named RAGPipeline. Renamed to Pipeline to reflect general orchestration role.
+    
+    DEPRECATED: This class is being phased out in favor of more change in direction of orchestrating RAG workflows.
     """
 
     def __init__(
@@ -336,6 +338,7 @@ class Pipeline:
         author_id: str,
         oa_author_id: Optional[str] = None,
         limit: int = 500,
+        compute_relationships: bool = True,
     ) -> PipelineResult:
         """
         Author enrichment workflow: Fetch author papers, process them, compute career metrics.
@@ -350,6 +353,7 @@ class Pipeline:
         Args:
             author_id: Unique author identifier (S2 ID or OpenAlex ID)
             limit: Maximum papers to fetch (default: 500)
+            compute_relationships: Whether to compute collaboration/citation relationships
 
         Returns:
             PipelineResult with papers and metadata
@@ -367,16 +371,48 @@ class Pipeline:
             return PipelineResult(papers=[], author=author)
 
         processed_count = 0
+        papers_with_metadata: List[tuple[DBPaper, List[Dict[str, Any]]]] = []
         for paper in papers:
             try:
-                await self.processor.ensure_paper_record(paper)
-                processed_count += 1
+                db_paper = await self.processor.paper_service.create_paper_from_schema(
+                    paper,
+                    defer_enrichment=True,
+                )
+
+                if db_paper:
+                    processed_count += 1
+
+                    authors_payload: List[Dict[str, Any]] = []
+                    for author in paper.authors or []:
+                        if isinstance(author, dict):
+                            authors_payload.append(author)
+                        elif hasattr(author, "model_dump"):
+                            authors_payload.append(author.model_dump())
+
+                    papers_with_metadata.append((db_paper, authors_payload))
             except Exception as e:
                 logger.error(
                     f"Error ensuring paper {paper.paper_id}: {e}", exc_info=True
                 )
 
         logger.info(f"Processed {processed_count}/{len(papers)} papers successfully")
+
+        if papers_with_metadata:
+            try:
+                enrichment_stats = (
+                    await self.processor.paper_service.batch_enrich_papers_with_authors_journals(
+                        papers_with_metadata
+                    )
+                )
+                logger.info(
+                    "Batch enriched author workflow papers: "
+                    f"{enrichment_stats}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Batch enrichment failed for author {author_id}: {e}",
+                    exc_info=True,
+                )
 
         from app.domain.authors import AuthorService
 
@@ -386,29 +422,32 @@ class Pipeline:
         await author_service.compute_career_metrics(author_id)
 
         from app.domain.authors import AuthorRepository
+        from app.retriever.schemas.openalex import OAAuthorResponse
 
         author_repository = AuthorRepository(self.db_session)
-        i10_index = (
-            author.summary_stats.get("i10_index")
-            if author and author.summary_stats
-            else None
-        )
+        summary_stats = getattr(author, "summary_stats", None) if author else None
+        i10_index = summary_stats.get("i10_index") if isinstance(summary_stats, dict) else None
 
         await author_repository.update_author(
             author_id, {"i10_index": i10_index, "last_paper_indexed_at": datetime.now()}
         )
 
-        try:
-            # Compute relationships synchronously since we're already in a background worker
-            # Fire-and-forget with asyncio.create_task() causes session conflicts
-            await author_repository.compute_author_relationships(author_id)
-            logger.info(f"Computed author relationships for {author_id}")
-        except Exception as e:
-            logger.warning(f"Failed to compute author relationships: {e}", exc_info=True)
+        if compute_relationships:
+            try:
+                await author_repository.compute_author_relationships(author_id)
+                logger.info(f"Computed author relationships for {author_id}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to compute author relationships: {e}",
+                    exc_info=True,
+                )
 
         logger.info(f"Author enrichment workflow completed for {author_id}")
 
-        return PipelineResult(papers=papers, author=author)
+        return PipelineResult(
+            papers=papers,
+            author=author if isinstance(author, OAAuthorResponse) else None,
+        )
 
     async def _break_down_query(
         self,

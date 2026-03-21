@@ -4,7 +4,7 @@ Separation: API layer schemas, not for internal data transfer
 """
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from app.core.model import CamelModel
 from app.core.dtos import AuthorDTO
 from app.domain.authors.schemas import AuthorMetadata
@@ -42,10 +42,11 @@ class PaperMetadata(CamelModel):
     year: Optional[int] = None
     publication_date: Optional[datetime]
     venue: Optional[str]
-    journal: Optional[Any] = None
+    journal: Optional[SJRMetadata] = None
     conference_id: Optional[int] = None
     url: Optional[str]
     pdf_url: Optional[str]
+    external_ids: Optional[Dict[str, Any]] = None
     citation_count: int
     influential_citation_count: Optional[int]
     reference_count: Optional[int]
@@ -58,15 +59,17 @@ class PaperMetadata(CamelModel):
     topics: Optional[List[Dict[str, Any]]]
     keywords: Optional[List[Dict[str, Any]]]
     fields_of_study: Optional[List[str]] = None  # Semantic Scholar fields for filtering
+    publication_types: Optional[List[str]] = None
+    paper_tags: Optional[List[Dict[str, Any]]] = None
     
     
     relevance_score: Optional[float] = None
     ranking_scores: Optional[Dict[str, float]] = None
-    sjr_data: Optional[Dict[str, Any]] = None  # Changed from SJRMetadata to Dict for proper serialization
     
     class Config:
         from_attributes = True
         ignore_extra = True
+
     
     @classmethod
     def from_db_model(cls, db_paper) -> "PaperMetadata":
@@ -83,13 +86,6 @@ class PaperMetadata(CamelModel):
         paper_metadata.journal = None  # Clear ORM object to avoid serialization issues
         paper_metadata.authors = authors
         paper_metadata.year = year
-        
-        # Convert SJRMetadata to dict for proper serialization
-        if db_paper.journal:
-            sjr_metadata = SJRMetadata.model_validate(db_paper.journal)
-            paper_metadata.sjr_data = sjr_metadata.model_dump()
-        else:
-            paper_metadata.sjr_data = None
             
         return paper_metadata
     
@@ -108,11 +104,8 @@ class PaperMetadata(CamelModel):
         """
         from app.domain.authors.schemas import AuthorMetadata
         
-        # Extract data from either Pydantic schema or SQLAlchemy model
         paper = ranked_paper.paper
         year = paper.publication_date.year if paper.publication_date else None
-        
-        # Convert DBAuthorPaper ORM objects to dicts for validation
         authors = []
         for author_paper in paper.paper_authors:
             author_dict = {
@@ -122,7 +115,6 @@ class PaperMetadata(CamelModel):
             }
             authors.append(AuthorMetadata.model_validate(author_dict))
         
-        # Validate paper but exclude the journal ORM relationship to avoid serialization issues
         paper_metadata = cls.model_validate(paper, from_attributes=True)
         paper_metadata.journal = None  # Clear ORM object
         paper_metadata.authors = authors
@@ -131,11 +123,11 @@ class PaperMetadata(CamelModel):
         paper_metadata.ranking_scores = ranked_paper.ranking_scores
         
         # Convert SJRMetadata to dict for proper serialization
-        if not paper.journal:
-            paper_metadata.sjr_data = None
-        else:
-            sjr_metadata = SJRMetadata.model_validate(paper.journal)
-            paper_metadata.sjr_data = sjr_metadata.model_dump()
+        # if not paper.journal:
+        #     paper_metadata.sjr_data = None
+        # else:
+        #     sjr_metadata = SJRMetadata.model_validate(paper.journal)
+        #     paper_metadata.sjr_data = sjr_metadata.model_dump()
             
         return paper_metadata
 
@@ -153,7 +145,7 @@ class PaperDetailResponse(CamelModel):
     title: str
     abstract: str
     authors: List[AuthorDTO] = []
-    journal: Optional[Dict[str, Any]] = None
+    journal: Optional[SJRMetadata] = None
     publication_date: Optional[datetime] = None
     venue: Optional[str] = None
     issn: Optional[List[str]] = None
@@ -171,7 +163,9 @@ class PaperDetailResponse(CamelModel):
     tldr: Optional[str] = None  # Renamed from summary - Semantic Scholar TLDR
     year: Optional[int] = None  # Publication year from Semantic Scholar
     fields_of_study: Optional[List[str]] = None  # S2 fields for filtering
+    publication_types: Optional[List[str]] = None  # S2 publication types
     s2_fields_of_study: Optional[List[Dict[str, str]]] = None  # Detailed S2 field metadata
+    paper_tags: Optional[List[Dict[str, Any]]] = None
     
     # Citation metrics
     citation_count: int = 0
@@ -216,6 +210,42 @@ class PaperDetailResponse(CamelModel):
     class Config:
         from_attributes = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_db_paper_input(cls, value: Any) -> Any:
+        """
+        Normalize ORM input safely to avoid async lazy-load access during validation.
+
+        Pydantic `from_attributes` can trigger SQLAlchemy relationship loading when
+        accessing `journal` on `DBPaper`. In async contexts this can raise
+        MissingGreenlet if the relationship is not eagerly loaded.
+        """
+        if value is None or isinstance(value, dict):
+            return value
+
+        try:
+            from app.models.papers import DBPaper
+            from sqlalchemy import inspect as sa_inspect
+            from sqlalchemy.orm.attributes import NO_VALUE
+        except Exception:
+            return value
+
+        if not isinstance(value, DBPaper):
+            return value
+
+        state = sa_inspect(value)
+
+        data: Dict[str, Any] = {
+            attr.key: getattr(value, attr.key)
+            for attr in state.mapper.column_attrs
+        }
+
+        journal_loaded_value = state.attrs.journal.loaded_value
+        data["journal"] = None if journal_loaded_value is NO_VALUE else journal_loaded_value
+
+        return data
+
+    
 
 # ============= Citation & Reference Schemas =============
 

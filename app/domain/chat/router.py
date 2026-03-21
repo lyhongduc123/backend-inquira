@@ -2,6 +2,7 @@
 Chat router for handling chatbot interactions
 """
 import asyncio
+import time
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from typing import Optional, TYPE_CHECKING
@@ -24,6 +25,7 @@ from app.models.users import DBUser
 from app.core.responses import ApiResponse, success_response
 from app.core.exceptions import InternalServerException, NotFoundException, ForbiddenException
 from app.core.dependencies import get_container
+from app.domain.chat.redis_streams import read_task_events
 
 if TYPE_CHECKING:
     from app.core.container import ServiceContainer
@@ -208,6 +210,12 @@ async def submit_chat_message(
                 title=request.query[:100]  # Use query preview as title
             )
             conversation_id = conversation.conversation_id
+
+        request_filters = (
+            request.filters.model_dump(by_alias=True, exclude_none=True)
+            if request.filters
+            else None
+        )
         
         # Create pipeline task
         task = await container.pipeline_task_service.create_task(
@@ -215,7 +223,7 @@ async def submit_chat_message(
             conversation_id=conversation_id,
             query=request.query,
             pipeline_type=request.pipeline,
-            filters=request.filters,
+            filters=request_filters,
             client_message_id=request.client_message_id
         )
         
@@ -227,7 +235,7 @@ async def submit_chat_message(
             conversation_id=conversation_id,
             query=request.query,
             pipeline_type=request.pipeline,
-            filters=request.filters or {}
+            filters=request_filters or {}
         )
         
         logger.info(f"Chat task {task.task_id} submitted for user {current_user.id}")
@@ -289,50 +297,134 @@ async def stream_task_events(
             raise ForbiddenException("Access denied")
         
         async def event_generator():
-            """Generate SSE events from database"""
+            """Generate SSE events from Redis Streams with DB replay/fallback."""
             last_sequence = from_sequence - 1
+            redis_stream_id = "$"
+            last_emit_ts = time.monotonic()
+
+            # Replay persisted events only for resume reconnects.
+            # For fresh streams (from_sequence <= 0), go straight to live Redis to avoid bursty catch-up.
+            if from_sequence > 0:
+                while True:
+                    replay_events = await container.pipeline_event_store.get_events(
+                        task_id=task_id,
+                        from_sequence=last_sequence + 1,
+                        limit=200,
+                    )
+                    if not replay_events:
+                        break
+
+                    for event in replay_events:
+                        event_data = {
+                            "event_type": event.event_type,
+                            "sequence": event.sequence_number,
+                            **event.event_data,
+                        }
+                        async for sse_chunk in stream_event(name=event.event_type, data=event_data):
+                            yield sse_chunk
+
+                        last_sequence = event.sequence_number
+
+                        if event.event_type == "done":
+                            logger.info(f"Task {task_id} streaming completed")
+                            return
+
+                        if event.event_type == "error":
+                            return
+
             
             while True:
-                # Fetch new events
-                events = await container.pipeline_event_store.get_events(
+                redis_events = []
+                try:
+                    redis_events = await read_task_events(
+                        task_id=task_id,
+                        last_stream_id=redis_stream_id,
+                        count=5,
+                        block_ms=200,
+                    )
+                except Exception as redis_error:
+                    logger.warning(f"Redis stream read failed for task {task_id}: {redis_error}")
+
+                if redis_events:
+                    for event in redis_events:
+                        redis_stream_id = event.stream_id
+                        if event.sequence <= last_sequence:
+                            continue
+
+                        event_data = {
+                            "event_type": event.event_type,
+                            "sequence": event.sequence,
+                            **event.event_data,
+                        }
+
+                        async for sse_chunk in stream_event(name=event.event_type, data=event_data):
+                            yield sse_chunk
+                        last_emit_ts = time.monotonic()
+
+                        last_sequence = event.sequence
+
+                        if event.event_type == "done":
+                            logger.info(f"Task {task_id} streaming completed")
+                            return
+
+                        if event.event_type == "error":
+                            return
+
+                    continue
+
+                # Fallback: in case Redis delivery misses an event, reconcile with DB
+                missed_events = await container.pipeline_event_store.get_events(
                     task_id=task_id,
                     from_sequence=last_sequence + 1,
-                    limit=50
+                    limit=200,
                 )
-                
-                # Stream events
-                for event in events:
-                    event_data = {
-                        "event_type": event.event_type,
-                        "sequence": event.sequence_number,
-                        **event.event_data
-                    }
-                    async for sse_chunk in stream_event(name=event.event_type, data=event_data):
+
+                if missed_events:
+                    for event in missed_events:
+                        event_data = {
+                            "event_type": event.event_type,
+                            "sequence": event.sequence_number,
+                            **event.event_data,
+                        }
+                        async for sse_chunk in stream_event(name=event.event_type, data=event_data):
+                            yield sse_chunk
+                        last_emit_ts = time.monotonic()
+
+                        last_sequence = event.sequence_number
+
+                        if event.event_type == "done":
+                            logger.info(f"Task {task_id} streaming completed")
+                            return
+                    continue
+
+                # No events available; check final task status
+                updated_task = await container.pipeline_task_service.get_task(task_id)
+                if updated_task and updated_task.status in ("completed", "failed", "cancelled"):
+                    if updated_task.status == "completed":
+                        async for sse_chunk in stream_event(
+                            name="done",
+                            data={"status": "success", "sequence": last_sequence + 1},
+                        ):
+                            yield sse_chunk
+                    else:
+                        error_msg = updated_task.error_message or "Task failed"
+                        async for sse_chunk in stream_event(
+                            name="error",
+                            data={"message": error_msg, "sequence": last_sequence + 1},
+                        ):
+                            yield sse_chunk
+                    return
+
+                # Keep connection alive during long-running silent phases (e.g. reranker warm-up)
+                if time.monotonic() - last_emit_ts >= 3.0:
+                    async for sse_chunk in stream_event(
+                        name="ping",
+                        data={"sequence": last_sequence, "ts": int(time.time() * 1000)},
+                    ):
                         yield sse_chunk
-                    
-                    last_sequence = event.sequence_number
-                
-                # Check if task is done
-                if events and events[-1].event_type == "done":
-                    logger.info(f"Task {task_id} streaming completed")
-                    break
-                
-                # If no new events, check task status
-                if not events:
-                    updated_task = await container.pipeline_task_service.get_task(task_id)
-                    if updated_task and updated_task.status in ("completed", "failed", "cancelled"):
-                        # Task finished but no done event yet, create one
-                        if updated_task.status == "completed":
-                            async for sse_chunk in stream_event(name="done", data={"status": "success"}):
-                                yield sse_chunk
-                        else:
-                            error_msg = updated_task.error_message or "Task failed"
-                            async for sse_chunk in stream_event(name="error", data={"message": error_msg}):
-                                yield sse_chunk
-                        break
-                    
-                    # Wait before polling again
-                    await asyncio.sleep(0.5)
+                    last_emit_ts = time.monotonic()
+
+                await asyncio.sleep(0.05)
         
         return StreamingResponse(
             event_generator(),

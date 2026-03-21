@@ -16,7 +16,7 @@ Features:
 
 import asyncio
 from datetime import datetime
-from typing import AsyncGenerator, List, Optional, Dict, Any
+from typing import AsyncGenerator, List, Optional, Dict, Any, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,8 +37,6 @@ from app.rag_pipeline.schemas import (
 )
 from app.extensions.logger import create_logger
 from app.rag_pipeline.data_collector import get_data_collector
-from app.rag_pipeline.utils import deduplicate_papers_with_rrf
-from app.core.dtos import PaperDTO
 
 logger = create_logger(__name__)
 
@@ -176,39 +174,38 @@ class DatabasePipeline:
             },
         )
 
-        # Step 2: Database search with filters using all search queries
+        # Step 2: Database split retrieval with filters using all search queries
         yield RAGPipelineEvent(
             type=RAGEventType.PROCESSING,
             data={"message": "Searching in database with filters"},
         )
         
-        # Collect all paper rankings from each query
+        # Collect raw rankings from each query/modality, then do ONE global RRF
         search_queries = ctx.search_queries or [query]
         paper_rankings: List[List[tuple[DBPaper, float]]] = []
         
         for search_query in search_queries:
-            papers = await self._database_hybrid_search(
+            bm25_results, semantic_results = await self._database_split_search(
                 query=search_query,
                 limit=top_papers * 2,  # Get more for filtering
                 filters=merged_filters,
                 intent=intent,
             )
-            paper_rankings.append(papers)
-            logger.info(f"Query '{search_query[:50]}...' retrieved {len(papers)} papers")
-        
+            if bm25_results:
+                paper_rankings.append(bm25_results)
+            if semantic_results:
+                paper_rankings.append(semantic_results)
 
-        paper_rankings_dto = [
-            [PaperDTO.model_validate(paper) for paper, _ in ranking]
-            for ranking in paper_rankings
-        ]
-        deduped_papers_dto = deduplicate_papers_with_rrf(paper_rankings_dto, k=60)
-        
-        # Map back to DBPaper with RRF scores (use index as score proxy)
-        db_papers_with_scores = [
-            (next(p for ranking in paper_rankings for p, _ in ranking if p.paper_id == dto.paper_id),
-             1.0 / (i + 1)) 
-            for i, dto in enumerate(deduped_papers_dto)
-        ]
+            logger.info(
+                f"Query '{search_query[:50]}...' retrieved "
+                f"bm25={len(bm25_results)}, semantic={len(semantic_results)}"
+            )
+
+        db_papers_with_scores = self._fuse_rankings_with_rrf(
+            paper_rankings=paper_rankings,
+            k=60,
+            limit=top_papers * 2,
+        )
         
         logger.info(f"After RRF deduplication: {len(db_papers_with_scores)} unique papers")
         
@@ -223,7 +220,6 @@ class DatabasePipeline:
         ctx.papers_with_hybrid_scores = db_papers_with_scores
         logger.info(f"Database search returned {len(db_papers_with_scores)} papers")
         
-        # Record retrieved papers
         self.data_collector.record_papers(
             papers=[],
             papers_with_scores=db_papers_with_scores
@@ -275,8 +271,6 @@ class DatabasePipeline:
             
             ctx.chunks = chunks
             logger.info(f"Found {len(chunks)} total chunks ({len(chunks) - len(papers_without_chunks)} real + {len(papers_without_chunks)} abstract)")
-            
-            # Record chunks
             self.data_collector.record_chunks(chunks)
         
         if enable_reranking and ctx.chunks:
@@ -286,7 +280,6 @@ class DatabasePipeline:
             except Exception as e:
                 logger.error(f"Error reranking chunks: {e}")
         
-        # Step 5: Final paper ranking
         if enable_paper_ranking and ctx.papers_with_hybrid_scores:
             yield RAGPipelineEvent(
                 type=RAGEventType.RANKING,
@@ -316,7 +309,6 @@ class DatabasePipeline:
                 ctx.result_papers = ranked_papers[:top_papers]
                 logger.info(f"Ranked {len(ranked_papers)} papers")
                 
-                # Record ranking
                 self.data_collector.record_ranking(
                     ranked_papers=ranked_papers,
                     weights={'relevance': 0.7, 'authority': 0.3}
@@ -371,17 +363,22 @@ class DatabasePipeline:
         
         return ctx
 
-    async def _database_hybrid_search(
+    async def _database_split_search(
         self,
         query: str,
         limit: int,
         filters: Optional[Dict[str, Any]] = None,
         intent: Optional[QueryIntent] = None,
-    ) -> List[tuple[DBPaper, float]]:
+    ) -> Tuple[List[tuple[DBPaper, float]], List[tuple[DBPaper, float]]]:
         """
-        Perform hybrid BM25 + semantic search in database with filters.
+        Perform split retrieval (BM25 + semantic) without fusion.
+
+        Fusion is intentionally handled at pipeline level after collecting
+        all rankings for all decomposed queries.
         """
         try:
+            from app.processor.services.embeddings import get_embedding_service
+
             # Build filter dict for repository
             author_name = filters.get("author") if filters else None
             year_min = filters.get("year_min") if filters else None
@@ -389,24 +386,10 @@ class DatabasePipeline:
             venue = filters.get("venue") if filters else None
             min_citations = filters.get("min_citations") if filters else None
             max_citations = filters.get("max_citations") if filters else None
-            
-            # Adjust weights based on intent
-            bm25_weight = 0.4
-            semantic_weight = 0.6
-            
-            if intent == QueryIntent.FOUNDATIONAL:
-                bm25_weight = 0.6
-                semantic_weight = 0.4
-            elif intent == QueryIntent.AUTHOR_PAPERS:
-                bm25_weight = 0.3
-                semantic_weight = 0.7
-            
-            # Use PaperService from container
-            papers_with_scores = await self.container.paper_service.hybrid_search_papers_with_filters(
+
+            bm25_results = await self.repository.bm25_search_papers_with_filters(
                 query=query,
                 limit=limit,
-                bm25_weight=bm25_weight,
-                semantic_weight=semantic_weight,
                 author_name=author_name,
                 year_min=year_min,
                 year_max=year_max,
@@ -414,11 +397,53 @@ class DatabasePipeline:
                 min_citation_count=min_citations,
                 max_citation_count=max_citations,
             )
-            
-            return papers_with_scores
+
+            semantic_results: List[tuple[DBPaper, float]] = []
+            embedding_service = get_embedding_service()
+            query_embedding = await embedding_service.create_embedding(
+                query, task="search_query"
+            )
+            if query_embedding:
+                semantic_results = await self.repository.semantic_search_papers_with_filters(
+                    query_embedding=query_embedding,
+                    limit=limit,
+                    author_name=author_name,
+                    year_min=year_min,
+                    year_max=year_max,
+                    venue=venue,
+                    min_citation_count=min_citations,
+                    max_citation_count=max_citations,
+                )
+            else:
+                logger.warning(
+                    "Embedding generation failed in database split search, "
+                    "semantic branch skipped"
+                )
+
+            return bm25_results, semantic_results
         except Exception as e:
-            logger.error(f"Database hybrid search failed: {e}")
-            return []
+            logger.error(f"Database split search failed: {e}")
+            return [], []
+
+    def _fuse_rankings_with_rrf(
+        self,
+        paper_rankings: List[List[tuple[DBPaper, float]]],
+        k: int = 60,
+        limit: int = 100,
+    ) -> List[tuple[DBPaper, float]]:
+        """Fuse multiple ranked lists with Reciprocal Rank Fusion (RRF)."""
+        rrf_scores: Dict[str, float] = {}
+        paper_map: Dict[str, DBPaper] = {}
+
+        for ranking in paper_rankings:
+            for rank, (paper, _) in enumerate(ranking, start=1):
+                pid = paper.paper_id
+                rrf_scores[pid] = rrf_scores.get(pid, 0.0) + (1.0 / (k + rank))
+                if pid not in paper_map:
+                    paper_map[pid] = paper
+
+        ranked_ids = sorted(rrf_scores.keys(), key=lambda pid: rrf_scores[pid], reverse=True)[:limit]
+        return [(paper_map[pid], rrf_scores[pid]) for pid in ranked_ids]
 
     async def _chunk_search(
         self,
@@ -429,15 +454,13 @@ class DatabasePipeline:
     ) -> List[ChunkRetrieved]:
         """Search for relevant chunks in specified papers."""
         try:
-            # Adjust weights based on intent
             bm25_weight = 0.4
             semantic_weight = 0.6
             
             if intent == QueryIntent.FOUNDATIONAL:
                 bm25_weight = 0.6
                 semantic_weight = 0.4
-            
-            # Use service layer for business logic
+                
             chunks = await self.chunk_service.hybrid_search_chunks(
                 query=query,
                 paper_ids=paper_ids,
@@ -462,7 +485,6 @@ class DatabasePipeline:
     ) -> List[RankedPaper]:
         """Rank papers using comprehensive scoring."""
         try:
-            # Use the ranking service for comprehensive ranking
             weights = {
                 'relevance': 0.7,
                 'authority': 0.3,

@@ -36,7 +36,8 @@ class EnrichmentWorker:
                 pipeline = Pipeline(db_session=db)
                 result = await pipeline.run_author_enrichment_workflow(
                     author_id=author_id,
-                    limit=limit
+                    limit=limit,
+                    compute_relationships=True,
                 )
                 
                 papers_count = len(result.papers) if result.papers else 0

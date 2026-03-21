@@ -1,9 +1,6 @@
 import httpx
-import io
-import unicodedata
 import re
 from typing import Optional, Dict, Any
-from PyPDF2 import PdfReader
 from app.extensions.logger import create_logger
 from app.core.config import settings
 from app.core.dtos.paper import PaperEnrichedDTO

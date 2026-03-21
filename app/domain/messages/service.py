@@ -31,6 +31,7 @@ class MessageService:
         paper_ids: Optional[List[str]] = None,
         paper_snapshots: Optional[List[Dict[str, Any]]] = None,
         progress_events: Optional[List[Dict[str, Any]]] = None,
+        scoped_quote_refs: Optional[List[Dict[str, Any]]] = None,
         client_message_id: Optional[str] = None,
         pipeline_type: Optional[str] = None,
         completion_time_ms: Optional[int] = None,
@@ -57,6 +58,8 @@ class MessageService:
             message_metadata["paper_snapshots"] = paper_snapshots
         if progress_events:
             message_metadata["progress_events"] = progress_events
+        if scoped_quote_refs:
+            message_metadata["scoped_quote_refs"] = scoped_quote_refs
         if client_message_id:
             message_metadata["client_message_id"] = client_message_id
         
@@ -227,10 +230,12 @@ class MessageService:
         """
         paper_snapshots = None
         progress_events = None
+        scoped_quote_refs = None
         
         if message.message_metadata:
             paper_snapshots = message.message_metadata.get("paper_snapshots")
             progress_events = message.message_metadata.get("progress_events")
+            scoped_quote_refs = message.message_metadata.get("scoped_quote_refs")
         
         return MessageWithPapersResponse(
             id=message.id,
@@ -245,4 +250,5 @@ class MessageService:
             message_metadata=message.message_metadata,
             paper_snapshots=paper_snapshots,
             progress_events=progress_events,
+            scoped_quote_refs=scoped_quote_refs,
         )

@@ -63,18 +63,32 @@ def normalized_to_paper(result: NormalizedPaperResult) -> PaperEnrichedDTO:
         result_dict['has_content'] = {}
     
     paper = PaperEnrichedDTO.model_validate(result_dict)
-    locations = [result.primary_location, result.best_oa_location, result.locations]
-    for loc in locations:
-        if not loc:
+    location_candidates: List[dict] = []
+
+    if isinstance(result.primary_location, dict):
+        location_candidates.append(result.primary_location)
+
+    if isinstance(result.best_oa_location, dict):
+        location_candidates.append(result.best_oa_location)
+
+    if isinstance(result.locations, list):
+        for loc in result.locations:
+            if isinstance(loc, dict):
+                location_candidates.append(loc)
+
+    for loc in location_candidates:
+        source = loc.get("source")
+        if not isinstance(source, dict):
             continue
 
-        source = loc.get("source")
         if not paper.issn:
             issn_set = set()
-            for i in source.get("issn", []) or []:
-                norm = normalize_issn(i)
-                if norm:
-                    issn_set.add(norm)
+            issn_values = source.get("issn")
+            if isinstance(issn_values, list):
+                for i in issn_values:
+                    norm = normalize_issn(i)
+                    if norm:
+                        issn_set.add(norm)
             paper.issn = list(issn_set) if issn_set else None
 
         if not paper.issn_l:

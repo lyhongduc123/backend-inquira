@@ -26,6 +26,13 @@ class RankingService:
     institution trust, and diversity mechanisms.
     """
 
+    QUARTILE_BONUS = {
+        "Q1": 30, 
+        "Q2": 15,  
+        "Q3": 5,
+        "Q4": 0,
+    }
+
     def __init__(
         self,
         scoring_weights: Optional[ScoringWeights] = None,
@@ -41,10 +48,10 @@ class RankingService:
         self.institution_ranker = InstitutionRanker()
 
         # Lazy load cross_encoder only when needed to save memory
-        self._nli_model = None 
+        self._nli_model = None
         self._cross_encoder = None
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._cuda_failed = False  
+        self._cuda_failed = False
 
     def _get_cross_encoder(self):
         """Lazily load the cross-encoder model on first use with CUDA error handling."""
@@ -52,8 +59,10 @@ class RankingService:
             device = "cpu" if self._cuda_failed else self._device
             try:
                 logger.debug(f"Loading CrossEncoder model on {device}")
-                self._cross_encoder = CrossEncoder("BAAI/bge-reranker-base", device=device)
-                
+                self._cross_encoder = CrossEncoder(
+                    "BAAI/bge-reranker-base", device=device
+                )
+
                 # Test the model with a small batch
                 if device == "cuda":
                     try:
@@ -61,7 +70,9 @@ class RankingService:
                         logger.debug("CUDA test successful")
                     except RuntimeError as e:
                         if "CUDA" in str(e) or "CUBLAS" in str(e):
-                            logger.warning(f"CUDA test failed: {e}. Falling back to CPU")
+                            logger.warning(
+                                f"CUDA test failed: {e}. Falling back to CPU"
+                            )
                             self._cuda_failed = True
                             self._cross_encoder = None
                             # Clean up CUDA memory
@@ -70,7 +81,7 @@ class RankingService:
                                 gc.collect()
                             return self._get_cross_encoder()  # Retry with CPU
                         raise
-                        
+
             except Exception as e:
                 logger.error(f"Failed to load CrossEncoder: {e}")
                 if device == "cuda" and not self._cuda_failed:
@@ -83,13 +94,15 @@ class RankingService:
                     return self._get_cross_encoder()
                 raise
         return self._cross_encoder
-    
+
     def _get_nli_model(self):
         """Lazily load the NLI model for label classification."""
         if not hasattr(self, "_nli_model"):
             try:
                 logger.debug("Loading NLI model for label classification")
-                self._nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-xsmall", device=self._device)
+                self._nli_model = CrossEncoder(
+                    "cross-encoder/nli-deberta-v3-xsmall", device=self._device
+                )
             except Exception as e:
                 logger.error(f"Failed to load NLI model: {e}")
                 self._nli_model = None
@@ -118,23 +131,29 @@ class RankingService:
         """
         if not chunks:
             return []
-        
+
         pairs = [[query, chunk.text] for chunk in chunks]
-        
+
         try:
             scores = self._predict_with_batching(pairs, batch_size)
         except RuntimeError as e:
-            if "CUDA" in str(e) or "CUBLAS" in str(e) or "out of memory" in str(e).lower():
-                logger.warning(f"CUDA error during prediction: {e}. Retrying with smaller batch or CPU")
+            if (
+                "CUDA" in str(e)
+                or "CUBLAS" in str(e)
+                or "out of memory" in str(e).lower()
+            ):
+                logger.warning(
+                    f"CUDA error during prediction: {e}. Retrying with smaller batch or CPU"
+                )
                 # Clear CUDA cache and retry
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     gc.collect()
-                
+
                 # Force CPU fallback
                 self._cuda_failed = True
                 self._cross_encoder = None
-                
+
                 try:
                     scores = self._predict_with_batching(pairs, batch_size)
                 except Exception as inner_e:
@@ -144,22 +163,25 @@ class RankingService:
                 raise
 
         for chunk, score in zip(chunks, scores):
-            chunk.relevance_score = score
+
+            chunk.relevance_score = float(score)
         reranked_chunks = sorted(chunks, key=lambda c: c.relevance_score, reverse=True)
 
         return reranked_chunks
-    
-    def _predict_with_batching(self, pairs: List[List[str]], batch_size: int) -> List[float]:
+
+    def _predict_with_batching(
+        self, pairs: List[List[str]], batch_size: int
+    ) -> List[float]:
         """Process pairs in batches to avoid memory issues."""
         if len(pairs) <= batch_size:
-            return self.cross_encoder.predict(pairs) # type: ignore
-        
+            return self.cross_encoder.predict(pairs)  # type: ignore
+
         all_scores = []
         for i in range(0, len(pairs), batch_size):
-            batch = pairs[i:i + batch_size]
+            batch = pairs[i : i + batch_size]
             batch_scores = self.cross_encoder.predict(batch)
             all_scores.extend(batch_scores)
-        
+
         return all_scores
 
     def rank_papers(
@@ -181,27 +203,26 @@ class RankingService:
         paper_text_relevance = defaultdict(float)
         for chunk in chunks:
             paper_text_relevance[str(chunk.paper_id)] = max(
-                paper_text_relevance[str(chunk.paper_id)], 
-                chunk.relevance_score or 0.0
+                paper_text_relevance[str(chunk.paper_id)], chunk.relevance_score or 0.0
             )
 
         ranked_results = []
         for paper in papers:
             chunk_relevance = paper_text_relevance.get(str(paper.paper_id), 0) * 100
-            
+
             citation_score = min(70, math.log10((paper.citation_count or 0) + 1) * 20)
-            venue_bonus = 30 if paper.journal and paper.journal.sjr_best_quartile == "Q1" else 0
+            venue_bonus = self.QUARTILE_BONUS.get(paper.journal.sjr_best_quartile, 0) if paper.journal else 0
             authority = citation_score + venue_bonus
-        
+
             adjusted_authority = authority
             if chunk_relevance < 30:
                 adjusted_authority = authority * (chunk_relevance / 30)
-                
+
             final_score = (
-                chunk_relevance * weights['relevance'] +
-                adjusted_authority * weights['authority']
+                chunk_relevance * weights["relevance"]
+                + adjusted_authority * weights["authority"]
             )
-            
+
             ranked_paper = RankedPaper(
                 id=paper.id,
                 paper_id=paper.paper_id,
@@ -211,10 +232,12 @@ class RankingService:
                     "chunk_relevance": chunk_relevance,
                     "authority": authority,
                     "adjusted_authority": adjusted_authority,
-                    "final_score": final_score
+                    "final_score": final_score,
                 },
             )
             ranked_results.append(ranked_paper)
 
-        sorted_results = sorted(ranked_results, key=lambda r: r.relevance_score, reverse=True)
+        sorted_results = sorted(
+            ranked_results, key=lambda r: r.relevance_score, reverse=True
+        )
         return sorted_results

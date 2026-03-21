@@ -33,6 +33,8 @@ class AuthorMetadata(AuthorBase):
     """Lightweight author metadata schema"""
     author_id: str
     h_index: Optional[int] = None
+    citation_count: Optional[int] = None
+    paper_count: Optional[int] = None
     verified: bool = False
 
 class Author(AuthorCreate):
@@ -93,6 +95,8 @@ class AuthorResponse(CamelModel):
     is_corresponding_author_frequently: Optional[bool] = None
     average_author_position: Optional[float] = None
     self_citation_rate: Optional[float] = None
+    is_processed: bool = False
+    is_conflict: bool = False
     homepage_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -143,7 +147,6 @@ class AuthorPaperSummary(CamelModel):
     is_retracted: bool
     topics: Optional[List[Dict[str, Any]]]
     keywords: Optional[List[Dict[str, Any]]]
-    sjr_data: Optional[SJRMetadata] = None
     
     class Config:
         from_attributes = True
@@ -154,10 +157,10 @@ class AuthorPaperSummary(CamelModel):
 
 class QuartileBreakdown(CamelModel):
     """Paper count by journal quartile"""
-    Q1: int = 0
-    Q2: int = 0
-    Q3: int = 0
-    Q4: int = 0
+    q1: int = 0
+    q2: int = 0
+    q3: int = 0
+    q4: int = 0
     unknown: int = 0
 
 
@@ -168,6 +171,7 @@ class CoAuthor(CamelModel):
     h_index: Optional[int] = None
     total_citations: Optional[int] = None
     total_papers: Optional[int] = None
+    is_enriched: bool = False
     collaboration_count: int
 
 
@@ -178,6 +182,7 @@ class CitingAuthor(CamelModel):
     h_index: Optional[int] = None
     total_citations: Optional[int] = None
     total_papers: Optional[int] = None
+    is_enriched: bool = False
     citation_count: int
 
 
@@ -188,6 +193,7 @@ class ReferencedAuthor(CamelModel):
     h_index: Optional[int] = None
     total_citations: Optional[int] = None
     total_papers: Optional[int] = None
+    is_enriched: bool = False
     reference_count: int
 
 
@@ -213,6 +219,14 @@ class ReferencedAuthorsListResponse(CamelModel):
     offset: int
     limit: int
     referenced_authors: List[ReferencedAuthor]
+
+
+class AuthorPublicationsListResponse(CamelModel):
+    """Paginated publications for an author."""
+    total: int
+    offset: int
+    limit: int
+    items: List[AuthorPaperSummary]
 
 
 class AuthorDetailResponse(CamelModel):
@@ -253,6 +267,8 @@ class AuthorDetailResponse(CamelModel):
     
     # Red flags
     self_citation_rate: Optional[float] = None
+    is_processed: bool = False
+    is_conflict: bool = False
     
     homepage_url: Optional[str] = None
     url: Optional[str] = None  
@@ -286,6 +302,10 @@ class AuthorDetailWithPapersResponse(AuthorDetailResponse):
     topics: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="List of topics associated with the author"
+    )
+    enrichment_status: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Current enrichment status (needs_enrichment/enriching/completed/failed)"
     )
     
     # Computed stats

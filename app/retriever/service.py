@@ -331,7 +331,7 @@ class RetrievalService:
             if not external_ids:
                 continue
             elif "DOI" in external_ids:
-                doi = external_ids["DOI"]
+                doi = external_ids["DOI"].strip().lower() # type: ignore
                 dois.append(doi)
                 doi_to_semantic[doi] = result
         openalex_data = {}
@@ -344,7 +344,7 @@ class RetrievalService:
             for oa_result in openalex_id_results:
                 doi = oa_result.get("doi")
                 if isinstance(doi, str):
-                    doi = doi.removeprefix("https://doi.org/")
+                    doi = doi.removeprefix("https://doi.org/").strip().lower()
                     openalex_data[doi] = oa_result
 
         logger.debug(
@@ -384,7 +384,6 @@ class RetrievalService:
         Returns:
             Merged NormalizedResult with unified author data
         """
-        logger.debug(openalex_result)
         merged_model = semantic_result.model_copy()
 
         merged_model.fwci = openalex_result.fwci
@@ -396,6 +395,10 @@ class RetrievalService:
         merged_model.concepts = openalex_result.concepts
         merged_model.mesh_terms = openalex_result.mesh_terms
         merged_model.has_content = openalex_result.has_content
+        merged_model.biblio = openalex_result.biblio
+        merged_model.primary_location = openalex_result.primary_location
+        merged_model.locations = openalex_result.locations
+        merged_model.best_oa_location = openalex_result.best_oa_location
 
         # Author collaboration metadata
         merged_model.corresponding_author_ids = openalex_result.corresponding_author_ids

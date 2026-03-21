@@ -37,6 +37,31 @@ class JournalService:
         normalized = re.sub(r"\s+", " ", normalized)
         return normalized.strip()
 
+    @staticmethod
+    def _build_issn_variants(issn: str) -> List[str]:
+        """Build normalized ISSN variants for matching."""
+        if not issn:
+            return []
+
+        value = str(issn).strip()
+        if not value:
+            return []
+
+        clean = value.replace("-", "")
+        variants: List[str] = [value, clean]
+
+        if "-" not in value and len(clean) == 8:
+            variants.append(f"{clean[:4]}-{clean[4:]}")
+
+        # Preserve order while removing duplicates
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for item in variants:
+            if item and item not in seen:
+                seen.add(item)
+                deduped.append(item)
+        return deduped
+
     async def lookup_by_issn(
         self, issn: str, year: Optional[int] = None
     ) -> Optional[DBJournal]:
@@ -53,14 +78,7 @@ class JournalService:
         if not issn:
             return None
 
-        # Remove hyphens from ISSN for matching
-        issn_clean = issn.replace("-", "")
-        
-        # Try both formats (with and without hyphen)
-        issn_variants = [issn, issn_clean]
-        if "-" not in issn and len(issn) == 8:
-            # Add hyphenated version if input was without hyphen
-            issn_variants.append(f"{issn[:4]}-{issn[4:]}")
+        issn_variants = self._build_issn_variants(issn)
 
         # Use array containment operator for efficient GIN index lookup
         query = select(DBJournal).where(
@@ -241,16 +259,33 @@ class JournalService:
         
         # Batch lookup by ISSN-L (most reliable)
         if issn_l_lookups:
-            issn_l_values = [x[1] for x in issn_l_lookups]
-            query = select(DBJournal).where(DBJournal.issn.in_(issn_l_values))
+            issn_l_values: List[str] = []
+            for _, issn_l, _ in issn_l_lookups:
+                issn_l_values.extend(self._build_issn_variants(issn_l))
+
+            # IMPORTANT: journals.issn is VARCHAR[] so use overlap, not IN (= scalar)
+            query = (
+                select(DBJournal)
+                .where(DBJournal.issn.overlap(issn_l_values))
+                .order_by(DBJournal.data_year.desc())
+            )
             result = await self.db.execute(query)
             journals = result.scalars().all()
             
-            # Map by ISSN-L
-            journal_map = {j.issn: j for j in journals if j.issn}
+            # Map each ISSN variant to best (newest) journal.
+            journal_map: Dict[str, DBJournal] = {}
+            for journal in journals:
+                for journal_issn in (journal.issn or []):
+                    for variant in self._build_issn_variants(journal_issn):
+                        if variant not in journal_map:
+                            journal_map[variant] = journal
             
             for paper_id, issn_l, year in issn_l_lookups:
-                journal = journal_map.get(issn_l)
+                journal = None
+                for variant in self._build_issn_variants(issn_l):
+                    journal = journal_map.get(variant)
+                    if journal:
+                        break
                 results[paper_id] = journal
                 if journal:
                     logger.debug(f"Batch matched {paper_id} by ISSN-L: {journal.title}")

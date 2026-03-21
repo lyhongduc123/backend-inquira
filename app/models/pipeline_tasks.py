@@ -25,7 +25,7 @@ class PipelinePhase:
     INIT = "init"
     SEARCH = "search"
     RANKING = "ranking"
-    LLM_GENERATION = "llm"
+    LLM_GENERATION = "generation"
     VALIDATION = "validation"
     DONE = "done"
 

@@ -22,6 +22,7 @@ from app.core.dependencies import get_container
 from app.core.container import ServiceContainer
 from pydantic import BaseModel, Field
 from app.extensions.logger import create_logger
+from app.workers.task_queue import get_task_queue
 
 router = APIRouter()
 logger = create_logger(__name__)
@@ -97,6 +98,71 @@ async def run_repository_task(
         await db.close()
 
 
+async def run_embedding_backfill_task() -> dict:
+    """Queue task wrapper for embedding backfill phase."""
+    db = async_session()
+    try:
+        container = ServiceContainer(db)
+        return await container.preprocessing_phase_service.run_embedding_backfill()
+    finally:
+        await db.close()
+
+
+async def run_citation_linking_task(limit: int, references_limit: int) -> dict:
+    """Queue task wrapper for citation linking phase."""
+    db = async_session()
+    try:
+        container = ServiceContainer(db)
+        return await container.preprocessing_phase_service.run_citation_linking(
+            limit=limit,
+            references_limit=references_limit,
+        )
+    finally:
+        await db.close()
+
+
+async def run_author_metrics_task(
+    only_unprocessed: bool,
+    conflict_threshold_percent: float,
+    batch_size: int,
+) -> dict:
+    """Queue task wrapper for author metric computation phase."""
+    db = async_session()
+    try:
+        container = ServiceContainer(db)
+        return await container.preprocessing_phase_service.run_author_metrics(
+            only_unprocessed=only_unprocessed,
+            conflict_threshold_percent=conflict_threshold_percent,
+            batch_size=batch_size,
+        )
+    finally:
+        await db.close()
+
+
+async def run_paper_tagging_task(
+    limit: int,
+    only_missing_tags: bool,
+    candidate_labels: Optional[List[str]],
+    category: str,
+    min_confidence: float,
+    max_tags_per_paper: int,
+) -> dict:
+    """Queue task wrapper for paper tag computation phase."""
+    db = async_session()
+    try:
+        container = ServiceContainer(db)
+        return await container.preprocessing_phase_service.run_paper_tagging(
+            limit=limit,
+            only_missing_tags=only_missing_tags,
+            candidate_labels=candidate_labels,
+            category=category,
+            min_confidence=min_confidence,
+            max_tags_per_paper=max_tags_per_paper,
+        )
+    finally:
+        await db.close()
+
+
 class StartBulkSearchRequest(BaseModel):
     """Request to start bulk search preprocessing job"""
     job_id: str = Field(..., description="Unique job identifier (e.g., 'ml-papers-2026')")
@@ -134,6 +200,41 @@ class PreprocessingStatusResponse(BaseModel):
     created_at: Optional[str]
     updated_at: Optional[str]
     completed_at: Optional[str]
+
+
+class PreprocessingTaskResponse(BaseModel):
+    """Response for queued preprocessing phase task submission."""
+
+    task_id: str
+    task_type: str
+    status: str
+    message: str
+
+
+class CitationLinkingRequest(BaseModel):
+    """Request to trigger citation linking phase."""
+
+    limit: int = Field(default=200, ge=1, le=2000)
+    references_limit: int = Field(default=200, ge=1, le=1000)
+
+
+class AuthorMetricsRequest(BaseModel):
+    """Request to trigger author metric phase."""
+
+    only_unprocessed: bool = Field(default=False)
+    conflict_threshold_percent: float = Field(default=50.0, ge=0.0, le=100.0)
+    batch_size: int = Field(default=200, ge=1, le=2000)
+
+
+class PaperTaggingRequest(BaseModel):
+    """Request to trigger paper tagging phase."""
+
+    limit: int = Field(default=200, ge=1, le=5000)
+    only_missing_tags: bool = Field(default=True)
+    candidate_labels: Optional[List[str]] = Field(default=None)
+    category: str = Field(default="topic")
+    min_confidence: float = Field(default=50.0, ge=0.0, le=100.0)
+    max_tags_per_paper: int = Field(default=3, ge=1, le=20)
 
 
 @router.post("/preprocess/bulk-search/start", response_model=ApiResponse[PreprocessingStatusResponse])
@@ -398,4 +499,101 @@ async def pause_preprocessing(
     return success_response(
         data=response_data
     )
+
+
+@router.post("/phases/embeddings/start", response_model=ApiResponse[PreprocessingTaskResponse])
+async def start_embedding_backfill_phase() -> ApiResponse[PreprocessingTaskResponse]:
+    """Queue embedding backfill as an independent preprocessing phase."""
+    task_queue = get_task_queue()
+    task_id = await task_queue.submit(
+        "preprocess_embeddings",
+        run_embedding_backfill_task,
+    )
+    return success_response(
+        data=PreprocessingTaskResponse(
+            task_id=task_id,
+            task_type="preprocess_embeddings",
+            status="queued",
+            message="Embedding backfill phase queued",
+        )
+    )
+
+
+@router.post("/phases/citations/start", response_model=ApiResponse[PreprocessingTaskResponse])
+async def start_citation_linking_phase(
+    request: CitationLinkingRequest,
+) -> ApiResponse[PreprocessingTaskResponse]:
+    """Queue citation/reference linking as an independent preprocessing phase."""
+    task_queue = get_task_queue()
+    task_id = await task_queue.submit(
+        "preprocess_citations",
+        run_citation_linking_task,
+        limit=request.limit,
+        references_limit=request.references_limit,
+    )
+    return success_response(
+        data=PreprocessingTaskResponse(
+            task_id=task_id,
+            task_type="preprocess_citations",
+            status="queued",
+            message="Citation linking phase queued",
+        )
+    )
+
+
+@router.post("/phases/authors/start", response_model=ApiResponse[PreprocessingTaskResponse])
+async def start_author_metrics_phase(
+    request: AuthorMetricsRequest,
+) -> ApiResponse[PreprocessingTaskResponse]:
+    """Queue author metrics phase."""
+    task_queue = get_task_queue()
+    task_id = await task_queue.submit(
+        "preprocess_author_metrics",
+        run_author_metrics_task,
+        only_unprocessed=request.only_unprocessed,
+        conflict_threshold_percent=request.conflict_threshold_percent,
+        batch_size=request.batch_size,
+    )
+    return success_response(
+        data=PreprocessingTaskResponse(
+            task_id=task_id,
+            task_type="preprocess_author_metrics",
+            status="queued",
+            message="Author metrics phase queued",
+        )
+    )
+
+
+@router.post("/phases/tags/start", response_model=ApiResponse[PreprocessingTaskResponse])
+async def start_paper_tagging_phase(
+    request: PaperTaggingRequest,
+) -> ApiResponse[PreprocessingTaskResponse]:
+    """Queue paper tag computation phase."""
+    task_queue = get_task_queue()
+    task_id = await task_queue.submit(
+        "preprocess_paper_tags",
+        run_paper_tagging_task,
+        limit=request.limit,
+        only_missing_tags=request.only_missing_tags,
+        candidate_labels=request.candidate_labels,
+        category=request.category,
+        min_confidence=request.min_confidence,
+        max_tags_per_paper=request.max_tags_per_paper,
+    )
+    return success_response(
+        data=PreprocessingTaskResponse(
+            task_id=task_id,
+            task_type="preprocess_paper_tags",
+            status="queued",
+            message="Paper tagging phase queued",
+        )
+    )
+
+
+@router.get("/phases/tasks/{task_id}", response_model=ApiResponse[dict])
+async def get_preprocessing_phase_task_status(task_id: str) -> ApiResponse[dict]:
+    """Get status of a queued preprocessing phase task."""
+    task_queue = get_task_queue()
+    status = await task_queue.get_status(task_id)
+    return success_response(data=status or {"task_id": task_id, "status": "not_found"})
 

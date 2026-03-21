@@ -45,6 +45,7 @@ class MessageWithPapersResponse(MessageResponse):
     """Response model for message with linked papers"""
     paper_snapshots: Optional[List[Dict[str, Any]]] = None
     progress_events: Optional[List[Dict[str, Any]]] = None
+    scoped_quote_refs: Optional[List[Dict[str, Any]]] = None
 
 
 class MessageListResponse(CamelModel):

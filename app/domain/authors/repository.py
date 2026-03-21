@@ -5,7 +5,7 @@ Handles CRUD operations for authors and author-paper relationships.
 
 from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update, delete
 from sqlalchemy.orm import selectinload, joinedload
 from app.models.authors import DBAuthor, DBAuthorPaper, DBAuthorInstitution
 from app.models.papers import DBPaper
@@ -36,6 +36,76 @@ class AuthorRepository:
             .options(selectinload(DBAuthor.author_institutions).joinedload(DBAuthorInstitution.institution))
         )
         return result.scalar_one_or_none()
+
+    async def get_author_by_openalex_id(self, openalex_id: str) -> Optional[DBAuthor]:
+        """Get author by OpenAlex ID."""
+        result = await self.db.execute(
+            select(DBAuthor).where(DBAuthor.openalex_id == openalex_id)
+            .options(selectinload(DBAuthor.author_institutions).joinedload(DBAuthorInstitution.institution))
+        )
+        return result.scalar_one_or_none()
+    
+    async def has_openalex_conflicts(self, openalex_id: str) -> bool:
+        """Check whether more than one author exists with the same OpenAlex ID."""
+        if not openalex_id:
+            return False
+
+        count = await self.db.scalar(
+            select(func.count()).select_from(DBAuthor).where(DBAuthor.openalex_id == openalex_id)
+        )
+        return int(count or 0) > 1
+    
+    async def mark_openalex_conflicts(self, openalex_id: str) -> int:
+        """
+        Mark all authors with the same OpenAlex ID as conflict.
+
+        Returns:
+            Number of affected rows.
+        """
+        if not openalex_id:
+            return 0
+
+        await self.db.execute(
+            update(DBAuthor)
+            .where(DBAuthor.openalex_id == openalex_id)
+            .values(is_conflict=True)
+        )
+        await self.db.commit()
+        count = await self.db.scalar(
+            select(func.count()).select_from(DBAuthor).where(DBAuthor.openalex_id == openalex_id)
+        )
+        return int(count or 0)
+
+    async def mark_orcid_conflicts(self, orcid: str) -> int:
+        """
+        Mark all authors with the same ORCID as conflict.
+
+        Returns:
+            Number of affected rows.
+        """
+        if not orcid:
+            return 0
+
+        await self.db.execute(
+            update(DBAuthor)
+            .where(DBAuthor.orcid == orcid)
+            .values(is_conflict=True)
+        )
+        await self.db.commit()
+        count = await self.db.scalar(
+            select(func.count()).select_from(DBAuthor).where(DBAuthor.orcid == orcid)
+        )
+        return int(count or 0)
+
+    async def has_orcid_duplicates(self, orcid: str) -> bool:
+        """Check whether more than one author exists with the same ORCID."""
+        if not orcid:
+            return False
+
+        count = await self.db.scalar(
+            select(func.count()).select_from(DBAuthor).where(DBAuthor.orcid == orcid)
+        )
+        return int(count or 0) > 1
 
     async def create_author(self, author_data: dict) -> DBAuthor:
         """
@@ -99,11 +169,29 @@ class AuthorRepository:
             raise ValueError("author_id is required for upsert")
 
         existing = await self.get_author(author_id)
-        if existing:
-            # Update only if new data has more information
-            return await self.update_author(author_id, author_data) or existing
 
-        return await self.create_author(author_data)
+        if existing:
+            for key, value in author_data.items():
+                if hasattr(existing, key) and value is not None:
+                    setattr(existing, key, value)
+
+            await self.db.commit()
+            await self.db.refresh(existing)
+
+            # If this update creates/maintains ORCID duplication, mark conflicts.
+            existing_orcid = getattr(existing, "orcid", None)
+            if existing_orcid and await self.has_orcid_duplicates(existing_orcid):
+                await self.mark_orcid_conflicts(existing_orcid)
+
+            return existing
+
+        created = await self.create_author(author_data)
+
+        created_orcid = author_data.get("orcid")
+        if created_orcid and await self.has_orcid_duplicates(created_orcid):
+            await self.mark_orcid_conflicts(created_orcid)
+
+        return created
 
     async def create_author_paper_link(
         self,
@@ -258,6 +346,62 @@ class AuthorRepository:
         logger.debug(f"Found {len(papers)} papers for author {author_id}")
         return list(papers)
 
+    async def get_author_papers_with_metadata_paginated(
+        self,
+        author_id: str,
+        limit: int = 20,
+        offset: int = 0,
+        sort_by: str = "year",
+        sort_order: str = "desc",
+    ) -> tuple[List[DBPaper], int]:
+        """
+        Get paginated papers for an author with sorting.
+
+        Args:
+            author_id: Author identifier
+            limit: Page size
+            offset: Pagination offset
+            sort_by: "year" or "citation"
+            sort_order: "asc" or "desc"
+
+        Returns:
+            Tuple of (papers, total)
+        """
+        author = await self.get_author(author_id)
+        if not author:
+            return [], 0
+
+        base_query = (
+            select(DBPaper)
+            .join(DBAuthorPaper, DBPaper.id == DBAuthorPaper.paper_id)
+            .where(DBAuthorPaper.author_id == author.id)
+            .options(
+                joinedload(DBPaper.journal),
+                selectinload(DBPaper.paper_authors).selectinload(DBAuthorPaper.author),
+            )
+        )
+
+        count_stmt = select(func.count()).select_from(base_query.subquery())
+        total = int(await self.db.scalar(count_stmt) or 0)
+
+        sort_key = (sort_by or "year").lower()
+        sort_dir = (sort_order or "desc").lower()
+        descending = sort_dir != "asc"
+
+        if sort_key == "citation":
+            order_col = DBPaper.citation_count
+        else:
+            order_col = DBPaper.publication_date
+
+        ordered_query = base_query.order_by(
+            order_col.desc().nulls_last() if descending else order_col.asc().nulls_first(),
+            DBPaper.created_at.desc(),
+        )
+
+        result = await self.db.execute(ordered_query.offset(offset).limit(limit))
+        papers = list(result.unique().scalars().all())
+        return papers, total
+
     async def get_author_paper_links(self, author_id: str) -> List[DBAuthorPaper]:
         """
         Get all author-paper relationship records for an author.
@@ -358,6 +502,7 @@ class AuthorRepository:
                 DBAuthor.h_index,
                 DBAuthor.total_citations,
                 DBAuthor.total_papers,
+                DBAuthor.last_paper_indexed_at.isnot(None).label("is_enriched"),
                 func.count(DBAuthorPaper.paper_id).label("collaboration_count"),
             )
             .select_from(DBAuthorPaper)
@@ -373,6 +518,7 @@ class AuthorRepository:
                 DBAuthor.h_index,
                 DBAuthor.total_citations,
                 DBAuthor.total_papers,
+                DBAuthor.last_paper_indexed_at,
             )
             .order_by(func.count(DBAuthorPaper.paper_id).desc())
             .offset(offset)
@@ -389,7 +535,8 @@ class AuthorRepository:
                 "h_index": row[3],
                 "total_citations": row[4],
                 "total_papers": row[5],
-                "collaboration_count": row[6],
+                "is_enriched": bool(row[6]),
+                "collaboration_count": row[7],
             }
             for row in rows
         ]
@@ -439,6 +586,7 @@ class AuthorRepository:
                 DBAuthor.h_index,
                 DBAuthor.total_citations,
                 DBAuthor.total_papers,
+                DBAuthor.last_paper_indexed_at.isnot(None).label("is_enriched"),
                 DBAuthorRelationship.relationship_count.label("citation_count")
             )
             .select_from(DBAuthorRelationship)
@@ -462,7 +610,8 @@ class AuthorRepository:
                 "h_index": row[2],
                 "total_citations": row[3],
                 "total_papers": row[4],
-                "citation_count": row[5]
+                "is_enriched": bool(row[5]),
+                "citation_count": row[6]
             }
             for row in rows
         ]
@@ -512,6 +661,7 @@ class AuthorRepository:
                 DBAuthor.h_index,
                 DBAuthor.total_citations,
                 DBAuthor.total_papers,
+                DBAuthor.last_paper_indexed_at.isnot(None).label("is_enriched"),
                 DBAuthorRelationship.relationship_count.label("reference_count")
             )
             .select_from(DBAuthorRelationship)
@@ -535,7 +685,8 @@ class AuthorRepository:
                 "h_index": row[2],
                 "total_citations": row[3],
                 "total_papers": row[4],
-                "reference_count": row[5]
+                "is_enriched": bool(row[5]),
+                "reference_count": row[6]
             }
             for row in rows
         ]
@@ -563,14 +714,24 @@ class AuthorRepository:
         
         # Delete existing relationships for this author to recompute
         await self.db.execute(
-            DBAuthorRelationship.__table__.delete().where(
+            delete(DBAuthorRelationship).where(
                 DBAuthorRelationship.author_id == author.id
             )
         )
         
         co_authors = await self.get_co_authors(author_id, limit=10000)
+        co_author_ids = [str(item.get("author_id", "")) for item in co_authors if item.get("author_id")]
+
+        related_authors_by_id: Dict[str, DBAuthor] = {}
+        if co_author_ids:
+            related_result = await self.db.execute(
+                select(DBAuthor).where(DBAuthor.author_id.in_(co_author_ids))
+            )
+            related_authors = related_result.scalars().all()
+            related_authors_by_id = {str(item.author_id): item for item in related_authors}
+
         for co_author in co_authors:
-            related_author = await self.get_author(co_author["author_id"])
+            related_author = related_authors_by_id.get(str(co_author.get("author_id", "")))
             if related_author:
                 relationship = DBAuthorRelationship(
                     author_id=author.id,

@@ -374,6 +374,42 @@ NOTE: Consider the conversation context when decomposing the query. If the quest
             skip_title_abstract_filter=skip_title_filter,
             filters=filters_dict if filters_dict else None,
         )
+        
+    # async def condensed_decompose_user_query(
+    #     self,
+    #     user_question: str,
+    #     conversation_history: Optional[List[Dict[str, str]]] = None,
+    # ) -> QuestionBreakdownResponse:
+    #     """
+    #     Condensed version of query decomposition that returns a single clarified query.
+    #     Used for scoped retrieval where we want to keep the original question but just clarify it.
+
+    #     Args:
+    #         user_question: The user's original question
+    #         conversation_history: Optional conversation history for context
+    #     Returns:
+    #         QuestionBreakdownResponse with clarified question and original question as the only search query
+    #     """
+        
+    #     breakdown = await self.decompose_user_query_v2(
+    #         user_question=user_question,
+    #         conversation_history=conversation_history,
+    #     )
+
+    #     return QuestionBreakdownResponse(
+    #         original_question=user_question,
+    #         clarified_question=breakdown.clarified_question or user_question,
+    #         search_queries=[user_question],  # Keep original question as the search query for scoped retrieval
+    #         num_queries=1,
+    #         complexity="simple",
+    #         reasoning_content=breakdown.reasoning_content,
+    #         model_used=breakdown.model_used,
+    #         intent=breakdown.intent,
+    #         intent_confidence=breakdown.intent_confidence,
+    #         skip_ranking=breakdown.skip_ranking,
+    #         skip_title_abstract_filter=breakdown.skip_title_abstract_filter,
+    #         filters=breakdown.filters,
+    #     )
 
     def suggest_related_topics(
         self,
@@ -557,6 +593,7 @@ Summary:"""
         self,
         query: str,
         context: Union[str, List[Dict[str, Any]]],
+        prompt_name: str = "generate_answer",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **llm_params,
@@ -633,7 +670,7 @@ Summary:"""
         print(f"[DEBUG] Starting to stream completion...")
         chunk_count = 0
         messages = PromptBuilder.build(
-            prompt_name="generate_answer",
+            prompt_name=prompt_name,
             user_input=prompt,
             additional_content=None,
             dynamic_instruction=None,

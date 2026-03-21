@@ -1,7 +1,7 @@
 """
 Router for Author management API
 """
-from typing import Optional
+from typing import Optional, Dict
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,8 @@ from .schemas import (
     AuthorCollaborationListResponse,
     CitingAuthorsListResponse,
     ReferencedAuthorsListResponse,
+    AuthorPublicationsListResponse,
+    AuthorPaperSummary,
     CitingAuthor,
     ReferencedAuthor
 )
@@ -33,6 +35,9 @@ from app.extensions.logger import create_logger
 logger = create_logger(__name__)
 
 router = APIRouter()
+
+# In-memory author enrichment task tracking (same lifecycle as task queue)
+AUTHOR_ENRICHMENT_TASKS: Dict[str, str] = {}
 
 @router.get("", response_model=AuthorListResponse)
 async def list_authors(
@@ -163,6 +168,35 @@ async def get_author_details(
     
     author = result["author"]
     enrichment_status = result["enrichment_status"]
+
+    # If there is an active tracked task for this author, surface live status.
+    existing_task_id = AUTHOR_ENRICHMENT_TASKS.get(author_id)
+    if existing_task_id:
+        task_status = await get_task_queue().get_status(existing_task_id)
+        if not task_status:
+            AUTHOR_ENRICHMENT_TASKS.pop(author_id, None)
+        else:
+            status_value = task_status.get("status")
+            if status_value in ("pending", "running"):
+                enrichment_status = {
+                    "status": "enriching",
+                    "task_id": existing_task_id,
+                    "message": "Author data is being updated in background."
+                }
+            elif status_value == "completed":
+                AUTHOR_ENRICHMENT_TASKS.pop(author_id, None)
+                enrichment_status = {
+                    "status": "completed",
+                    "task_id": existing_task_id,
+                    "message": "Author enrichment completed."
+                }
+            elif status_value == "failed":
+                AUTHOR_ENRICHMENT_TASKS.pop(author_id, None)
+                enrichment_status = {
+                    "status": "failed",
+                    "task_id": existing_task_id,
+                    "message": task_status.get("error") or "Author enrichment failed."
+                }
     
     # Handle enrichment at router level (to avoid circular deps in service)
     if enrichment_status and enrichment_status.get("status") == "needs_enrichment" and auto_enrich:
@@ -171,8 +205,9 @@ async def get_author_details(
             "author_enrichment",
             EnrichmentWorker.enrich_author_background,
             author_id=author_id,
-            limit=500
+            limit=100
         )
+        AUTHOR_ENRICHMENT_TASKS[author_id] = task_id
         
         enrichment_status = {
             "status": "enriching",
@@ -202,8 +237,8 @@ async def get_author_details(
 @router.get("/{author_id}/collaborations", response_model=AuthorCollaborationListResponse)
 async def get_author_collaborations(
     author_id: str,
-    offset: int = Query(0, ge=0, description="Offset for pagination"),
-    limit: int = Query(50, ge=1, le=100, description="Maximum number of collaborators to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    limit: int = Query(10, ge=1, le=100, description="Items to return"),
     container: ServiceContainer = Depends(get_container)
 ):
     """
@@ -214,15 +249,10 @@ async def get_author_collaborations(
     if not author:
         raise HTTPException(status_code=404, detail="Author not found")
     
-    # Get total count first
-    all_co_authors = await container.author_repository.get_co_authors(
-        author_id, limit=10000, offset=0
-    )
-    total = len(all_co_authors)
-    
-    # Get paginated results
-    co_author_data = await container.author_repository.get_co_authors(
-        author_id, limit=limit, offset=offset
+    co_author_data, total = await container.author_service.get_co_authors_paginated(
+        author_id=author_id,
+        offset=offset,
+        limit=limit,
     )
     co_authors = [CoAuthor(**ca) for ca in co_author_data]
     
@@ -237,8 +267,8 @@ async def get_author_collaborations(
 @router.get("/{author_id}/citing", response_model=CitingAuthorsListResponse)
 async def get_authors_citing_author(
     author_id: str,
-    offset: int = Query(0, ge=0, description="Offset for pagination"),
-    limit: int = Query(50, ge=1, le=100, description="Maximum number of citing authors to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    limit: int = Query(10, ge=1, le=100, description="Items to return"),
     container: ServiceContainer = Depends(get_container)
 ):
     """
@@ -252,8 +282,10 @@ async def get_authors_citing_author(
     if not author:
         raise HTTPException(status_code=404, detail="Author not found")
     
-    citing_author_data, total = await container.author_repository.get_citing_authors(
-        author_id, limit=limit, offset=offset
+    citing_author_data, total = await container.author_service.get_citing_authors(
+        author_id=author_id,
+        offset=offset,
+        limit=limit,
     )
     
     # If no data and author was recently enriched, trigger computation
@@ -264,7 +296,7 @@ async def get_authors_citing_author(
         )
     
     citing_authors = [CitingAuthor(**ca) for ca in citing_author_data]
-    
+
     return CitingAuthorsListResponse(
         total=total,
         offset=offset,
@@ -276,8 +308,8 @@ async def get_authors_citing_author(
 @router.get("/{author_id}/referenced", response_model=ReferencedAuthorsListResponse)
 async def get_authors_referenced_by_author(
     author_id: str,
-    offset: int = Query(0, ge=0, description="Offset for pagination"),
-    limit: int = Query(50, ge=1, le=100, description="Maximum number of referenced authors to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    limit: int = Query(10, ge=1, le=100, description="Items to return"),
     container: ServiceContainer = Depends(get_container)
 ):
     """
@@ -291,8 +323,10 @@ async def get_authors_referenced_by_author(
     if not author:
         raise HTTPException(status_code=404, detail="Author not found")
     
-    referenced_author_data, total = await container.author_repository.get_referenced_authors(
-        author_id, limit=limit, offset=offset
+    referenced_author_data, total = await container.author_service.get_referenced_authors(
+        author_id=author_id,
+        offset=offset,
+        limit=limit,
     )
     
     # If no data and author was recently enriched, trigger computation
@@ -303,10 +337,41 @@ async def get_authors_referenced_by_author(
         )
     
     referenced_authors = [ReferencedAuthor(**ra) for ra in referenced_author_data]
-    
+
     return ReferencedAuthorsListResponse(
         total=total,
         offset=offset,
         limit=limit,
         referenced_authors=referenced_authors
+    )
+
+
+@router.get("/{author_id}/publications", response_model=AuthorPublicationsListResponse)
+async def get_author_publications(
+    author_id: str,
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    limit: int = Query(10, ge=1, le=100, description="Items to return"),
+    sort_by: str = Query("year", pattern="^(year|citation)$", description="Sort by: year or citation"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort order: asc or desc"),
+    container: ServiceContainer = Depends(get_container),
+):
+    """Get paginated publications for an author with sorting."""
+    author = await container.author_repository.get_author(author_id)
+    if not author:
+        raise HTTPException(status_code=404, detail="Author not found")
+
+    papers, total = await container.author_service.get_author_publications_paginated(
+        author_id=author_id,
+        offset=offset,
+        limit=limit,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+    items = [AuthorPaperSummary.model_validate(p) for p in papers]
+    return AuthorPublicationsListResponse(
+        total=total,
+        offset=offset,
+        limit=limit,
+        items=items,
     )

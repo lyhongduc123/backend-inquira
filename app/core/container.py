@@ -272,6 +272,23 @@ class ServiceContainer:
             enrichment_service=self.paper_enrichment_service,
         )
 
+    @cached_property
+    def preprocessing_phase_service(self):
+        """Phase service for queueable preprocessing stages."""
+        from app.processor.preprocessing_repository import PreprocessingRepository
+        from app.processor.services.preprocessing_phase_service import (
+            PreprocessingPhaseService,
+        )
+
+        preprocessing_repo = PreprocessingRepository(self.db_session)
+        return PreprocessingPhaseService(
+            preprocessing_service=self.preprocessing_service,
+            preprocessing_repository=preprocessing_repo,
+            retriever=self.retrieval_service,
+            enrichment_service=self.paper_enrichment_service,
+            zeroshot_tagger_service=self.zeroshot_tagger_service,
+        )
+
     # ==================== ORCHESTRATORS (Request-scoped workflows) ====================
 
     @cached_property
@@ -309,6 +326,17 @@ class ServiceContainer:
         from app.rag_pipeline.database_pipeline import DatabasePipeline
 
         return DatabasePipeline(
+            db_session=self.db_session,
+            container=self,
+            llm_service=self.llm_service,
+        )
+
+    @cached_property
+    def scoped_pipeline(self):
+        """Scoped paper pipeline (search within provided paper IDs only)"""
+        from app.rag_pipeline.scoped_pipeline import ScopedPipeline
+
+        return ScopedPipeline(
             db_session=self.db_session,
             container=self,
             llm_service=self.llm_service,

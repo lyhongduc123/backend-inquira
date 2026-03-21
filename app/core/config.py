@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     DATABASE_URL: str
     DATABASE_SYNC_URL: str
+    REDIS_URL: str = "redis://localhost:6379/0"
     EMBEDDING_MODEL_NAME: str | None = None
     VECTOR_STORE_PATH: str | None = None
 
@@ -70,6 +71,11 @@ class Settings(BaseSettings):
     
     # CUDA/GPU settings
     USE_CUDA: bool = True  # Set to False to disable CUDA and use CPU only
+    DOC_OCR_ENABLED: bool = False  # Enable OCR for scanned PDFs when needed
+    DOC_GENERATE_PICTURE_IMAGES: bool = True
+    DOC_ASSETS_DIR: str = "preprocessing_logs/docling_assets"
+    DOC_EXPORT_HIERARCHICAL_CHUNKS: bool = True
+    DOC_ENABLE_PYMUPDF_CROPS: bool = True
 
     class Config:
         env_file = ".env"

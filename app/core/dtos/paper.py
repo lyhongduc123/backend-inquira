@@ -51,7 +51,9 @@ class PaperDTO(BaseModel):
     language: Optional[str] = None
     year: Optional[int] = None  # NEW: S2 publication year
     fields_of_study: Optional[List[str]] = None  # NEW: S2 fields
+    publication_types: Optional[List[str]] = None  # NEW: S2 publication types
     s2_fields_of_study: Optional[List[Dict[str, str]]] = None  # NEW: S2 enriched fields
+    paper_tags: Optional[List[Dict[str, Any]]] = None  # NEW: computed zero-shot tags
     corresponding_author_ids: Optional[List[str]] = None
     institutions_distinct_count: Optional[int] = None
     countries_distinct_count: Optional[int] = None
@@ -139,11 +141,17 @@ class PaperDTO(BaseModel):
                 if hasattr(db_paper, "fields_of_study")
                 else None
             ),
+            publication_types=(
+                db_paper.publication_types
+                if hasattr(db_paper, "publication_types")
+                else None
+            ),
             s2_fields_of_study=(
                 db_paper.s2_fields_of_study
                 if hasattr(db_paper, "s2_fields_of_study")
                 else None
             ),
+            paper_tags=db_paper.paper_tags if hasattr(db_paper, "paper_tags") else None,
             citation_count=(
                 db_paper.citation_count if hasattr(db_paper, "citation_count") else 0
             ),

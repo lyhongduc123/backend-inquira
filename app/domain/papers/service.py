@@ -211,6 +211,11 @@ class PaperService:
         self, paper_id: str, load_options: Optional["LoadOptions"] = None
     ) -> Optional[PaperDetailResponse]:
         """Get a single paper by paper_id"""
+        if load_options is None:
+            from .repository import LoadOptions
+
+            load_options = LoadOptions.with_journal()
+
         paper = await self.repository.get_single_paper(
             paper_id, load_options=load_options
         )
@@ -761,6 +766,82 @@ class PaperService:
         
         logger.info(f"Hybrid filtered search returned {len(papers_with_scores)} papers")
         return papers_with_scores
+
+    async def split_search_papers_with_filters_rrf(
+        self,
+        query: str,
+        limit: int = 100,
+        author_name: Optional[str] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        venue: Optional[str] = None,
+        min_citation_count: Optional[int] = None,
+        max_citation_count: Optional[int] = None,
+        rrf_k: int = 60,
+    ) -> List[tuple[DBPaper, float]]:
+        """
+        Split retrieval strategy: BM25 and semantic are run independently,
+        then fused with Reciprocal Rank Fusion (RRF).
+
+        This avoids score-space mixing and is more stable across queries.
+        """
+        from app.processor.services.embeddings import get_embedding_service
+
+        embedding_service = get_embedding_service()
+        query_embedding = await embedding_service.create_embedding(query, task="search_query")
+
+        candidate_limit = max(limit * 2, 50)
+
+        bm25_results = await self.repository.bm25_search_papers_with_filters(
+            query=query,
+            limit=candidate_limit,
+            author_name=author_name,
+            year_min=year_min,
+            year_max=year_max,
+            venue=venue,
+            min_citation_count=min_citation_count,
+            max_citation_count=max_citation_count,
+        )
+
+        semantic_results: List[tuple[DBPaper, float]] = []
+        if query_embedding:
+            semantic_results = await self.repository.semantic_search_papers_with_filters(
+                query_embedding=query_embedding,
+                limit=candidate_limit,
+                author_name=author_name,
+                year_min=year_min,
+                year_max=year_max,
+                venue=venue,
+                min_citation_count=min_citation_count,
+                max_citation_count=max_citation_count,
+            )
+        else:
+            logger.warning("Embedding generation failed, returning BM25-only results")
+
+        if not bm25_results and not semantic_results:
+            return []
+
+        rrf_scores: Dict[str, float] = {}
+        paper_map: Dict[str, DBPaper] = {}
+
+        for rank, (paper, _) in enumerate(bm25_results, start=1):
+            rrf_scores[paper.paper_id] = rrf_scores.get(paper.paper_id, 0.0) + (1.0 / (rrf_k + rank))
+            if paper.paper_id not in paper_map:
+                paper_map[paper.paper_id] = paper
+
+        for rank, (paper, _) in enumerate(semantic_results, start=1):
+            rrf_scores[paper.paper_id] = rrf_scores.get(paper.paper_id, 0.0) + (1.0 / (rrf_k + rank))
+            if paper.paper_id not in paper_map:
+                paper_map[paper.paper_id] = paper
+
+        ranked_ids = sorted(rrf_scores.keys(), key=lambda pid: rrf_scores[pid], reverse=True)[:limit]
+        fused_results = [(paper_map[pid], rrf_scores[pid]) for pid in ranked_ids]
+
+        logger.info(
+            f"Split retrieval + RRF returned {len(fused_results)} papers "
+            f"(bm25={len(bm25_results)}, semantic={len(semantic_results)})"
+        )
+        return fused_results
 
     async def batch_create_papers_from_schema(
         self, papers: List[Union[PaperDTO, PaperEnrichedDTO]], enrich: bool = True

@@ -108,6 +108,10 @@ class AuthorService:
             return db_author
         except Exception as e:
             logger.error(f"Failed to upsert author {author_id}: {e}")
+            try:
+                await self.db.rollback()
+            except Exception as rollback_error:
+                logger.error(f"Failed to rollback author upsert transaction: {rollback_error}")
             return None
     
     async def link_author_to_paper(
@@ -268,9 +272,6 @@ class AuthorService:
         if not authors_data:
             return {}
         
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
-        from app.models.authors import DBAuthor
-        
         # Prepare all author records
         author_records: List[Dict[str, Any]] = []
         author_id_map: Dict[str, Dict[str, Any]] = {}
@@ -339,41 +340,13 @@ class AuthorService:
             return {}
         
         try:
-            # Batch insert with ON CONFLICT UPDATE
-            stmt = (
-                pg_insert(DBAuthor)
-                .values(author_records)
-                .on_conflict_do_update(
-                    index_elements=['author_id'],
-                    set_={
-                        'name': pg_insert(DBAuthor).excluded.name,
-                        'display_name': pg_insert(DBAuthor).excluded.display_name,
-                        'openalex_id': pg_insert(DBAuthor).excluded.openalex_id,
-                        'h_index': pg_insert(DBAuthor).excluded.h_index,
-                        'total_citations': pg_insert(DBAuthor).excluded.total_citations,
-                        'total_papers': pg_insert(DBAuthor).excluded.total_papers,
-                        'orcid': pg_insert(DBAuthor).excluded.orcid,
-                        'external_ids': pg_insert(DBAuthor).excluded.external_ids,
-                        'verified': pg_insert(DBAuthor).excluded.verified,
-                        'url': pg_insert(DBAuthor).excluded.url,
-                        'homepage_url': pg_insert(DBAuthor).excluded.homepage_url,
-                        'external_ids': pg_insert(DBAuthor).excluded.external_ids,
-                        'verified': pg_insert(DBAuthor).excluded.verified,
-                        'url': pg_insert(DBAuthor).excluded.url,
-                        'homepage_url': pg_insert(DBAuthor).excluded.homepage_url,
-                        'updated_at': datetime.now()
-                    }
-                )
-                .returning(DBAuthor)
-            )
-            
-            result = await self.db.execute(stmt)
-            await self.db.commit()
-            
-            # Build result dict
-            db_authors = result.scalars().all()
-            result_map = {author.author_id: author for author in db_authors}
-            
+            # Use repository upsert for robust identity matching (author_id/orcid/openalex_id)
+            # and to avoid unique collisions on ORCID in batch writes.
+            result_map: Dict[str, DBAuthor] = {}
+            for record in author_records:
+                db_author = await self.repository.upsert_author(record)
+                result_map[record["author_id"]] = db_author
+
             logger.info(f"Batch upserted {len(result_map)} authors")
             return result_map
             
@@ -439,6 +412,114 @@ class AuthorService:
     async def get_author_papers_with_metadata(self, author_id: str) -> list:
         """Get author's papers with metadata"""
         return await self.repository.get_author_papers_with_metadata(author_id)
+
+    async def refresh_authors_from_semantic_batch(
+        self,
+        author_ids: List[str],
+        persist: bool = False,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Refresh author metrics (h-index, paper count, citation count) via Semantic Scholar batch API.
+
+        Returns mapping: author_id -> semantic payload.
+        """
+        unique_ids = sorted({str(aid).strip() for aid in author_ids if str(aid).strip()})
+        if not unique_ids:
+            return {}
+
+        try:
+            from app.core.config import settings
+            from app.retriever.provider import RetrievalConfig
+            from app.retriever.provider.semantic_scholar_provider import SemanticScholarProvider
+
+            provider = SemanticScholarProvider(
+                api_url=settings.SEMANTIC_API_URL,
+                config=RetrievalConfig(max_results=100, timeout=30.0),
+            )
+            chunk_size = 100
+            batches = [
+                unique_ids[idx : idx + chunk_size]
+                for idx in range(0, len(unique_ids), chunk_size)
+            ]
+
+            merged_map: Dict[str, Dict[str, Any]] = {}
+            for batch in batches:
+                batch_map = await provider.get_multiple_authors(batch)
+                if not batch_map:
+                    continue
+                for sem_author_id, payload in batch_map.items():
+                    if isinstance(payload, dict):
+                        merged_map[str(sem_author_id)] = payload
+
+            if not merged_map:
+                return {}
+
+            # Optional persistence (disabled by default for faster read paths).
+            if persist:
+                for sem_author_id, payload in merged_map.items():
+                    update_data: Dict[str, Any] = {
+                        "h_index": payload.get("hIndex"),
+                        "total_citations": payload.get("citationCount"),
+                        "total_papers": payload.get("paperCount"),
+                    }
+                    if payload.get("url"):
+                        update_data["url"] = payload.get("url")
+
+                    update_data = {
+                        key: value for key, value in update_data.items() if value is not None
+                    }
+                    if update_data:
+                        await self.repository.update_author(str(sem_author_id), update_data)
+
+            return merged_map
+        except Exception as exc:
+            logger.warning(f"Failed semantic batch refresh for authors: {exc}")
+            return {}
+
+    async def get_author_publications_paginated(
+        self,
+        author_id: str,
+        limit: int = 10,
+        offset: int = 0,
+        sort_by: str = "year",
+        sort_order: str = "desc",
+    ) -> tuple[list, int]:
+        """Get paginated author publications with sort and refreshed author metrics."""
+        papers, total = await self.repository.get_author_papers_with_metadata_paginated(
+            author_id=author_id,
+            limit=limit,
+            offset=offset,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+
+        # Refresh all author stats involved in this page.
+        publication_author_ids: List[str] = []
+        for paper in papers:
+            for author_paper in getattr(paper, "paper_authors", []) or []:
+                author_obj = getattr(author_paper, "author", None)
+                if author_obj and getattr(author_obj, "author_id", None):
+                    publication_author_ids.append(str(author_obj.author_id))
+
+        semantic_map = await self.refresh_authors_from_semantic_batch(publication_author_ids)
+
+        # Patch loaded objects for immediate response consistency.
+        for paper in papers:
+            for author_paper in getattr(paper, "paper_authors", []) or []:
+                author_obj = getattr(author_paper, "author", None)
+                if not author_obj:
+                    continue
+                payload = semantic_map.get(str(getattr(author_obj, "author_id", "")))
+                if not payload:
+                    continue
+                if payload.get("hIndex") is not None:
+                    author_obj.h_index = payload.get("hIndex")
+                if payload.get("citationCount") is not None:
+                    author_obj.total_citations = payload.get("citationCount")
+                if payload.get("paperCount") is not None:
+                    author_obj.total_papers = payload.get("paperCount")
+
+        return papers, total
     
     async def get_quartile_breakdown(self, author_id: str) -> dict:
         """Get quartile breakdown for author's publications"""
@@ -457,33 +538,85 @@ class AuthorService:
             limit=limit,
             offset=offset,
         )
+
+    async def get_co_authors_paginated(
+        self,
+        author_id: str,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Get co-authors with refreshed Semantic Scholar stats."""
+        co_authors = await self.repository.get_co_authors(author_id, limit=limit, offset=offset)
+        total = len(await self.repository.get_co_authors(author_id, limit=10000, offset=0))
+
+        semantic_map = await self.refresh_authors_from_semantic_batch(
+            [str(item.get("author_id", "")) for item in co_authors]
+        )
+        for row in co_authors:
+            payload = semantic_map.get(str(row.get("author_id", "")))
+            if not payload:
+                continue
+            row["h_index"] = payload.get("hIndex", row.get("h_index"))
+            row["total_citations"] = payload.get("citationCount", row.get("total_citations"))
+            row["total_papers"] = payload.get("paperCount", row.get("total_papers"))
+            row["is_enriched"] = bool(payload.get("paperCount") is not None)
+
+        return co_authors, total
     
     async def get_citing_authors(
         self,
         author_id: str,
-        page: int,
-        page_size: int,
+        limit: int = 10,
+        offset: int = 0,
         min_citations: int = 1
     ) -> tuple[list[dict], int]:
         """Get authors who cite this author's work"""
-        return await self.repository.get_citing_authors(
+        citing_authors, total = await self.repository.get_citing_authors(
             author_id=author_id,
-            limit=page_size,
-            offset=(page - 1) * page_size,
+            limit=limit,
+            offset=offset,
         )
+
+        semantic_map = await self.refresh_authors_from_semantic_batch(
+            [str(item.get("author_id", "")) for item in citing_authors]
+        )
+        for row in citing_authors:
+            payload = semantic_map.get(str(row.get("author_id", "")))
+            if not payload:
+                continue
+            row["h_index"] = payload.get("hIndex", row.get("h_index"))
+            row["total_citations"] = payload.get("citationCount", row.get("total_citations"))
+            row["total_papers"] = payload.get("paperCount", row.get("total_papers"))
+            row["is_enriched"] = bool(payload.get("paperCount") is not None)
+
+        return citing_authors, total
     
     async def get_referenced_authors(
         self,
         author_id: str,
-        page: int,
-        page_size: int,
+        limit: int = 10,
+        offset: int = 0,
     ) -> tuple[list[dict], int]:
         """Get authors this author references"""
-        return await self.repository.get_referenced_authors(
+        referenced_authors, total = await self.repository.get_referenced_authors(
             author_id=author_id,
-            limit=page_size,
-            offset=(page - 1) * page_size,
+            limit=limit,
+            offset=offset,
         )
+
+        semantic_map = await self.refresh_authors_from_semantic_batch(
+            [str(item.get("author_id", "")) for item in referenced_authors]
+        )
+        for row in referenced_authors:
+            payload = semantic_map.get(str(row.get("author_id", "")))
+            if not payload:
+                continue
+            row["h_index"] = payload.get("hIndex", row.get("h_index"))
+            row["total_citations"] = payload.get("citationCount", row.get("total_citations"))
+            row["total_papers"] = payload.get("paperCount", row.get("total_papers"))
+            row["is_enriched"] = bool(payload.get("paperCount") is not None)
+
+        return referenced_authors, total
     
     async def get_author_details_with_papers(
         self,
@@ -526,7 +659,23 @@ class AuthorService:
             }
         
         # Get papers and related data
-        papers = await self.repository.get_author_papers_with_metadata(author_id)
+        papers, _ = await self.repository.get_author_papers_with_metadata_paginated(
+            author_id=author_id,
+            limit=20,
+            offset=0,
+            sort_by="year",
+            sort_order="desc",
+        )
+
+        # Refresh publication-author metrics via Semantic Scholar batch.
+        publication_author_ids: List[str] = []
+        for paper in papers:
+            for author_paper in getattr(paper, "paper_authors", []) or []:
+                author_obj = getattr(author_paper, "author", None)
+                if author_obj and getattr(author_obj, "author_id", None):
+                    publication_author_ids.append(str(author_obj.author_id))
+
+        semantic_map = await self.refresh_authors_from_semantic_batch(publication_author_ids)
         
         # Convert papers to metadata format
         from app.domain.papers.schemas import PaperMetadata
@@ -534,12 +683,38 @@ class AuthorService:
             PaperMetadata.from_db_model(paper)
             for paper in papers
         ]
+
+        # Patch lightweight author metadata in publication payload with refreshed metrics.
+        for paper_meta in paper_metadata_list:
+            for author_meta in getattr(paper_meta, "authors", []) or []:
+                payload = semantic_map.get(str(getattr(author_meta, "author_id", "") or ""))
+                if not payload:
+                    continue
+                author_meta.h_index = payload.get("hIndex", getattr(author_meta, "h_index", None))
+                author_meta.citation_count = payload.get(
+                    "citationCount",
+                    getattr(author_meta, "citation_count", None),
+                )
+                author_meta.paper_count = payload.get(
+                    "paperCount",
+                    getattr(author_meta, "paper_count", None),
+                )
         
         # Get quartile breakdown
         quartile_dict = await self.repository.get_quartile_breakdown(author_id)
         
         # Get co-authors
         co_author_data = await self.repository.get_co_authors(author_id, limit=10)
+        co_author_semantic_map = await self.refresh_authors_from_semantic_batch(
+            [str(item.get("author_id", "")) for item in co_author_data]
+        )
+        for row in co_author_data:
+            payload = co_author_semantic_map.get(str(row.get("author_id", "")))
+            if not payload:
+                continue
+            row["h_index"] = payload.get("hIndex", row.get("h_index"))
+            row["total_citations"] = payload.get("citationCount", row.get("total_citations"))
+            row["total_papers"] = payload.get("paperCount", row.get("total_papers"))
         
         # Calculate papers by year
         papers_by_year = {}
