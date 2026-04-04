@@ -11,15 +11,10 @@ from app.db.database import get_db_session
 from app.core.dependencies import get_container
 from app.core.container import ServiceContainer
 from .schemas import (
-    AuthorCreate,
-    AuthorUpdate,
     AuthorResponse,
     AuthorListResponse,
-    AuthorStatsResponse,
     AuthorDetailResponse,
     AuthorDetailWithPapersResponse,
-    AuthorEnrichmentRequest,
-    AuthorEnrichmentResponse,
     QuartileBreakdown,
     CoAuthor,
     AuthorCollaborationListResponse,
@@ -92,61 +87,16 @@ async def get_author(
     return AuthorResponse.model_validate(author)
 
 
-@router.post("", response_model=AuthorResponse, status_code=201)
-async def create_author(
-    author_data: AuthorCreate,
-    container: ServiceContainer = Depends(get_container)
-):
-    """Create a new author"""
-    
-    # Check if author already exists
-    existing = await container.author_repository.get_author(author_data.author_id)
-    if existing:
-        raise HTTPException(status_code=409, detail="Author already exists")
-    
-    author = await container.author_repository.create_author(author_data.model_dump())
-    return AuthorResponse.model_validate(author)
-
-
-@router.patch("/{author_id}", response_model=AuthorResponse)
-async def update_author(
-    author_id: str,
-    author_data: AuthorUpdate,
-    container: ServiceContainer = Depends(get_container)
-):
-    """Update an existing author"""
-    
-    # Only update non-None fields
-    update_data = {k: v for k, v in author_data.model_dump().items() if v is not None}
-    
-    author = await container.author_repository.update_author(author_id, update_data)
-    if not author:
-        raise HTTPException(status_code=404, detail="Author not found")
-    
-    return AuthorResponse.model_validate(author)
-
-
-@router.delete("/{author_id}", status_code=204)
-async def delete_author(
-    author_id: str,
-    container: ServiceContainer = Depends(get_container)
-):
-    """Delete an author"""
-    author = await container.author_repository.get_author(author_id)
-    
-    if not author:
-        raise HTTPException(status_code=404, detail="Author not found")
-    
-    await container.db_session.delete(author)
-    await container.db_session.commit()
-
-
 @router.get("/{author_id}/details", response_model=AuthorDetailWithPapersResponse)
 async def get_author_details(
     author_id: str,
     auto_enrich: bool = Query(
         default=True,
         description="Automatically enrich if not enriched"
+    ),
+    refresh_live_metrics: bool = Query(
+        default=False,
+        description="Refresh author metrics from Semantic Scholar before responding (slower)."
     ),
     container: ServiceContainer = Depends(get_container)
 ):
@@ -161,9 +111,10 @@ async def get_author_details(
     from app.workers.enrichment_worker import EnrichmentWorker
     
     # Get author details from service
-    result = await container.author_service.get_author_details_with_papers(
+    result = await container.author_service.get_author_profile(
         author_id=author_id,
-        auto_enrich=auto_enrich
+        auto_enrich=auto_enrich,
+        refresh_live_metrics=refresh_live_metrics,
     )
     
     author = result["author"]
@@ -198,7 +149,6 @@ async def get_author_details(
                     "message": task_status.get("error") or "Author enrichment failed."
                 }
     
-    # Handle enrichment at router level (to avoid circular deps in service)
     if enrichment_status and enrichment_status.get("status") == "needs_enrichment" and auto_enrich:
         task_queue = get_task_queue()
         task_id = await task_queue.submit(
@@ -226,6 +176,7 @@ async def get_author_details(
         "papers": result["papers"],
         "quartile_breakdown": quartile_breakdown,
         "co_authors": co_authors,
+        "counts_by_year": result.get("counts_by_year", {}),
         "papers_by_year": result["papers_by_year"],
         "is_enriched": result["is_enriched"],
         "enrichment_status": enrichment_status
@@ -239,6 +190,10 @@ async def get_author_collaborations(
     author_id: str,
     offset: int = Query(0, ge=0, description="Pagination offset"),
     limit: int = Query(10, ge=1, le=100, description="Items to return"),
+    refresh_live_metrics: bool = Query(
+        default=False,
+        description="Refresh collaboration metrics from Semantic Scholar before responding (slower)."
+    ),
     container: ServiceContainer = Depends(get_container)
 ):
     """
@@ -253,6 +208,7 @@ async def get_author_collaborations(
         author_id=author_id,
         offset=offset,
         limit=limit,
+        refresh_live_metrics=refresh_live_metrics,
     )
     co_authors = [CoAuthor(**ca) for ca in co_author_data]
     
@@ -269,6 +225,10 @@ async def get_authors_citing_author(
     author_id: str,
     offset: int = Query(0, ge=0, description="Pagination offset"),
     limit: int = Query(10, ge=1, le=100, description="Items to return"),
+    refresh_live_metrics: bool = Query(
+        default=False,
+        description="Refresh citing author metrics from Semantic Scholar before responding (slower)."
+    ),
     container: ServiceContainer = Depends(get_container)
 ):
     """
@@ -286,13 +246,14 @@ async def get_authors_citing_author(
         author_id=author_id,
         offset=offset,
         limit=limit,
+        refresh_live_metrics=refresh_live_metrics,
     )
     
     # If no data and author was recently enriched, trigger computation
     if total == 0 and author.last_paper_indexed_at:
         import asyncio
         asyncio.create_task(
-            container.author_repository.compute_author_relationships(author_id)
+            container.author_service.compute_author_relationships(author_id)
         )
     
     citing_authors = [CitingAuthor(**ca) for ca in citing_author_data]
@@ -310,6 +271,10 @@ async def get_authors_referenced_by_author(
     author_id: str,
     offset: int = Query(0, ge=0, description="Pagination offset"),
     limit: int = Query(10, ge=1, le=100, description="Items to return"),
+    refresh_live_metrics: bool = Query(
+        default=False,
+        description="Refresh referenced author metrics from Semantic Scholar before responding (slower)."
+    ),
     container: ServiceContainer = Depends(get_container)
 ):
     """
@@ -327,13 +292,14 @@ async def get_authors_referenced_by_author(
         author_id=author_id,
         offset=offset,
         limit=limit,
+        refresh_live_metrics=refresh_live_metrics,
     )
     
     # If no data and author was recently enriched, trigger computation
     if total == 0 and author.last_paper_indexed_at:
         import asyncio
         asyncio.create_task(
-            container.author_repository.compute_author_relationships(author_id)
+            container.author_service.compute_author_relationships(author_id)
         )
     
     referenced_authors = [ReferencedAuthor(**ra) for ra in referenced_author_data]
@@ -353,6 +319,10 @@ async def get_author_publications(
     limit: int = Query(10, ge=1, le=100, description="Items to return"),
     sort_by: str = Query("year", pattern="^(year|citation)$", description="Sort by: year or citation"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort order: asc or desc"),
+    refresh_live_metrics: bool = Query(
+        default=False,
+        description="Refresh publication author metrics from Semantic Scholar before responding (slower)."
+    ),
     container: ServiceContainer = Depends(get_container),
 ):
     """Get paginated publications for an author with sorting."""
@@ -366,6 +336,7 @@ async def get_author_publications(
         limit=limit,
         sort_by=sort_by,
         sort_order=sort_order,
+        refresh_live_metrics=refresh_live_metrics,
     )
 
     items = [AuthorPaperSummary.model_validate(p) for p in papers]

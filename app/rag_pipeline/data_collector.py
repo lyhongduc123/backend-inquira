@@ -67,9 +67,6 @@ class PipelineExecutionData:
     ranking_time_ms: Optional[float] = None
     total_time_ms: Optional[float] = None
     
-    # Breakdown response
-    breakdown_response: Optional[Dict[str, Any]] = None
-    
     # Errors
     errors: List[str] = field(default_factory=list)
 
@@ -166,7 +163,6 @@ class RAGDataCollector:
         self, 
         queries: List[str],
         intent: Optional[QueryIntent] = None,
-        breakdown_response: Optional[QuestionBreakdownResponse] = None
     ):
         """Record query decomposition results."""
         if not self.enabled or not self.current_execution:
@@ -176,14 +172,6 @@ class RAGDataCollector:
         
         self.current_execution.decomposed_queries = queries
         self.current_execution.intent = intent.value if intent else None
-        
-        if breakdown_response:
-            self.current_execution.breakdown_response = {
-                "search_queries": breakdown_response.search_queries,
-                "intent": breakdown_response.intent.value if breakdown_response.intent else None,
-                "filters": breakdown_response.filters,
-                "reasoning": getattr(breakdown_response, "reasoning", None)
-            }
         
         if self.start_time:
             self.current_execution.decomposition_time_ms = self.step_times["decomposition"] - self.start_time

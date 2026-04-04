@@ -37,6 +37,9 @@ class AuthorMetadata(AuthorBase):
     paper_count: Optional[int] = None
     verified: bool = False
 
+    class Config:
+        from_attributes = True
+
 class Author(AuthorCreate):
     """Author mirroring database model"""
     id: int
@@ -90,7 +93,7 @@ class AuthorResponse(CamelModel):
     verified: bool = False
     first_publication_year: Optional[int] = None
     last_known_institution_id: Optional[str] = None
-    reputation_score: Optional[float] = None
+    retraction_rate: Optional[float] = None
     field_weighted_citation_impact: Optional[float] = None
     is_corresponding_author_frequently: Optional[bool] = None
     average_author_position: Optional[float] = None

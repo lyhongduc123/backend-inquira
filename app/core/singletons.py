@@ -33,15 +33,14 @@ def get_extractor_service() -> ExtractorService:
     logger.debug(
         "Initializing singleton ExtractorService "
         f"(USE_CUDA={settings.USE_CUDA}, DOC_OCR_ENABLED={settings.DOC_OCR_ENABLED}, "
-        f"DOC_GENERATE_PICTURE_IMAGES={settings.DOC_GENERATE_PICTURE_IMAGES})"
     )
     return ExtractorService(
         use_cuda=settings.USE_CUDA,
         use_ocr=settings.DOC_OCR_ENABLED,
-        generate_picture_images=settings.DOC_GENERATE_PICTURE_IMAGES,
         assets_dir=settings.DOC_ASSETS_DIR,
         export_hierarchical_chunks=settings.DOC_EXPORT_HIERARCHICAL_CHUNKS,
         enable_pymupdf_crops=settings.DOC_ENABLE_PYMUPDF_CROPS,
+        persist_local_assets=settings.DOC_ASSETS_PERSIST_LOCAL,
     )
 
 

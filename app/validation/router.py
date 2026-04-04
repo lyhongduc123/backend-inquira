@@ -47,6 +47,9 @@ async def get_validation_history(
     skip: int = 0,
     limit: int = 50,
     message_id: Optional[int] = None,
+    conversation_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    query_text: Optional[str] = None,
     has_hallucination: Optional[bool] = None,
     db: AsyncSession = Depends(get_db_session)
 ) -> schemas.ValidationHistoryResponse:
@@ -62,6 +65,9 @@ async def get_validation_history(
             skip=skip,
             limit=limit,
             message_id=message_id,
+            conversation_id=conversation_id,
+            model_name=model_name,
+            query_text=query_text,
             has_hallucination=has_hallucination
         )
         return result

@@ -98,6 +98,7 @@ class PreprocessingRepository:
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
+
     async def get_papers_missing_embeddings(self, limit: int = 1000) -> List[DBPaper]:
         """
         Get papers that don't have embeddings but have abstracts.

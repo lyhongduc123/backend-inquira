@@ -3,6 +3,7 @@ Response builder service for chat operations.
 Handles context building, query enhancement, and response formatting.
 """
 
+from multiprocessing import context
 from typing import Dict, Any, Tuple, List, Optional
 from app.rag_pipeline.schemas import RAGResult
 from app.extensions.logger import create_logger
@@ -74,7 +75,8 @@ class ChatResponseBuilder:
     @staticmethod
     def build_enhanced_query(
         query: str,
-        conversation_history: Optional[List[Dict[str, str]]] = None
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        context_string: Optional[str] = None
     ) -> str:
         """
         Enhance query with conversation history context.
@@ -86,8 +88,9 @@ class ChatResponseBuilder:
         Returns:
             Enhanced query string with history context
         """
+        new_query = f"Current Question: {query}\n"
         if not conversation_history:
-            return query
+            return new_query
         
         # Format history for system context
         history_text = "\n".join(
@@ -96,11 +99,20 @@ class ChatResponseBuilder:
                 for msg in conversation_history
             ]
         )
-        
-        return f"""Previous conversation:
+        enhanced_query = f"""
+<conversation_history>
+Previous conversation:
 {history_text}
+</conversation_history>
 
-Current question: {query}"""
+<documents>
+{context_string or "No retrieved documents."}
+</documents>
+
+{new_query}
+"""
+        
+        return enhanced_query
     
     @staticmethod
     def extract_metadata_from_results(results: RAGResult) -> List[Dict[str, Any]]:
@@ -123,3 +135,20 @@ Current question: {query}"""
     def get_retrieved_paper_ids(results: RAGResult) -> List[str]:
         """Extract paper IDs from results."""
         return [str(p.paper_id) for p in results.papers]
+
+    @staticmethod
+    def extract_context_chunks_from_results(results: RAGResult) -> List[Dict[str, Any]]:
+        """Extract exact chunk payload that is passed to context building/LLM."""
+        context_chunks: List[Dict[str, Any]] = []
+
+        for chunk in results.chunks:
+            context_chunks.append(
+                {
+                    "paper_id": str(chunk.paper_id),
+                    "chunk_id": str(chunk.chunk_id),
+                    "section": chunk.section_title or "Main text",
+                    "content": chunk.text,
+                }
+            )
+
+        return context_chunks

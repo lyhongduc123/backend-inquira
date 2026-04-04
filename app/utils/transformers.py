@@ -45,11 +45,6 @@ def normalized_to_paper(result: NormalizedPaperResult) -> PaperEnrichedDTO:
             author_dto = AuthorDTO(**author.model_dump())
             authors_dto.append(author_dto)
     
-    # Debug: Check if names are present
-    if authors_dto:
-        author_names = [a.name for a in authors_dto]
-        logger.debug(f"Converted {len(authors_dto)} authors for paper {result.paper_id}: {author_names}")
-    
     # Convert result to dict and replace authors with AuthorDTO list
     result_dict = result.model_dump()
     result_dict['authors'] = authors_dto

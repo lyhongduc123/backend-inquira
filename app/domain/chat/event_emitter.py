@@ -21,11 +21,6 @@ class ChatEventEmitter:
         self._collected_events: List[Dict[str, Any]] = []
         self._reasoning_buffer: str = ""  # Buffer to accumulate reasoning chunks
     
-    def reset_collection(self) -> None:
-        """Clear collected events and reasoning buffer. Call this at the start of each request."""
-        self._collected_events.clear()
-        self._reasoning_buffer = ""
-    
     def get_collected_events(self) -> List[Dict[str, Any]]:
         """Get all collected events for storage."""
         return self._collected_events.copy()
@@ -72,7 +67,33 @@ class ChatEventEmitter:
         paper_dicts = [paper.model_dump(mode='json', by_alias=True) for paper in papers]
         async for evt in stream_event(
             name=StreamEventType.METADATA,
-            data=json.dumps({"type": EventType.PAPER_METADATA, "papers": paper_dicts}),
+            data=json.dumps({"type": EventType.PAPER_METADATA, "content": paper_dicts}),
+        ):
+            yield evt
+            
+    async def emit_conversation_event(
+        self, 
+        conversation_id: str, 
+        title: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> AsyncGenerator[str, None]:
+        """
+        Emit a conversation event for streaming to frontend.
+        
+        Args:
+            conversation_id: UUID of the conversation
+            title: Optional updated title
+            metadata: Optional additional metadata
+        """
+        data = {"conversation_id": conversation_id}
+        if title:
+            data["title"] = title
+        if metadata:
+            data["metadata"] = json.dumps(metadata)
+            
+        async for evt in stream_event(
+            name=StreamEventType.CONVERSATION,
+            data=json.dumps({"type": "conversation", "content": data}),
         ):
             yield evt
             
@@ -98,7 +119,7 @@ class ChatEventEmitter:
             name=StreamEventType.PROGRESS,
             data=json.dumps({
                 "type": EventType.SEARCHING,
-                "content": f"Searching academic databases...",
+                "content": f"Searching relevant works and documents",
                 "metadata": {"queries": query},
             }),
         ):
@@ -216,11 +237,8 @@ class ChatEventEmitter:
             name=StreamEventType.ERROR,
             data=json.dumps({
                 "type": StreamEventType.ERROR,
-                "message": message,
+                "content": message,
                 "error_type": error_type,
             }),
         ):
             yield evt
-
-
-EventEmitter = ChatEventEmitter()

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 from jose import JWTError, jwt, ExpiredSignatureError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from app.models.users import DBUser
 from app.core.config import settings
 from app.auth.schemas import TokenData
@@ -77,5 +77,13 @@ async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[DBUser]:
     """Get user by ID"""
     result = await db.execute(
         select(DBUser).where(DBUser.id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_email(db: AsyncSession, email: str) -> Optional[DBUser]:
+    """Get user by email (case-insensitive)."""
+    result = await db.execute(
+        select(DBUser).where(func.lower(DBUser.email) == email.strip().lower())
     )
     return result.scalar_one_or_none()

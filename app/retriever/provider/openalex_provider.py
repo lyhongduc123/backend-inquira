@@ -4,6 +4,7 @@ OpenAlex retrieval provider.
 Implements BaseRetrievalProvider for OpenAlex API.
 """
 
+from app.retriever.schemas.openalex import OAAuthorResponse
 import httpx
 from typing import List, Dict, Any, Optional
 from app.extensions.logger import create_logger
@@ -77,7 +78,7 @@ class OpenAlexProvider(BaseRetrievalProvider):
             logger.error(f"[{self.name}] Search error: {e}")
             raise e
 
-    async def get_papers_by_dois(self, dois: List[str]) -> List[Dict[str, Any]]:
+    async def get_papers_by_dois(self, dois: List[str], limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Get multiple papers by their DOIs.
 
@@ -91,7 +92,7 @@ class OpenAlexProvider(BaseRetrievalProvider):
 
         try:
             dois_str = "|".join([doi for doi in dois if doi])
-            params = {"filter": f"doi:{dois_str}"}
+            params = {"filter": f"doi:{dois_str}", "per-page": min(limit, 100) if limit else 100}
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(f"{self.api_url}/works", params=params)
                 response.raise_for_status()
@@ -141,6 +142,39 @@ class OpenAlexProvider(BaseRetrievalProvider):
 
         return results
 
+    async def get_multiple_authors(self, author_ids: List[str], limit: Optional[int] = None) -> list[OAAuthorResponse]:
+        """
+        Get multiple authors by their OpenAlex IDs.
+        Args:
+            author_ids: List of OpenAlex author IDs
+        Returns:
+            List of institution details
+        results = []
+        """
+        results = []
+        try:
+            ids_str = "|".join(author_ids)
+            params = {"filter": f"ids.openalex:{ids_str}", "per-page": min(limit, 100) if limit else 100}
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.api_url}/authors", params=params
+                )
+                response.raise_for_status()
+                data = response.json()
+                items = data.get("results", [])
+                return [OAAuthorResponse(**item) for item in items]
+
+        except httpx.HTTPError as e:
+            logger.error(
+                f"[{self.name}] API error for Author IDs {author_ids}: {e}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[{self.name}] Error fetching Author IDs {author_ids}: {e}"
+            )
+
+        return []
+
     def normalize_result(self, raw_result: Dict[str, Any]) -> NormalizedPaperResult:
         """
         Normalize OpenAlex result to standard format.
@@ -170,8 +204,6 @@ class OpenAlexProvider(BaseRetrievalProvider):
                 institutions=auth.get("institutions", []),
                 affiliations=auth.get("affiliations", []),
             )
-            logger.debug(f"Extracted author: {author_dict.name}, ID: {author_dict.author_id}, ORCID: {author_dict.orcid}")
-            logger.debug(f"Institutions: {auth}")
             authors.append(author_dict)
 
         # Extract IDs

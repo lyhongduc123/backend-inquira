@@ -2,6 +2,7 @@ import gc
 from typing import AsyncGenerator, Dict, List, Optional, TYPE_CHECKING, Union, Tuple, Any
 import asyncio
 from app.core.dtos.paper import PaperEnrichedDTO
+from app.modules.r2_storage import R2StorageService
 from app.core.singletons import (
     get_extractor_service,
     get_chunker_service,
@@ -58,6 +59,7 @@ class PaperProcessor:
         self.author_service = AuthorService(self.repository.db)
         self.institution_service = InstitutionService(self.repository.db)
         self.chunk_repository = chunk_repository or ChunkRepository(self.repository.db)
+        self.r2_storage = R2StorageService()
 
         # Use singletons for stateless services
         self.extractor_service = extractor_service or get_extractor_service()
@@ -68,112 +70,67 @@ class PaperProcessor:
     async def process_single_paper(self, paper: PaperEnrichedDTO) -> bool:
         """
         Process a paper: retrieve full-text from available sources, chunk, embed, summarize
-
+        
         Tries multiple sources (arXiv, open access PDFs, etc.) and gracefully
         handles paywalled papers by using abstract only.
-
+        
         Args:
-            db_paper: Database paper object
+            paper: DTO containing paper metadata
 
         Returns:
             True if successful, False otherwise
         """
-        paper_id_str = str(paper.paper_id)
-        processed = await self.ensure_paper_record(paper)
-        if processed:
+        # If the paper is already fully processed in the DTO, exit early
+        if paper.is_processed:
             return True
 
-        # Lazy-load retrieval service if not injected
-        if self.retrieval_service is None:
-            from app.retriever.service import RetrievalService
+        # Ensure paper record exists in DB using ingest_paper_metadata.
+        # This function intelligently checks if it exists and handles author creation.
+        db_paper = await self.paper_service.ingest_paper_metadata(paper)
+        if db_paper and db_paper.is_processed:
+            return True
 
-            self.retrieval_service = RetrievalService(self.repository.db)
+        # Delegate content processing (retrieval, extracting, chunking, embedding)
+        # to the centralized `process_content_only` to eliminate duplication.
+        semaphore = asyncio.Semaphore(1)
+        _, success = await self.process_content_only(paper, semaphore)
+        
+        return success
 
-        resolved = await self.retrieval_service.resolve_paper_content(paper)
-        if not resolved:
-            logger.warning(
-                f"Could not resolve content for paper {paper_id_str}, skipping processing."
-            )
-            await self.repository.update_paper_processing_status(paper_id_str, "failed")
-            return False
+    async def _upload_source_pdf_to_r2(
+        self,
+        paper: PaperEnrichedDTO,
+        paper_id: str,
+        pdf_bytes: bytes,
+    ) -> None:
+        """Upload source PDF bytes to Cloudflare R2 and persist metadata on paper record."""
+        if not self.r2_storage.is_configured:
+            return
 
         try:
-            chunks = []
-            if resolved.kind == "tei_xml":
-                structure = self.extractor_service.extract_tei_xml_structure(
-                    resolved.content  # pyright: ignore[reportArgumentType]
-                )
-                chunks = self.chunker_service.chunk_from_tei_structure(
-                    structure, paper_id_str
-                )
-                # Clear structure from memory
-                del structure
-
-            elif resolved.kind == "pdf_bytes":
-                doc_structure = self.extractor_service.extract_pdf_structure(
-                    resolved.content,  # pyright: ignore[reportArgumentType]
-                    paper_id=paper_id_str,
-                )
-                chunks = self.chunker_service.chunk_from_docling_structure(
-                    doc_structure, paper_id_str
-                )
-                # Clear PDF bytes and structure from memory immediately after chunking
-                del doc_structure
-
-            # if not chunks:
-            #     logger.warning(
-            #         f"Structure-based chunking failed for {paper_id_str}, falling back to text-based"
-            #     )
-            #     full_text = self.extractor_service.extract_pdf_text(pdfBytes)
-            #     clean_text = self.extractor_service._fix_text_encoding(full_text)
-            #     chunks = self.chunker_service.chunk_text(clean_text, paper_id_str)
-            #     extraction_method = "pdf_text"
-
-            if not chunks:
-                logger.error(
-                    f"[{paper_id_str}] No chunks generated from any extraction method"
-                )
-                await self.repository.update_paper_processing_status(
-                    paper_id_str, "failed"
-                )
-                return False
-
-            # Clear resolved content from memory
-            del resolved
-
-            logger.info(f"[{paper_id_str}] Generated {len(chunks)} chunks from content")
-            
-            # Prepare chunk texts with section titles for better embeddings
-            chunk_texts = []
-            for chunk in chunks:
-                chunk_texts.append(self.chunker_service.build_contextualized_embedding_text(chunk))
-            
-            embeddings = await self.embedding_service.create_embeddings_batch(
-                chunk_texts, batch_size=10, task="search_document"  # Use search_document task
+            key = self.r2_storage.build_pdf_key(paper_id=paper_id, filename="source.pdf")
+            upload_info = self.r2_storage.upload_bytes(
+                data=pdf_bytes,
+                key=key,
+                content_type="application/pdf",
             )
-            
-            del chunk_texts
+            if not upload_info:
+                return
 
-            await self._store_chunks(paper_id_str, chunks, embeddings)
+            current_meta: Dict[str, Any] = {}
+            if isinstance(paper.open_access_pdf, dict):
+                current_meta = dict(paper.open_access_pdf)
 
-            del chunks
-            del embeddings
+            current_meta["r2_pdf"] = upload_info
+            current_meta["r2_pdf_key"] = upload_info.get("key")
+            current_meta["r2_pdf_url"] = upload_info.get("url")
 
-            await self.repository.update_paper_processing_status(
-                paper_id_str, "completed"
+            await self.repository.update_paper(
+                paper_id,
+                {"open_access_pdf": current_meta},
             )
-
-            gc.collect()
-
-            return True
-        except Exception as e:
-            logger.error(f"Error processing paper {paper_id_str}: {e}")
-            await self.repository.update_paper_processing_status(paper_id_str, "failed")
-
-            # Also collect on error to prevent memory leaks
-            gc.collect()
-
-            return False
+        except Exception as error:
+            logger.warning(f"[{paper_id}] Failed to upload source PDF to R2: {error}")
 
     async def process_papers(self, papers: List[PaperEnrichedDTO]) -> Dict[str, bool]:
         """
@@ -240,7 +197,7 @@ class PaperProcessor:
             DBPaper: Database paper object
         """
         try:
-            result = await self.paper_service.create_paper_from_schema(paper)
+            result = await self.paper_service.ingest_paper_metadata(paper)
             if result and result.is_processed:
                 return True
         except Exception as e:
@@ -471,7 +428,7 @@ class PaperProcessor:
                 logger.info("Falling back to individual paper creation")
                 for paper in papers_to_create:
                     try:
-                        result = await self.paper_service.create_paper_from_schema(paper)
+                        result = await self.paper_service.ingest_paper_metadata(paper)
                         if result and not result.is_processed:
                             papers_to_process.append(paper)
                     except Exception as inner_e:
@@ -582,6 +539,11 @@ class PaperProcessor:
                     )
                     del structure
                 elif resolved.kind == "pdf_bytes":
+                    await self._upload_source_pdf_to_r2(
+                        paper=paper,
+                        paper_id=paper_id,
+                        pdf_bytes=resolved.content,  # pyright: ignore[reportArgumentType]
+                    )
                     doc_structure = self.extractor_service.extract_pdf_structure(
                         resolved.content,  # pyright: ignore[reportArgumentType]
                         paper_id=paper_id,

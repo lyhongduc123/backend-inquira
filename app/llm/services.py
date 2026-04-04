@@ -102,7 +102,7 @@ class LLMService:
 
         lines = get_simple_response_content(response).split("\n")
         clarified_question = ""
-        keyword_queries: List[str] = []
+        bm25_query: Optional[str] = None
         semantic_queries: List[str] = []
         specific_papers: List[str] = []
         
@@ -181,13 +181,13 @@ class LLMService:
 
                 # Add to appropriate list
                 if current_section == "keyword":
-                    keyword_queries.append(clean_line)
+                    bm25_query = clean_line
                 elif current_section == "semantic":
                     semantic_queries.append(clean_line)
                 elif current_section == "specific":
                     specific_papers.append(clean_line)
 
-        all_queries = keyword_queries + semantic_queries
+        all_queries = [bm25_query] + semantic_queries if bm25_query else semantic_queries
         subtopics = [s.strip() for s in all_queries if s.strip() and len(s.strip()) > 5][:4]
         reasoning_content = get_simple_response_reasoning(response)
 
@@ -209,7 +209,7 @@ class LLMService:
             original_question=user_question,
             clarified_question=clarified_question or user_question,
             search_queries=subtopics,
-            keyword_queries=keyword_queries if keyword_queries else None,
+            bm25_query=bm25_query if bm25_query else None,
             semantic_queries=semantic_queries if semantic_queries else None,
             specific_papers=specific_papers if specific_papers else None,
             num_queries=len(subtopics),
@@ -226,7 +226,6 @@ class LLMService:
     async def decompose_user_query_v2(
         self,
         user_question: str,
-        num_subtopics: Optional[int] = None,
         conversation_history: Optional[List[Dict[str, str]]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -256,13 +255,13 @@ class LLMService:
                 for msg in conversation_history[-5:]  # Last 5 messages for context
             ])
             prompt = f"""
-Previous Conversation:
+<conversation_context>
 {history_text}
+</conversation_context>
 
-Current Question: "{user_question}"
-
-NOTE: Consider the conversation context when decomposing the query. If the question uses pronouns like "it", "they", "this", or "that", resolve them using the conversation history.
+NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "it", "they", "this method") in the user's current question. Do not generate searches for old questions.
 """
+            prompt += f'Current user Question: "{user_question}"'
         else:
             prompt = f'User Question: "{user_question}"'
 
@@ -319,12 +318,12 @@ NOTE: Consider the conversation context when decomposing the query. If the quest
         filters_dict = data.get("filters", {})
         
         # Parse keyword and semantic queries if present
-        keyword_queries = data.get("keyword_queries")
+        bm25_query = data.get("bm25_query")
         semantic_queries = data.get("semantic_queries")
         
         # If not separated, use search_queries for both
-        if not keyword_queries and not semantic_queries and search_queries:
-            keyword_queries = search_queries[:2] if len(search_queries) > 1 else search_queries
+        if not bm25_query and not semantic_queries and search_queries:
+            bm25_query = search_queries[:2] if len(search_queries) > 1 else search_queries
             semantic_queries = search_queries[1:] if len(search_queries) > 1 else []
 
         # Parse intent
@@ -361,7 +360,7 @@ NOTE: Consider the conversation context when decomposing the query. If the quest
             original_question=user_question,
             clarified_question=clarified_question,
             search_queries=search_queries,
-            keyword_queries=keyword_queries if keyword_queries else None,
+            bm25_query=bm25_query if bm25_query else None,
             semantic_queries=semantic_queries if semantic_queries else None,
             specific_papers=specific_papers if specific_papers else None,
             num_queries=len(search_queries),
@@ -591,8 +590,7 @@ Summary:"""
 
     async def stream_citation_based_response(
         self,
-        query: str,
-        context: Union[str, List[Dict[str, Any]]],
+        context: str,
         prompt_name: str = "generate_answer",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -608,64 +606,7 @@ Summary:"""
         Yields:
             Formatted chunks including thought steps and citations
         """
-        # if isinstance(context, str):
-        #     context_text = context
-        # else:
-        #     # Legacy: Format context from list of dicts
-        #     formatted_context = []
-        #     for i, doc in enumerate(context, 1):
-        #         title = doc.get("title", "Untitled")
-        #         authors = doc.get("authors", [])
-        #         year = doc.get("year", None)
-        #         paper_id = doc.get("paper_id", doc.get("id", f"paper_{i}"))
-        #         pdf_url = doc.get("pdf_url", "")
-        #         url = doc.get("url", "")
-        #         citation_count = doc.get("citationCount", doc.get("citation_count", 0))
-        #         abstract = doc.get("abstract", "")
-
-        #         # Prefer chunk_text (from vector search) over abstract
-        #         chunk_text = doc.get("chunk_text")
-        #         section = doc.get("section", doc.get("section_title"))
-
-        #         if chunk_text:
-        #             content = chunk_text
-        #             if section:
-        #                 content = f"[Section: {section}]\n{content}"
-        #         else:
-        #             content = abstract or doc.get("content", "")
-
-        #         # Handle authors
-        #         if isinstance(authors, list):
-        #             if authors and isinstance(authors[0], dict):
-        #                 authors_str = ", ".join(a.get("name", str(a)) for a in authors)
-        #             elif authors:
-        #                 authors_str = ", ".join(str(a) for a in authors)
-        #             else:
-        #                 authors_str = "Unknown"
-        #         elif isinstance(authors, str):
-        #             authors_str = authors if authors else "Unknown"
-        #         else:
-        #             authors_str = "Unknown"
-
-        #         context_entry = f"[{i}] {title}\n"
-        #         context_entry += f"Paper ID: {paper_id}\n"
-        #         context_entry += f"Authors: {authors_str}\n"
-        #         context_entry += f"Year: {year if year else 'N/A'}\n"
-        #         context_entry += f"Citation Count: {citation_count}\n"
-        #         context_entry += f"URL: {url}\n"
-        #         context_entry += f"PDF URL: {pdf_url}\n"
-        #         if section:
-        #             context_entry += f"Section: {section}\n"
-        #         context_entry += f"Content: {content}\n"
-
-        #         formatted_context.append(context_entry)
-
-        #     context_text = "\n".join(formatted_context)
-
-        prompt = f"""Question: {query}
-
-        {context}
-        """
+        prompt = context
 
         print(f"[DEBUG] Starting to stream completion...")
         chunk_count = 0

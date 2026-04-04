@@ -11,7 +11,7 @@ from .schemas import (
     PaginatedCitationsResponse,
     PaginatedReferencesResponse,
 )
-from .enrichment_service import PaperEnrichmentService
+from .linking_service import PaperLinkingService
 from .journal_service import JournalService
 
 __all__ = [
@@ -24,6 +24,6 @@ __all__ = [
     "SJRMetadata",
     "PaginatedCitationsResponse",
     "PaginatedReferencesResponse",
-    "PaperEnrichmentService",
+    "PaperLinkingService",
     "JournalService",
 ]

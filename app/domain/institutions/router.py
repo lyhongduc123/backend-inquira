@@ -9,8 +9,6 @@ from sqlalchemy import select, func
 from app.db.database import get_db_session
 from .repository import InstitutionRepository
 from .schemas import (
-    InstitutionCreate,
-    InstitutionUpdate,
     InstitutionResponse,
     InstitutionListResponse,
     InstitutionStatsResponse
@@ -120,57 +118,3 @@ async def get_institution(
         raise HTTPException(status_code=404, detail="Institution not found")
     
     return InstitutionResponse.model_validate(institution)
-
-
-@router.post("", response_model=InstitutionResponse, status_code=201)
-async def create_institution(
-    institution_data: InstitutionCreate,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """Create a new institution"""
-    repository = InstitutionRepository(db)
-    
-    # Check if institution already exists
-    existing = await repository.get_institution_by_id(institution_data.institution_id)
-    if existing:
-        raise HTTPException(status_code=409, detail="Institution already exists")
-    
-    institution = await repository.create_institution(institution_data.model_dump())
-    return InstitutionResponse.model_validate(institution)
-
-
-@router.patch("/{institution_id}", response_model=InstitutionResponse)
-async def update_institution(
-    institution_id: str,
-    institution_data: InstitutionUpdate,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """Update an existing institution"""
-    repository = InstitutionRepository(db)
-    
-    # Only update non-None fields
-    update_data = {k: v for k, v in institution_data.model_dump().items() if v is not None}
-    
-    institution = await repository.update_institution(institution_id, update_data)
-    if not institution:
-        raise HTTPException(status_code=404, detail="Institution not found")
-    
-    return InstitutionResponse.model_validate(institution)
-
-
-@router.delete("/{institution_id}", status_code=204)
-async def delete_institution(
-    institution_id: str,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """Delete an institution"""
-    repository = InstitutionRepository(db)
-    institution = await repository.get_institution_by_id(institution_id)
-    
-    if not institution:
-        raise HTTPException(status_code=404, detail="Institution not found")
-    
-    await db.delete(institution)
-    await db.commit()
-    
-    return None

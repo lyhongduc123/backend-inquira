@@ -74,6 +74,30 @@ async def get_current_user(
     return user
 
 
+async def get_current_user_optional(
+    access_token_cookie: Optional[str] = Cookie(None, alias=ACCESS_TOKEN_COOKIE_NAME),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db_session),
+) -> Optional[DBUser]:
+    """Best-effort auth dependency that returns None when unauthenticated."""
+    token = access_token_cookie
+    if not token and credentials:
+        token = credentials.credentials
+
+    if not token:
+        return None
+
+    token_data = decode_access_token(token)
+    if token_data is None or token_data.user_id is None:
+        return None
+
+    user = await get_user_by_id(db, user_id=token_data.user_id)
+    if user is None or not user.is_active:
+        return None
+
+    return user
+
+
 async def get_current_active_user(
     current_user: DBUser = Depends(get_current_user)
 ) -> DBUser:

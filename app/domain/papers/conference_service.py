@@ -79,7 +79,7 @@ class ConferenceService:
         
         return conference
     
-    async def enrich_paper_with_conference(
+    async def link_conference_to_paper(
         self, 
         paper: "DBPaper", 
         venue: Optional[str] = None

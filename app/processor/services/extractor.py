@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 import gc
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -16,6 +17,7 @@ from docling.datamodel.base_models import InputFormat
 from docling_core.types.io import DocumentStream
 from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
 from app.extensions.logger import create_logger
+from app.modules.r2_storage import R2StorageService
 import xml.etree.ElementTree as ET
 
 fitz = None
@@ -34,10 +36,10 @@ class ExtractorService:
         self,
         use_cuda: bool = True,
         use_ocr: bool = False,
-        generate_picture_images: bool = True,
         assets_dir: Optional[str] = None,
         export_hierarchical_chunks: bool = False,
         enable_pymupdf_crops: bool = True,
+        persist_local_assets: bool = True,
     ):
         """Initialize the extractor service with docling converter
         
@@ -48,16 +50,18 @@ class ExtractorService:
             assets_dir: Optional directory to persist extracted assets (figures/tables)
             export_hierarchical_chunks: Whether to export Docling hierarchical chunks
             enable_pymupdf_crops: Whether to crop table/figure regions from raw PDF via PyMuPDF
+            persist_local_assets: Whether to keep persisted assets on local disk after extraction
         """
         self._use_cuda = use_cuda
         self._use_ocr = use_ocr
-        self._generate_picture_images = generate_picture_images
         self._assets_dir = assets_dir
         self._export_hierarchical_chunks = export_hierarchical_chunks
         self._enable_pymupdf_crops = enable_pymupdf_crops
+        self._persist_local_assets = persist_local_assets
         self._cuda_failed = False
         self.converter: Optional[DocumentConverter] = None
         self.hierarchical_chunker: Optional[HierarchicalChunker] = None
+        self.r2_storage = R2StorageService()
         self._initialize_converter()
 
     def _initialize_converter(self):
@@ -71,7 +75,7 @@ class ExtractorService:
                     device=device,
                 ),
                 do_ocr=self._use_ocr,
-                do_formula_enrichment=True, 
+                # do_formula_enrichment=True, # 10-15x slower on 3050 laptop
             )
             
             self.converter = DocumentConverter(
@@ -113,7 +117,7 @@ class ExtractorService:
             result = self.converter.convert(source=pdf_file)
             doc_dict = result.document.export_to_dict()
 
-            if paper_id and self._assets_dir:
+            if paper_id and (self._assets_dir or self.r2_storage.is_configured):
                 self._persist_docling_assets(
                     paper_id=paper_id,
                     doc_dict=doc_dict,
@@ -139,7 +143,7 @@ class ExtractorService:
                     raise RuntimeError("Docling converter is not initialized after CPU fallback")
                 result = self.converter.convert(source=pdf_file)
                 doc_dict = result.document.export_to_dict()
-                if paper_id and self._assets_dir:
+                if paper_id and (self._assets_dir or self.r2_storage.is_configured):
                     self._persist_docling_assets(
                         paper_id=paper_id,
                         doc_dict=doc_dict,
@@ -183,8 +187,17 @@ class ExtractorService:
         pdf_bytes: Optional[bytes] = None,
     ) -> None:
         """Persist figures/tables and optional markdown/chunks into per-paper assets directory."""
-        base_path = Path(self._assets_dir or "").expanduser().resolve() / paper_id
-        base_path.mkdir(parents=True, exist_ok=True)
+        temporary_storage: Optional[tempfile.TemporaryDirectory[str]] = None
+        # persist_local = bool(self._persist_local_assets and self._assets_dir)
+        persist_local = False  # Enforced
+
+        if persist_local:
+            base_path = Path(self._assets_dir or "").expanduser().resolve() / paper_id
+            base_path.mkdir(parents=True, exist_ok=True)
+        else:
+            temporary_storage = tempfile.TemporaryDirectory(prefix=f"docling_{paper_id}_")
+            base_path = Path(temporary_storage.name) / paper_id
+            base_path.mkdir(parents=True, exist_ok=True)
 
         assets_manifest: Dict[str, Any] = {
             "paper_id": paper_id,
@@ -196,54 +209,160 @@ class ExtractorService:
             "crop_backend": "pymupdf" if self._enable_pymupdf_crops else "disabled",
         }
 
-        pdf_doc = None
-        if self._enable_pymupdf_crops and pdf_bytes and fitz is not None:
-            try:
-                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            except Exception as open_error:
-                logger.warning(f"Failed to open PDF with PyMuPDF for {paper_id}: {open_error}")
-        elif self._enable_pymupdf_crops and fitz is None:
-            logger.warning("PyMuPDF is not available. Skipping visual crops.")
+        try:
+            pdf_doc = None
+            if self._enable_pymupdf_crops and pdf_bytes and fitz is not None:
+                try:
+                    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                except Exception as open_error:
+                    logger.warning(f"Failed to open PDF with PyMuPDF for {paper_id}: {open_error}")
+            elif self._enable_pymupdf_crops and fitz is None:
+                logger.warning("PyMuPDF is not available. Skipping visual crops.")
 
-        self._persist_table_assets(
-            base_path=base_path,
-            doc_dict=doc_dict,
-            manifest=assets_manifest,
-            pdf_doc=pdf_doc,
-        )
-        self._persist_figure_assets(
-            base_path=base_path,
-            doc_dict=doc_dict,
-            document=document,
-            manifest=assets_manifest,
-            paper_id=paper_id,
-            pdf_doc=pdf_doc,
-        )
-        # self._persist_markdown_and_hierarchical_chunks(base_path=base_path, document=document, manifest=assets_manifest)
+            self._persist_table_assets(
+                base_path=base_path,
+                doc_dict=doc_dict,
+                manifest=assets_manifest,
+                pdf_doc=pdf_doc,
+            )
+            self._persist_figure_assets(
+                base_path=base_path,
+                doc_dict=doc_dict,
+                document=document,
+                manifest=assets_manifest,
+                paper_id=paper_id,
+                pdf_doc=pdf_doc,
+            )
+            # self._persist_hierarchical_chunks(
+            #     base_path=base_path,
+            #     document=document,
+            #     manifest=assets_manifest,
+            # )
 
-        if pdf_doc is not None:
+            if pdf_doc is not None:
+                try:
+                    pdf_doc.close()
+                except Exception:
+                    pass
+
+            manifest_path = base_path / "assets_manifest.json"
+            manifest_path.write_text(
+                json.dumps(assets_manifest, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            doc_dict.setdefault("asset_paths", {})
+            if persist_local:
+                doc_dict["asset_paths"].update(
+                    {
+                        "base_path": str(base_path),
+                        "manifest_path": str(manifest_path),
+                        "tables_dir": str(base_path / "tables"),
+                        "figures_dir": str(base_path / "figures"),
+                        "tables_crop_dir": str(base_path / "tables" / "crops"),
+                        "figures_crop_dir": str(base_path / "figures" / "crops"),
+                    }
+                )
+
+            self._upload_assets_to_r2(
+                paper_id=paper_id,
+                base_path=base_path,
+                manifest=assets_manifest,
+                manifest_path=manifest_path,
+                doc_dict=doc_dict,
+            )
+
+            doc_dict["asset_manifest"] = assets_manifest
+        finally:
+            if temporary_storage is not None:
+                temporary_storage.cleanup()
+
+    def _upload_assets_to_r2(
+        self,
+        paper_id: str,
+        base_path: Path,
+        manifest: Dict[str, Any],
+        manifest_path: Path,
+        doc_dict: Dict[str, Any],
+    ) -> None:
+        """Upload persisted local assets (tables/figures/crops/json) to Cloudflare R2 when enabled."""
+        if not self.r2_storage.is_configured:
+            return
+
+        def upload_local_file(local_path_value: Optional[str]) -> Optional[Dict[str, Any]]:
+            if not local_path_value:
+                return None
+
+            local_path = Path(local_path_value)
+            if not local_path.exists() or not local_path.is_file():
+                return None
+
             try:
-                pdf_doc.close()
+                relative_path = local_path.relative_to(base_path)
             except Exception:
-                pass
+                relative_path = Path(local_path.name)
 
-        manifest_path = base_path / "assets_manifest.json"
-        manifest_path.write_text(
-            json.dumps(assets_manifest, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
+            key = self.r2_storage.build_asset_key(
+                paper_id=paper_id,
+                relative_path=str(relative_path).replace("\\", "/"),
+            )
+            return self.r2_storage.upload_file(local_path=local_path, key=key)
 
-        doc_dict.setdefault("asset_paths", {})
-        doc_dict["asset_paths"].update(
-            {
-                "base_path": str(base_path),
-                "manifest_path": str(manifest_path),
-                "tables_dir": str(base_path / "tables"),
-                "figures_dir": str(base_path / "figures"),
-                "tables_crop_dir": str(base_path / "tables" / "crops"),
-                "figures_crop_dir": str(base_path / "figures" / "crops"),
-            }
-        )
+        try:
+            for table_entry in manifest.get("tables", []) or []:
+                if not isinstance(table_entry, dict):
+                    continue
+                path_upload = upload_local_file(table_entry.get("path"))
+                crop_upload = upload_local_file(table_entry.get("crop_path"))
+                table_entry["r2"] = {
+                    "path": path_upload,
+                    "crop_path": crop_upload,
+                }
+                if path_upload:
+                    table_entry["path"] = path_upload.get("url") or path_upload.get("key")
+                if crop_upload:
+                    table_entry["crop_path"] = crop_upload.get("url") or crop_upload.get("key")
+
+            for figure_entry in manifest.get("figures", []) or []:
+                if not isinstance(figure_entry, dict):
+                    continue
+                metadata_upload = upload_local_file(figure_entry.get("metadata_path"))
+                image_upload = upload_local_file(figure_entry.get("image_path"))
+                crop_upload = upload_local_file(figure_entry.get("crop_path"))
+                figure_entry["r2"] = {
+                    "metadata_path": metadata_upload,
+                    "image_path": image_upload,
+                    "crop_path": crop_upload,
+                }
+                if metadata_upload:
+                    figure_entry["metadata_path"] = (
+                        metadata_upload.get("url") or metadata_upload.get("key")
+                    )
+                if image_upload:
+                    figure_entry["image_path"] = image_upload.get("url") or image_upload.get("key")
+                if crop_upload:
+                    figure_entry["crop_path"] = crop_upload.get("url") or crop_upload.get("key")
+
+            manifest_upload = upload_local_file(str(manifest_path))
+            if manifest_upload:
+                manifest["r2_manifest"] = manifest_upload
+                doc_dict.setdefault("asset_paths", {})
+                doc_dict["asset_paths"].update(
+                    {
+                        "manifest_r2_key": manifest_upload.get("key"),
+                        "manifest_r2_url": manifest_upload.get("url"),
+                    }
+                )
+
+            doc_dict["asset_manifest"] = manifest
+
+            # Write back enriched manifest with R2 links.
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception as error:
+            logger.warning(f"Failed to upload assets to R2 for {paper_id}: {error}")
 
     @staticmethod
     def _bbox_from_prov(item: Dict[str, Any]) -> Optional[Tuple[int, Dict[str, Any]]]:
@@ -442,54 +561,65 @@ class ExtractorService:
                 )
                 manifest["figures"][-1]["crop_path"] = crop_path
 
-    # def _persist_markdown_and_hierarchical_chunks(
-    #     self,
-    #     base_path: Path,
-    #     document: Any,
-    #     manifest: Dict[str, Any],
-    # ) -> None:
-    #     try:
-    #         markdown_text = document.export_to_markdown()
-    #         markdown_path = base_path / "document.md"
-    #         markdown_contextualized_path = base_path / "document_contextualized.md"
-    #         chunker = HierarchicalChunker()
-    #         chunks = chunker.chunk(dl_doc=document)
-    #         markdown_contextualized = []
-    #         for chunk in chunks:
-    #             markdown_contextualized.append(chunker.contextualize(chunk=chunk))
-    #         markdown_path.write_text(markdown_text, encoding="utf-8")
-    #         markdown_contextualized_path.write_text("\n\n".join(markdown_contextualized), encoding="utf-8")
-    #         manifest["markdown_path"] = str(markdown_path)
-    #     except Exception as markdown_error:
-    #         logger.warning(f"Failed to export markdown for assets at {base_path}: {markdown_error}")
+    def _persist_hierarchical_chunks(
+        self,
+        base_path: Path,
+        document: Any,
+        manifest: Dict[str, Any],
+    ) -> None:
+        """Persist Docling hierarchical chunks for section-aware downstream chunking."""
+        if not self._export_hierarchical_chunks:
+            return
 
-    #     if not self._export_hierarchical_chunks:
-    #         return
+        try:
+            hierarchical_chunker = self.hierarchical_chunker or HierarchicalChunker()
+            self.hierarchical_chunker = hierarchical_chunker
 
-    #     try:
-    #         hierarchical_chunker = HierarchicalChunker()
-    #         serialized_chunks: List[Dict[str, Any]] = []
-    #         for idx, chunk in enumerate(hierarchical_chunker.chunk(dl_doc=document)):
-    #             chunk_text = getattr(chunk, "text", None)
-    #             if chunk_text is None and hasattr(chunk, "export_json_dict"):
-    #                 chunk_text = json.dumps(chunk.export_json_dict(), ensure_ascii=False)
+            serialized_chunks: List[Dict[str, Any]] = []
+            for idx, chunk in enumerate(hierarchical_chunker.chunk(dl_doc=document)):
+                chunk_text = getattr(chunk, "text", None)
+                if isinstance(chunk_text, str):
+                    chunk_text = chunk_text.strip()
 
-    #             serialized_chunks.append(
-    #                 {
-    #                     "index": idx,
-    #                     "text": chunk_text or "",
-    #                     "metadata": getattr(chunk, "meta", None),
-    #                 }
-    #             )
+                if not chunk_text and hasattr(hierarchical_chunker, "contextualize"):
+                    try:
+                        chunk_text = hierarchical_chunker.contextualize(chunk=chunk)
+                    except Exception:
+                        chunk_text = ""
 
-    #         chunk_path = base_path / "hierarchical_chunks.json"
-    #         chunk_path.write_text(
-    #             json.dumps(serialized_chunks, ensure_ascii=False, indent=2, default=str),
-    #             encoding="utf-8",
-    #         )
-    #         manifest["hierarchical_chunks_path"] = str(chunk_path)
-    #     except Exception as chunk_error:
-    #         logger.warning(f"Failed to export hierarchical chunks for assets at {base_path}: {chunk_error}")
+                meta = getattr(chunk, "meta", None)
+                if hasattr(meta, "model_dump"):
+                    try:
+                        meta = meta.model_dump(mode="json")
+                    except Exception:
+                        meta = str(meta)
+                elif hasattr(meta, "dict"):
+                    try:
+                        meta = meta.dict()
+                    except Exception:
+                        meta = str(meta)
+
+                serialized_chunks.append(
+                    {
+                        "index": idx,
+                        "text": chunk_text or "",
+                        "metadata": meta,
+                    }
+                )
+
+            if not serialized_chunks:
+                return
+
+            chunk_path = base_path / "hierarchical_chunks.json"
+            chunk_path.write_text(
+                json.dumps(serialized_chunks, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            manifest["hierarchical_chunks_path"] = str(chunk_path)
+        except Exception as chunk_error:
+            logger.warning(
+                f"Failed to export hierarchical chunks for assets at {base_path}: {chunk_error}"
+            )
 
     def _fix_text_encoding(self, text: str) -> str:
         """

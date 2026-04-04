@@ -85,7 +85,7 @@ async def run_repository_task(
                     # Create paper if not exists
                     existing = await service.repository.get_paper_by_id(paper_id)
                     if not existing:
-                        await service.paper_service.create_paper_from_schema(paper)
+                        await service.paper_service.ingest_paper_metadata(paper)
                     # Process through RAG pipeline
                     await service.processor.process_single_paper(paper)
                     logger.info(f"[Repository] Processed paper {paper_id}")
@@ -596,4 +596,53 @@ async def get_preprocessing_phase_task_status(task_id: str) -> ApiResponse[dict]
     task_queue = get_task_queue()
     status = await task_queue.get_status(task_id)
     return success_response(data=status or {"task_id": task_id, "status": "not_found"})
+
+
+async def run_content_processing_task(limit: int) -> dict:
+    """Queue task wrapper for Phase 4 content processing."""
+    db = async_session()
+    try:
+        container = ServiceContainer(db)
+        return await container.preprocessing_service.run_content_processing(limit=limit)
+    finally:
+        await db.close()
+
+
+class ContentProcessingRequest(BaseModel):
+    """Request to trigger Phase 4 content processing."""
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Max pending papers to process per loop iteration",
+    )
+
+
+@router.post("/phases/content/start", response_model=ApiResponse[PreprocessingTaskResponse])
+async def start_content_processing_phase(
+    request: ContentProcessingRequest,
+) -> ApiResponse[PreprocessingTaskResponse]:
+    """
+    Queue Phase 4: PDF extraction → chunking → embedding for all pending open-access papers.
+
+    This runs the same pipeline as the automatic Phase 4 inside a bulk-search job,
+    but can be triggered independently to process any papers that were indexed
+    but not yet fully processed.
+    """
+    task_queue = get_task_queue()
+    task_id = await task_queue.submit(
+        "preprocess_content",
+        run_content_processing_task,
+        limit=request.limit,
+    )
+    return success_response(
+        data=PreprocessingTaskResponse(
+            task_id=task_id,
+            task_type="preprocess_content",
+            status="queued",
+            message=f"Content processing phase queued (limit={request.limit} papers/batch)",
+        )
+    )
+
+
 

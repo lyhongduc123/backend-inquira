@@ -14,6 +14,8 @@ from sqlalchemy import (
     ForeignKey,
     func,
     Index,
+    literal_column,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from pgvector.sqlalchemy import Vector
@@ -252,7 +254,7 @@ class DBPaper(Base):
         comment="Last access timestamp for cache management",
     )
 
-    paper_authors: Mapped[list["DBAuthorPaper"]] = relationship(
+    authors: Mapped[list["DBAuthorPaper"]] = relationship(
         "DBAuthorPaper", back_populates="paper", cascade="all, delete-orphan"
     )
     references: Mapped[list["DBCitation"]] = relationship(
@@ -291,19 +293,39 @@ class DBPaper(Base):
     """User bookmarks for this paper."""
 
     __table_args__ = (
-        Index("idx_paper_trust", "author_trust_score", "institutional_trust_score"),
-        Index("idx_paper_quality", "fwci", "citation_count"),
-        Index("idx_paper_status", "is_retracted", "is_open_access"),
         # GIN index for fields_of_study array searches
         Index(
             "ix_papers_fields_of_study_gin", "fields_of_study", postgresql_using="gin"
         ),
+        # Composite filter index for common constrained retrieval
+        # (open access + publication year range + citation count range)
+        Index(
+            "ix_papers_open_access_year_citation",
+            "is_open_access",
+            "year",
+            "citation_count",
+        ),
+        # HNSW index for semantic retrieval on title+abstract embeddings
+        Index(
+            "ix_papers_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_where=text("embedding IS NOT NULL"),
+        ),
+        # HNSW index for semantic retrieval on TLDR embeddings
+        Index(
+            "ix_papers_tldr_embedding_hnsw",
+            "tldr_embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"tldr_embedding": "vector_cosine_ops"},
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_where=text("tldr_embedding IS NOT NULL"),
+        ),
         Index(
             "ix_papers_title_abstract_gin",
-            func.to_tsvector(
-                "english",
-                func.to_tsvector("english", func.concat(title, " ", abstract)),
-            ),
+            text("to_tsvector('english', title || ' ' || abstract)"),
             postgresql_using="gin",
         ),
     )
@@ -387,3 +409,15 @@ class DBPaperChunk(Base):
     )
 
     paper: Mapped["DBPaper"] = relationship("DBPaper", back_populates="chunks")
+
+    __table_args__ = (
+        # HNSW index for fast chunk-level vector similarity search
+        Index(
+            "ix_paper_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_where=literal_column("embedding IS NOT NULL"),
+        ),
+    )

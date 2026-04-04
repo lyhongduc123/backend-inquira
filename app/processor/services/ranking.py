@@ -163,7 +163,6 @@ class RankingService:
                 raise
 
         for chunk, score in zip(chunks, scores):
-
             chunk.relevance_score = float(score)
         reranked_chunks = sorted(chunks, key=lambda c: c.relevance_score, reverse=True)
 

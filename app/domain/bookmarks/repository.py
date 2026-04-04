@@ -48,7 +48,7 @@ class BookmarkRepository:
         if load_paper:
             query = query.options(
                 joinedload(DBBookmark.paper)
-                .selectinload(DBPaper.paper_authors)
+                .selectinload(DBPaper.authors)
                 .selectinload(DBAuthorPaper.author),
                 joinedload(DBBookmark.paper).joinedload(DBPaper.journal),
             )
@@ -83,7 +83,7 @@ class BookmarkRepository:
             )
         ).options(
             joinedload(DBBookmark.paper)
-            .selectinload(DBPaper.paper_authors)
+            .selectinload(DBPaper.authors)
             .selectinload(DBAuthorPaper.author),
             joinedload(DBBookmark.paper).joinedload(DBPaper.journal)
         )

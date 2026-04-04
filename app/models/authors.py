@@ -36,7 +36,7 @@ class DBAuthor(Base):
         unique=True,
         nullable=False,
         index=True,
-        comment="Primary author ID (Semantic Scholar preferred, OpenAlex fallback)",
+        comment="Primary author ID (Semantic Scholar preferred)",
     )
     openalex_id: Mapped[str] = mapped_column(
         String(100),
@@ -57,6 +57,11 @@ class DBAuthor(Base):
 
     h_index: Mapped[int] = mapped_column(Integer, nullable=True, default=None)
     i10_index: Mapped[int] = mapped_column(Integer, nullable=True, default=None)
+    openalex_counts_by_year: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Cached OpenAlex counts_by_year payload keyed by year",
+    )
     g_index: Mapped[int] = mapped_column(Integer, nullable=True, default=None, comment="g-index: largest number g where top g papers have at least g² citations")
     total_citations: Mapped[int] = mapped_column(Integer, nullable=True, default=None, index=True)
     total_papers: Mapped[int] = mapped_column(Integer, nullable=True, default=None)
@@ -69,7 +74,7 @@ class DBAuthor(Base):
     last_known_institution_id: Mapped[int] = mapped_column(
         ForeignKey("institutions.id"), nullable=True
     )
-    reputation_score: Mapped[float] = mapped_column(Float, nullable=True, index=True)
+    retraction_rate: Mapped[float] = mapped_column(Float, nullable=True, index=True)
     field_weighted_citation_impact: Mapped[float] = mapped_column(
         Float, nullable=True
     )  # This might be not computable
@@ -102,7 +107,7 @@ class DBAuthor(Base):
     )
 
     # Relationships
-    paper_authors: Mapped[list["DBAuthorPaper"]] = relationship(
+    papers: Mapped[list["DBAuthorPaper"]] = relationship(
         "DBAuthorPaper", back_populates="author", cascade="all, delete-orphan"
     )
     author_institutions: Mapped[list["DBAuthorInstitution"]] = relationship(
@@ -113,8 +118,8 @@ class DBAuthor(Base):
     )
 
     __table_args__ = (
-        Index("idx_author_reputation", "reputation_score", "total_citations"),
-        Index("verified"),
+        Index("idx_author_reputation", "retraction_rate", "total_citations"),
+        Index("idx_author_verified", "verified"),
     )
 
 
@@ -137,7 +142,7 @@ class DBAuthorPaper(Base):
     # Author position/role metadata
     author_position: Mapped[int] = mapped_column(
         Integer, nullable=True
-    )  # 1 = first author, etc.
+    ) 
     is_corresponding: Mapped[bool] = mapped_column(Boolean, default=False)
     institution_id: Mapped[int] = mapped_column(
         ForeignKey("institutions.id"), nullable=True, index=True
@@ -154,9 +159,9 @@ class DBAuthorPaper(Base):
 
     # Relationships
     author: Mapped["DBAuthor"] = relationship(
-        "DBAuthor", back_populates="paper_authors"
+        "DBAuthor", back_populates="papers"
     )
-    paper: Mapped["DBPaper"] = relationship("DBPaper", back_populates="paper_authors")
+    paper: Mapped["DBPaper"] = relationship("DBPaper", back_populates="authors")
     institution: Mapped["DBInstitution"] = relationship(
         "DBInstitution", back_populates="author_papers"
     )
@@ -192,9 +197,6 @@ class DBAuthorInstitution(Base):
     paper_count: Mapped[int] = mapped_column(
         Integer, default=1
     )  # How many papers link this affiliation
-    confidence: Mapped[float] = mapped_column(
-        Float, default=1.0
-    )  # Confidence in this affiliation
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

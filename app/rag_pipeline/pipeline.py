@@ -2,7 +2,7 @@
 
 import asyncio
 import gc
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -333,121 +333,7 @@ class Pipeline:
         async for event in self.run_paper_rag_workflow(*args, **kwargs):
             yield event
 
-    async def run_author_enrichment_workflow(
-        self,
-        author_id: str,
-        oa_author_id: Optional[str] = None,
-        limit: int = 500,
-        compute_relationships: bool = True,
-    ) -> PipelineResult:
-        """
-        Author enrichment workflow: Fetch author papers, process them, compute career metrics.
 
-        This workflow orchestrates the complete author enrichment process:
-        1. Fetch all papers for author from APIs (S2/OpenAlex)
-        2. Convert to DTOs and ensure paper records in database
-        3. Compute career metrics (first pub year, FWCI, positions, etc.) via AuthorService
-        4. Update last_paper_indexed_at timestamp
-        5. Return enrichment result
-
-        Args:
-            author_id: Unique author identifier (S2 ID or OpenAlex ID)
-            limit: Maximum papers to fetch (default: 500)
-            compute_relationships: Whether to compute collaboration/citation relationships
-
-        Returns:
-            PipelineResult with papers and metadata
-        """
-        logger.info(f"Starting author enrichment workflow for {author_id}")
-        papers = await self.retriever.get_author_papers(author_id=author_id)
-        author = await self.retriever.get_author(oa_author_id) if oa_author_id else None
-
-        if limit and len(papers) > limit:
-            papers = papers[:limit]
-        logger.info(f"Retrieved {len(papers)} papers from API")
-
-        if not papers:
-            logger.warning(f"No papers found for author {author_id}")
-            return PipelineResult(papers=[], author=author)
-
-        processed_count = 0
-        papers_with_metadata: List[tuple[DBPaper, List[Dict[str, Any]]]] = []
-        for paper in papers:
-            try:
-                db_paper = await self.processor.paper_service.create_paper_from_schema(
-                    paper,
-                    defer_enrichment=True,
-                )
-
-                if db_paper:
-                    processed_count += 1
-
-                    authors_payload: List[Dict[str, Any]] = []
-                    for author in paper.authors or []:
-                        if isinstance(author, dict):
-                            authors_payload.append(author)
-                        elif hasattr(author, "model_dump"):
-                            authors_payload.append(author.model_dump())
-
-                    papers_with_metadata.append((db_paper, authors_payload))
-            except Exception as e:
-                logger.error(
-                    f"Error ensuring paper {paper.paper_id}: {e}", exc_info=True
-                )
-
-        logger.info(f"Processed {processed_count}/{len(papers)} papers successfully")
-
-        if papers_with_metadata:
-            try:
-                enrichment_stats = (
-                    await self.processor.paper_service.batch_enrich_papers_with_authors_journals(
-                        papers_with_metadata
-                    )
-                )
-                logger.info(
-                    "Batch enriched author workflow papers: "
-                    f"{enrichment_stats}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Batch enrichment failed for author {author_id}: {e}",
-                    exc_info=True,
-                )
-
-        from app.domain.authors import AuthorService
-
-        author_service = AuthorService(self.db_session)
-
-        logger.info(f"Computing career metrics for author {author_id}")
-        await author_service.compute_career_metrics(author_id)
-
-        from app.domain.authors import AuthorRepository
-        from app.retriever.schemas.openalex import OAAuthorResponse
-
-        author_repository = AuthorRepository(self.db_session)
-        summary_stats = getattr(author, "summary_stats", None) if author else None
-        i10_index = summary_stats.get("i10_index") if isinstance(summary_stats, dict) else None
-
-        await author_repository.update_author(
-            author_id, {"i10_index": i10_index, "last_paper_indexed_at": datetime.now()}
-        )
-
-        if compute_relationships:
-            try:
-                await author_repository.compute_author_relationships(author_id)
-                logger.info(f"Computed author relationships for {author_id}")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to compute author relationships: {e}",
-                    exc_info=True,
-                )
-
-        logger.info(f"Author enrichment workflow completed for {author_id}")
-
-        return PipelineResult(
-            papers=papers,
-            author=author if isinstance(author, OAAuthorResponse) else None,
-        )
 
     async def _break_down_query(
         self,

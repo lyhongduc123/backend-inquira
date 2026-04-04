@@ -19,7 +19,6 @@ import app.models
 
 # Import routers from domain modules
 from app.domain.chat.router import router as chat_router
-from app.domain.chat.test_router import router as test_router
 from app.domain.conversations.router import router as conversations_router
 from app.domain.authors.router import router as authors_router
 from app.domain.papers.router import router as papers_router
@@ -65,10 +64,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add Request ID middleware
+
 app.add_middleware(RequestIDMiddleware)
 
-# Middleware to add standard response headers
 @app.middleware("http")
 async def add_response_headers(request: Request, call_next):
     """Add standard headers to all responses"""
@@ -87,11 +85,11 @@ async def add_response_headers(request: Request, call_next):
 from app.core.config import settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL],  # Frontend URL from config
+    allow_origins=[settings.FRONTEND_URL], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID", "X-Timestamp"],  # Expose custom headers
+    expose_headers=["X-Request-ID", "X-Timestamp"], 
 )
 
 # Exception handlers - HTTP-native format (no wrapper)
@@ -191,13 +189,13 @@ app.include_router(
 )
 app.include_router(
     authors_router,
-    prefix="/api/v1/admin/authors",
-    tags=["admin", "authors"]
+    prefix="/api/v1/authors",
+    tags=["authors"]
 )
 app.include_router(
     institutions_router,
-    prefix="/api/v1/admin/institutions",
-    tags=["admin", "institutions"]
+    prefix="/api/v1/institutions",
+    tags=["institutions"]
 )
 app.include_router(
     validation_router,
@@ -213,11 +211,6 @@ app.include_router(
     user_settings_router,
     prefix="/api/v1/user/settings",
     tags=["user", "settings"]
-)
-app.include_router(
-    test_router,
-    prefix="/api/v1/chat",
-    tags=["test"]
 )
 app.include_router(
     benchmark_router,

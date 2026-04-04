@@ -5,16 +5,38 @@ from app.core.model import CamelModel
 from app.domain.papers.schemas import PaperMetadata
 
 
+class ChatSubmitFilters(CamelModel):
+    """Typed filters for chat submit requests."""
+    author: Optional[str] = Field(None, description="Author name filter")
+    year_min: Optional[int] = Field(None, description="Minimum publication year")
+    year_max: Optional[int] = Field(None, description="Maximum publication year")
+    venue: Optional[str] = Field(None, description="Venue/journal/conference filter")
+    min_citations: Optional[int] = Field(None, description="Minimum citation count")
+    max_citations: Optional[int] = Field(None, description="Maximum citation count")
+    paper_ids: Optional[List[str]] = Field(
+        None,
+        description="Scoped paper IDs for paper-constrained answering (serialized as paperIds)",
+    )
+
+
+class ChatSubmitResponse(CamelModel):
+    """Response model for chat submission"""
+    task_id: str = Field(..., description="Unique task identifier for tracking")
+    conversation_id: str = Field(..., description="Conversation this task belongs to")
+    status: str = Field(..., description="Initial task status (pending)")
+    message: str = Field(..., description="Success message")
+
+
 class ChatMessageRequest(CamelModel):
     """Request model for sending a chat message"""
     query: str = Field(..., min_length=1, max_length=5000, description="User's message/question")
     conversation_id: Optional[str] = Field(None, description="UUID of existing conversation")
-    filters: Optional[Dict[str, Any]] = Field(None, description="Optional filters for retrieval")
+    filters: Optional[ChatSubmitFilters] = Field(None, description="Optional filters for retrieval")
     model: Optional[str] = Field(None, description="Optional model override")
     stream: bool = Field(True, description="Whether to stream the response")
     is_retry: bool = Field(False, description="Whether this is a retry of a failed request")
     client_message_id: Optional[str] = Field(None, description="Client-generated message ID for deduplication on retry")
-    pipeline: Literal["database", "hybrid", "standard"] = Field("database", description="Pipeline type: 'database' (fast DB-only), 'hybrid' (BM25+semantic with S2/OA), 'standard' (legacy)")
+    pipeline: Literal["database", "hybrid", "standard", "research"] = Field("database", description="Pipeline type")
     use_hybrid_pipeline: bool = Field(False, description="Deprecated: use 'pipeline' field instead")
 
 
@@ -40,20 +62,6 @@ class FeedbackResponse(CamelModel):
     message: str
 
 
-class ChatSubmitFilters(CamelModel):
-    """Typed filters for chat submit requests."""
-    author: Optional[str] = Field(None, description="Author name filter")
-    year_min: Optional[int] = Field(None, description="Minimum publication year")
-    year_max: Optional[int] = Field(None, description="Maximum publication year")
-    venue: Optional[str] = Field(None, description="Venue/journal/conference filter")
-    min_citations: Optional[int] = Field(None, description="Minimum citation count")
-    max_citations: Optional[int] = Field(None, description="Maximum citation count")
-    paper_ids: Optional[List[str]] = Field(
-        None,
-        description="Scoped paper IDs for paper-constrained answering (serialized as paperIds)",
-    )
-
-
 class ChatSubmitRequest(CamelModel):
     """Request model for submitting a chat message for async processing"""
     query: str = Field(..., min_length=1, max_length=5000, description="User's message/question")
@@ -61,16 +69,7 @@ class ChatSubmitRequest(CamelModel):
     filters: Optional[ChatSubmitFilters] = Field(None, description="Optional typed filters for retrieval")
     model: Optional[str] = Field(None, description="Optional model override")
     client_message_id: Optional[str] = Field(None, description="Client-generated message ID for deduplication")
-    pipeline: Literal["database", "hybrid", "standard"] = Field("database", description="Pipeline type")
-
-
-class ChatSubmitResponse(CamelModel):
-    """Response model for chat submission"""
-    task_id: str = Field(..., description="Unique task identifier for tracking")
-    conversation_id: str = Field(..., description="Conversation this task belongs to")
-    status: str = Field(..., description="Initial task status (pending)")
-    message: str = Field(..., description="Success message")
-
+    pipeline: Literal["database", "hybrid", "research", "agent"] = Field("database", description="Pipeline type")
 
 class PipelineTaskResponse(CamelModel):
     """Response model for pipeline task status"""

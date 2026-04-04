@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     DATABASE_URL: str
     DATABASE_SYNC_URL: str
+    BEIR_TEST_DATABASE_URL: str | None = None 
     REDIS_URL: str = "redis://localhost:6379/0"
     EMBEDDING_MODEL_NAME: str | None = None
     VECTOR_STORE_PATH: str | None = None
@@ -36,11 +37,12 @@ class Settings(BaseSettings):
 
     # LLM Model Configuration
     LLM_MODEL: list[str] = [
+        "gemini/gemini-2.5-flash",
+        "gemini/gemini-2.5-flash-lite",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "openrouter/nousresearch/hermes-3-llama-3.1-405b:free",
         "openrouter/mistralai/mistral-small-3.1-24b-instruct:free",
-        "gemini/gemini-2.5-flash-lite",
         "mistral/mistral-large-latest"
     ]
 
@@ -64,18 +66,37 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = False
     COOKIE_SAMESITE: Literal["strict", "lax", "none"] = "lax"
     COOKIE_DOMAIN: str | None = None  
+    
+    EMAIL_OTP_EXPIRE_MINUTES: int = 5
+    EMAIL_OTP_RESEND_COOLDOWN_SECONDS: int = 60
+    EMAIL_OTP_MAX_ATTEMPTS: int = 5
+    RESEND_API_KEY: str | None = None
+    RESEND_FROM_EMAIL: str | None = None
+    RESEND_API_URL: str = "https://api.resend.com/emails"
 
     LOG_DIR: str = "logs"
     LOG_TO_CONSOLE: bool = False
     LOG_LEVEL: str = "DEBUG"  # DEBUG, INFO, WARNING, ERROR, CRITICAL (default: DEBUG for development)
     
     # CUDA/GPU settings
-    USE_CUDA: bool = True  # Set to False to disable CUDA and use CPU only
-    DOC_OCR_ENABLED: bool = False  # Enable OCR for scanned PDFs when needed
-    DOC_GENERATE_PICTURE_IMAGES: bool = True
+    USE_CUDA: bool = True 
+    DOC_OCR_ENABLED: bool = False
     DOC_ASSETS_DIR: str = "preprocessing_logs/docling_assets"
-    DOC_EXPORT_HIERARCHICAL_CHUNKS: bool = True
+    DOC_ASSETS_PERSIST_LOCAL: bool = False
+    DOC_EXPORT_HIERARCHICAL_CHUNKS: bool = False
     DOC_ENABLE_PYMUPDF_CROPS: bool = True
+
+    R2_ENABLED: bool = True
+    R2_ACCOUNT_ID: str | None = None
+    R2_ENDPOINT_URL: str | None = None
+    R2_ACCESS_KEY_ID: str | None = None
+    R2_SECRET_ACCESS_KEY: str | None = None
+    R2_BUCKET: str | None = None
+    R2_PUBLIC_BASE_URL: str | None = None
+    R2_ASSET_PREFIX: str = "docling-assets"
+    R2_PDF_PREFIX: str = "source-pdfs"
+    
+    CF_API_TOKEN: str | None = None
 
     class Config:
         env_file = ".env"

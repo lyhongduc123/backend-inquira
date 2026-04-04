@@ -165,7 +165,7 @@ class JournalService:
         logger.debug(f"No journal match found for venue: {venue}, ISSN: {issn}, ISSN-L: {issn_l}")
         return None
 
-    async def enrich_paper_with_journal(
+    async def link_journal_to_paper(
         self, 
         paper: "DBPaper", 
         venue: Optional[str] = None,

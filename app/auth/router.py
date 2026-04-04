@@ -9,12 +9,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import timedelta
 from pydantic import BaseModel
 from typing import Optional
+from sqlalchemy.exc import IntegrityError
 
 from app.auth.schemas import (
     Token,
     RefreshTokenRequest,
     UserResponse,
     OAuthCallbackResponse,
+    EmailOtpMode,
+    EmailOtpRequest,
+    EmailOtpRequestResponse,
+    EmailOtpVerifyRequest,
+    EmailOtpVerifyResponse,
+    EmailOtpPreVerifyResponse,
 )
 from app.auth.oauth_service import (
     GoogleOAuthProvider,
@@ -25,7 +32,8 @@ from app.auth.oauth_service import (
     revoke_refresh_token,
     revoke_all_user_tokens,
 )
-from app.auth.service import create_access_token, get_user_by_id
+from app.auth.email_otp_service import create_email_otp, send_otp_email, verify_email_otp
+from app.auth.service import create_access_token, get_user_by_email, get_user_by_id
 from app.auth.dependencies import get_current_user
 from app.db.database import get_db_session
 from app.models.users import DBUser
@@ -100,22 +108,27 @@ def set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
 
 def clear_auth_cookies(response: Response) -> None:
     """Clear both access and refresh token cookies on logout"""
-    delete_kwargs_access = {
-        "key": ACCESS_TOKEN_COOKIE_NAME,
-        "path": "/",
-    }
-    delete_kwargs_refresh = {
-        "key": REFRESH_TOKEN_COOKIE_NAME,
-        "path": "/",
-    }
-    
-    # Only set domain if explicitly configured
     if settings.COOKIE_DOMAIN:
-        delete_kwargs_access["domain"] = settings.COOKIE_DOMAIN
-        delete_kwargs_refresh["domain"] = settings.COOKIE_DOMAIN
-    
-    response.delete_cookie(**delete_kwargs_access)
-    response.delete_cookie(**delete_kwargs_refresh)
+        response.delete_cookie(
+            key=ACCESS_TOKEN_COOKIE_NAME,
+            path='/',
+            domain=settings.COOKIE_DOMAIN,
+        )
+        response.delete_cookie(
+            key=REFRESH_TOKEN_COOKIE_NAME,
+            path='/',
+            domain=settings.COOKIE_DOMAIN,
+        )
+        return
+
+    response.delete_cookie(
+        key=ACCESS_TOKEN_COOKIE_NAME,
+        path='/',
+    )
+    response.delete_cookie(
+        key=REFRESH_TOKEN_COOKIE_NAME,
+        path='/',
+    )
 
 
 def get_refresh_token_from_cookie_or_body(
@@ -133,6 +146,126 @@ def get_refresh_token_from_cookie_or_body(
     if not token:
         raise UnauthorizedException("No refresh token provided")
     return token
+
+
+@router.post("/email/request-otp", response_model=EmailOtpRequestResponse)
+async def request_email_otp(
+    request: EmailOtpRequest,
+    db: AsyncSession = Depends(get_db_session),
+) -> EmailOtpRequestResponse:
+    """Request an OTP code for email login or signup."""
+    normalized_email = request.email.strip().lower()
+    existing_user = await get_user_by_email(db, normalized_email)
+
+    if request.mode == EmailOtpMode.LOGIN and not existing_user:
+        raise BadRequestException("No account found for this email. Please sign up first.")
+
+    if request.mode == EmailOtpMode.SIGNUP and existing_user:
+        raise BadRequestException("An account with this email already exists. Please log in.")
+
+    _, otp_code = await create_email_otp(db, normalized_email, request.mode.value)
+    await send_otp_email(
+        email=normalized_email,
+        otp_code=otp_code,
+        mode=request.mode.value,
+        expires_minutes=settings.EMAIL_OTP_EXPIRE_MINUTES,
+    )
+
+    return EmailOtpRequestResponse(
+        message="Verification code sent to your email",
+        expires_in=settings.EMAIL_OTP_EXPIRE_MINUTES * 60,
+        resend_after=settings.EMAIL_OTP_RESEND_COOLDOWN_SECONDS,
+    )
+
+
+@router.post("/email/verify-otp", response_model=EmailOtpVerifyResponse)
+async def verify_email_otp_login(
+    request: EmailOtpVerifyRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db_session),
+) -> EmailOtpVerifyResponse:
+    """Verify email OTP and authenticate user with secure cookies."""
+    normalized_email = request.email.strip().lower()
+    await verify_email_otp(db, normalized_email, request.otp, request.mode.value)
+
+    user = await get_user_by_email(db, normalized_email)
+
+    if request.mode == EmailOtpMode.LOGIN:
+        if not user:
+            raise UnauthorizedException("Account not found. Please sign up first.")
+    else:
+        if user:
+            raise BadRequestException("An account with this email already exists. Please log in.")
+
+        display_name = request.name.strip() if request.name else normalized_email.split("@")[0]
+        provider_id = f"email:{normalized_email}"
+
+        try:
+            user = DBUser(
+                email=normalized_email,
+                name=display_name,
+                avatar_url=None,
+                provider="email",
+                provider_id=provider_id,
+                is_active=True,
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        except IntegrityError:
+            await db.rollback()
+            user = await get_user_by_email(db, normalized_email)
+            if not user:
+                raise BadRequestException("Could not create account. Please try again.")
+
+    if not user or not user.is_active:
+        raise UnauthorizedException("User not found or inactive")
+
+    access_token = create_access_token(data={"sub": user.id, "email": user.email})
+    refresh_token = await create_refresh_token(db, user.id)
+
+    set_access_token_cookie(response, access_token)
+    set_refresh_token_cookie(response, refresh_token)
+
+    return EmailOtpVerifyResponse(
+        access_token="",
+        token_type="bearer",
+        expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=UserResponse(
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            avatar_url=user.avatar_url,
+            provider=user.provider,
+            is_active=user.is_active,
+            created_at=user.created_at,
+        ),
+    )
+
+
+@router.post("/email/pre-verify-otp", response_model=EmailOtpPreVerifyResponse)
+async def pre_verify_signup_email_otp(
+    request: EmailOtpVerifyRequest,
+    db: AsyncSession = Depends(get_db_session),
+) -> EmailOtpPreVerifyResponse:
+    """Pre-verify signup OTP before collecting profile name; does not consume OTP."""
+    if request.mode != EmailOtpMode.SIGNUP:
+        raise BadRequestException("Pre-verification is only available for signup mode.")
+
+    normalized_email = request.email.strip().lower()
+    existing_user = await get_user_by_email(db, normalized_email)
+    if existing_user:
+        raise BadRequestException("An account with this email already exists. Please log in.")
+
+    await verify_email_otp(
+        db,
+        normalized_email,
+        request.otp,
+        request.mode.value,
+        consume_on_success=False,
+    )
+
+    return EmailOtpPreVerifyResponse(message="Verification code is valid.")
 
 
 @router.get("/google")
@@ -160,6 +293,7 @@ async def google_callback(
     code: str | None = Query(None),
     state: str = Query(...),
     error: str | None = Query(None),
+    redirect_uri_override: str | None = Query(None),
     db: AsyncSession = Depends(get_db_session),
 ) -> RedirectResponse:
     """
@@ -180,7 +314,7 @@ async def google_callback(
     provider = GoogleOAuthProvider(
         client_id=settings.OAUTH_GOOGLE_CLIENT_ID,
         client_secret=settings.OAUTH_GOOGLE_CLIENT_SECRET,
-        redirect_uri=settings.OAUTH_GOOGLE_REDIRECT_URI,
+        redirect_uri=redirect_uri_override or settings.OAUTH_GOOGLE_REDIRECT_URI,
     )
 
     try:
@@ -229,6 +363,7 @@ async def github_callback(
     code: str | None = Query(None),
     state: str = Query(...),
     error: str | None = Query(None),
+    redirect_uri_override: str | None = Query(None),
     db: AsyncSession = Depends(get_db_session),
 ) -> RedirectResponse:
     """
@@ -249,7 +384,7 @@ async def github_callback(
     provider = GitHubOAuthProvider(
         client_id=settings.OAUTH_GITHUB_CLIENT_ID,
         client_secret=settings.OAUTH_GITHUB_CLIENT_SECRET,
-        redirect_uri=settings.OAUTH_GITHUB_REDIRECT_URI,
+        redirect_uri=redirect_uri_override or settings.OAUTH_GITHUB_REDIRECT_URI,
     )
 
     try:

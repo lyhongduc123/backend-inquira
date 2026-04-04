@@ -10,6 +10,8 @@ class ValidationRequest(CamelModel):
     """Request for answer validation inspection"""
     query: str
     context: str  # Context with chunks, paper IDs, and prompt
+    enhanced_query: Optional[str] = None
+    context_chunks: Optional[List[Dict[str, Any]]] = None
     generated_answer: Optional[str] = None
     model_name: str = "gpt-4o-mini"
     conversation_id: Optional[int] = None
@@ -106,6 +108,9 @@ class ValidationHistoryItem(CamelModel):
     """Summary of a validation record"""
     id: int
     message_id: Optional[int]
+    conversation_id: Optional[str] = None
+    conversation_title: Optional[str] = None
+    assistant_answer_preview: Optional[str] = None
     query_text: str
     model_name: str
     has_hallucination: bool
@@ -137,8 +142,10 @@ class ValidationDetail(CamelModel):
     id: int
     message_id: Optional[int]
     query_text: str
+    enhanced_query: Optional[str] = None
     generated_answer: Optional[str] = None
     context_used: Optional[str] = None
+    context_chunks: Optional[List[Dict[str, Any]]] = None
     context_evidence: Optional[ContextEvidence] = None
     has_hallucination: bool
     hallucination_count: int = 0

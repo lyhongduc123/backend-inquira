@@ -35,6 +35,24 @@ class DBAnswerValidation(Base):
         comment="Original user query snapshot (for standalone validation records)",
     )
 
+    enhanced_query: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="LLM-ready query after history/context enhancement",
+    )
+
+    context_used: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Exact built context string passed into LLM",
+    )
+
+    context_chunks: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="Exact chunk payload used to build LLM context",
+    )
+
     # Output
     # Link to the message being validated
     message_id: Mapped[int] = mapped_column(

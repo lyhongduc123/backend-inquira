@@ -43,3 +43,9 @@ class OAAuthorResponse(BaseModel):
     counts_by_year: Optional[List[Dict[str, Any]]] = Field(
         None, description="Yearly counts of works and citations"
     )
+
+    def __repr__(self):
+        return f"OAAuthorResponse(id={self.id}, display_name={self.display_name})"
+
+    def __str__(self):
+        return f"OAAuthorResponse(id={self.id}, display_name={self.display_name})"

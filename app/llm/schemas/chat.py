@@ -28,7 +28,7 @@ class QuestionBreakdownResponse(BaseModel):
     original_question: str = Field(..., description="Original user question")
     clarified_question: str = Field(..., description="Clarified/refined question")
     search_queries: List[str] = Field(..., description="Optimized search queries for academic retrieval")
-    keyword_queries: Optional[List[str]] = Field(default=None, description="Keyword queries for title/abstract matching")
+    bm25_query: Optional[str] = Field(default=None, description="Keyword queries for title/abstract matching")
     semantic_queries: Optional[List[str]] = Field(default=None, description="Semantic queries for contextual retrieval")
     specific_papers: Optional[List[str]] = Field(default=None, description="Specific paper titles to search for exact matches")
     num_queries: int = Field(..., description="Number of search queries")

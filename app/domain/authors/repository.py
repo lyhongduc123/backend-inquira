@@ -5,7 +5,7 @@ Handles CRUD operations for authors and author-paper relationships.
 
 from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update, delete
+from sqlalchemy import select, func, update, delete, Integer, cast
 from sqlalchemy.orm import selectinload, joinedload
 from app.models.authors import DBAuthor, DBAuthorPaper, DBAuthorInstitution
 from app.models.papers import DBPaper
@@ -335,7 +335,7 @@ class AuthorRepository:
             .where(DBAuthorPaper.author_id == author.id)
             .options(
                 joinedload(DBPaper.journal), 
-                selectinload(DBPaper.paper_authors).selectinload(DBAuthorPaper.author)
+                selectinload(DBPaper.authors).selectinload(DBAuthorPaper.author)
             )
             .order_by(DBPaper.publication_date.desc().nulls_last())
         )
@@ -377,7 +377,7 @@ class AuthorRepository:
             .where(DBAuthorPaper.author_id == author.id)
             .options(
                 joinedload(DBPaper.journal),
-                selectinload(DBPaper.paper_authors).selectinload(DBAuthorPaper.author),
+                selectinload(DBPaper.authors).selectinload(DBAuthorPaper.author),
             )
         )
 
@@ -450,23 +450,58 @@ class AuthorRepository:
             select(DBJournal.sjr_best_quartile, func.count(DBPaper.id))
             .select_from(DBAuthorPaper)
             .join(DBPaper, DBAuthorPaper.paper_id == DBPaper.id)
-            .join(DBJournal, DBPaper.journal_id == DBJournal.id)
-            .where(
-                DBAuthorPaper.author_id == author.id,
-                DBJournal.sjr_best_quartile.isnot(None),
-            )
+            .outerjoin(DBJournal, DBPaper.journal_id == DBJournal.id)
+            .where(DBAuthorPaper.author_id == author.id)
             .group_by(DBJournal.sjr_best_quartile)
         )
 
         result = await self.db.execute(stmt)
         rows = result.all()
 
-        quartiles = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}
+        quartiles = {"q1": 0, "q2": 0, "q3": 0, "q4": 0, "unknown": 0}
         for quartile, count in rows:
-            if quartile in quartiles:
-                quartiles[quartile] = count
+            if isinstance(quartile, str) and quartile.upper() in {"Q1", "Q2", "Q3", "Q4"}:
+                quartiles[quartile.lower()] = int(count)
+            else:
+                quartiles["unknown"] += int(count)
 
         return quartiles
+
+    async def get_counts_by_year(self, author_id: str) -> Dict[int, Dict[str, int]]:
+        """
+        Get yearly publication counts for an author.
+
+        Returns:
+            Dict like {2024: {"papers": 12}, ...}
+        """
+        author = await self.get_author(author_id)
+        if not author:
+            return {}
+
+        year_expr = func.coalesce(DBPaper.year, cast(func.extract("year", DBPaper.publication_date), Integer))
+
+        stmt = (
+            select(
+                year_expr.label("year"),
+                func.count(DBPaper.id).label("papers"),
+            )
+            .select_from(DBAuthorPaper)
+            .join(DBPaper, DBAuthorPaper.paper_id == DBPaper.id)
+            .where(DBAuthorPaper.author_id == author.id)
+            .group_by(year_expr)
+            .order_by(year_expr.desc())
+        )
+
+        result = await self.db.execute(stmt)
+        counts_by_year: Dict[int, Dict[str, int]] = {}
+        for year, papers in result.all():
+            if year is None:
+                continue
+            counts_by_year[int(year)] = {
+                "papers": int(papers or 0),
+            }
+
+        return counts_by_year
 
     async def get_co_authors(
         self, author_id: str, limit: int = 10, offset: int = 0
@@ -693,66 +728,21 @@ class AuthorRepository:
         
         return referenced_authors, total
     
-    async def compute_author_relationships(self, author_id: str) -> Dict[str, int]:
-        """
-        Compute and cache author-to-author relationships for citing and referencing.
-        This should be called as a background job after author enrichment.
-        
-        Args:
-            author_id: Author identifier
-            
-        Returns:
-            Dict with counts: {"citing_authors": int, "referenced_authors": int}
-        """
-        author = await self.get_author(author_id)
-        if not author:
-            return {"citing_authors": 0, "referenced_authors": 0}
-        
+    async def delete_author_relationships(self, author_id: int) -> None:
+        """Delete existing relationships for an author"""
         from app.models.author_relationships import DBAuthorRelationship
-        
-        logger.info(f"Computing author relationships for {author_id}")
-        
-        # Delete existing relationships for this author to recompute
         await self.db.execute(
             delete(DBAuthorRelationship).where(
-                DBAuthorRelationship.author_id == author.id
+                DBAuthorRelationship.author_id == author_id
             )
         )
-        
-        co_authors = await self.get_co_authors(author_id, limit=10000)
-        co_author_ids = [str(item.get("author_id", "")) for item in co_authors if item.get("author_id")]
-
-        related_authors_by_id: Dict[str, DBAuthor] = {}
-        if co_author_ids:
-            related_result = await self.db.execute(
-                select(DBAuthor).where(DBAuthor.author_id.in_(co_author_ids))
-            )
-            related_authors = related_result.scalars().all()
-            related_authors_by_id = {str(item.author_id): item for item in related_authors}
-
-        for co_author in co_authors:
-            related_author = related_authors_by_id.get(str(co_author.get("author_id", "")))
-            if related_author:
-                relationship = DBAuthorRelationship(
-                    author_id=author.id,
-                    related_author_id=related_author.id,
-                    relationship_type="collaboration",
-                    relationship_count=co_author["collaboration_count"]
-                )
-                self.db.add(relationship)
-        
-        # For citing and referenced authors, we need paper-level citation data
-        # This would require the DBCitation table to be populated
-        # For now, return placeholder counts
-        # TODO: Implement when citation data is available
-        
         await self.db.commit()
-        
-        return {
-            "collaborations": len(co_authors),
-            "citing_authors": 0,  # TODO: Implement with citation data
-            "referenced_authors": 0  # TODO: Implement with citation data
-        }
+
+    async def bulk_insert_author_relationships(self, relationships: list) -> None:
+        """Bulk insert author relationships"""
+        if relationships:
+            self.db.add_all(relationships)
+            await self.db.commit()
     
     async def get_author_statistics(self) -> dict:
         """

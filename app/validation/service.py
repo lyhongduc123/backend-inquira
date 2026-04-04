@@ -10,6 +10,7 @@ from sqlalchemy import select, func, desc
 from sqlalchemy.orm import joinedload
 
 from app.models.answer_vaidations import DBAnswerValidation
+from app.models.conversations import DBConversation
 from app.models.messages import DBMessage
 from app.llm.lite_llm_provider import LiteLLMProvider
 from app.validation.schemas import (
@@ -510,6 +511,9 @@ async def save_validation_result(
     db_validation = DBAnswerValidation(
         message_id=request.message_id,
         query_text=request.query,
+        enhanced_query=request.enhanced_query,
+        context_used=request.context,
+        context_chunks=request.context_chunks,
         model_name=result.model_used,
         has_hallucination=result.has_hallucination,
         hallucination_count=result.hallucination_count,
@@ -530,24 +534,6 @@ async def save_validation_result(
 
     db.add(db_validation)
 
-    # Persist validation context snapshot inside message metadata for per-query audit.
-    message_result = await db.execute(
-        select(DBMessage).where(DBMessage.id == request.message_id)
-    )
-    message = message_result.scalar_one_or_none()
-    if message:
-        metadata = dict(message.message_metadata or {})
-        metadata["validation_snapshot"] = {
-            "query": request.query,
-            "context": request.context,
-            "generated_answer": result.generated_answer,
-            "paper_ids": result.context_evidence.paper_ids,
-            "chunk_ids": result.context_evidence.chunk_ids,
-            "component_scores": result.component_scores.model_dump(),
-            "captured_at": datetime.now(timezone.utc).isoformat(),
-        }
-        message.message_metadata = metadata
-
     await db.commit()
     await db.refresh(db_validation)
     
@@ -559,17 +545,29 @@ async def get_validation_history(
     skip: int = 0,
     limit: int = 50,
     message_id: int | None = None,
+    conversation_id: str | None = None,
+    model_name: str | None = None,
+    query_text: str | None = None,
     has_hallucination: bool | None = None
 ) -> ValidationHistoryResponse:
     """Get validation history with filters."""
     query = select(DBAnswerValidation)
+
+    if conversation_id is not None:
+        query = query.join(DBAnswerValidation.message).join(DBMessage.conversation)
     
     if message_id is not None:
         query = query.where(DBAnswerValidation.message_id == message_id)
+    if conversation_id is not None:
+        query = query.where(DBConversation.conversation_id == conversation_id)
+    if model_name is not None:
+        query = query.where(DBAnswerValidation.model_name == model_name)
+    if query_text is not None:
+        query = query.where(DBAnswerValidation.query_text.ilike(f"%{query_text}%"))
     if has_hallucination is not None:
         query = query.where(DBAnswerValidation.has_hallucination == has_hallucination)
     
-    query = query.options(joinedload(DBAnswerValidation.message))
+    query = query.options(joinedload(DBAnswerValidation.message).joinedload(DBMessage.conversation))
     query = query.order_by(desc(DBAnswerValidation.created_at))
     query = query.offset(skip).limit(limit)
     
@@ -578,8 +576,16 @@ async def get_validation_history(
     
     # Get total count
     count_query = select(func.count()).select_from(DBAnswerValidation)
+    if conversation_id is not None:
+        count_query = count_query.join(DBAnswerValidation.message).join(DBMessage.conversation)
     if message_id is not None:
         count_query = count_query.where(DBAnswerValidation.message_id == message_id)
+    if conversation_id is not None:
+        count_query = count_query.where(DBConversation.conversation_id == conversation_id)
+    if model_name is not None:
+        count_query = count_query.where(DBAnswerValidation.model_name == model_name)
+    if query_text is not None:
+        count_query = count_query.where(DBAnswerValidation.query_text.ilike(f"%{query_text}%"))
     if has_hallucination is not None:
         count_query = count_query.where(DBAnswerValidation.has_hallucination == has_hallucination)
     
@@ -588,8 +594,15 @@ async def get_validation_history(
     
     history_items: List[ValidationHistoryItem] = []
     for validation in validations:
+        conversation = validation.message.conversation if validation.message else None
+        assistant_answer_preview = None
+        if validation.message and validation.message.content:
+            assistant_answer_preview = validation.message.content[:280]
+
         context_evidence = None
-        if validation.message and validation.message.message_metadata:
+        if validation.context_used:
+            context_evidence = extract_context_evidence(validation.context_used)
+        elif validation.message and validation.message.message_metadata:
             snapshot = validation.message.message_metadata.get("validation_snapshot")
             if snapshot:
                 context_evidence = ContextEvidence(
@@ -603,6 +616,9 @@ async def get_validation_history(
             ValidationHistoryItem(
                 id=validation.id,
                 message_id=validation.message_id,
+                conversation_id=conversation.conversation_id if conversation else None,
+                conversation_title=conversation.title if conversation else None,
+                assistant_answer_preview=assistant_answer_preview,
                 query_text=validation.query_text,
                 model_name=validation.model_name or "unknown",
                 has_hallucination=validation.has_hallucination,
@@ -642,24 +658,32 @@ async def get_validation_detail(
     if not validation:
         return None
 
-    context_used: str | None = None
-    generated_answer: str | None = None
+    context_used: str | None = validation.context_used
+    generated_answer: str | None = validation.message.content if validation.message else None
     context_evidence: ContextEvidence | None = None
+    context_chunks: List[Dict[str, Any]] | None = None
     component_scores: ValidationComponentScores | None = None
 
-    if validation.message and validation.message.message_metadata:
+    if isinstance(validation.context_chunks, list):
+        context_chunks = [item for item in validation.context_chunks if isinstance(item, dict)]
+
+    if context_used:
+        context_evidence = extract_context_evidence(context_used)
+
+    if (context_used is None or generated_answer is None or context_chunks is None) and validation.message and validation.message.message_metadata:
         snapshot = validation.message.message_metadata.get("validation_snapshot")
         if snapshot:
-            context_used = snapshot.get("context")
-            generated_answer = snapshot.get("generated_answer")
+            context_used = context_used or snapshot.get("context")
+            generated_answer = generated_answer or snapshot.get("generated_answer")
             paper_ids = snapshot.get("paper_ids", [])
             chunk_ids = snapshot.get("chunk_ids", [])
-            context_evidence = ContextEvidence(
-                paper_ids=paper_ids,
-                chunk_ids=chunk_ids,
-                total_papers=len(paper_ids),
-                total_chunks=len(chunk_ids),
-            )
+            if context_evidence is None:
+                context_evidence = ContextEvidence(
+                    paper_ids=paper_ids,
+                    chunk_ids=chunk_ids,
+                    total_papers=len(paper_ids),
+                    total_chunks=len(chunk_ids),
+                )
             raw_component_scores = snapshot.get("component_scores")
             if isinstance(raw_component_scores, dict):
                 component_scores = ValidationComponentScores.model_validate(raw_component_scores)
@@ -688,8 +712,10 @@ async def get_validation_detail(
         id=validation.id,
         message_id=validation.message_id,
         query_text=validation.query_text,
+        enhanced_query=validation.enhanced_query,
         generated_answer=generated_answer,
         context_used=context_used,
+        context_chunks=context_chunks,
         context_evidence=context_evidence,
         has_hallucination=validation.has_hallucination,
         hallucination_count=validation.hallucination_count,

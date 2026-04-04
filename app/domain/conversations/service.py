@@ -7,10 +7,12 @@ from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from .repository import ConversationRepository
 from .schemas import (
+    ConversationBase,
     ConversationCreate,
     ConversationUpdate,
     ConversationDetail,
     ConversationSummary,
+    ConversationUpdateInternal,
     Message,
 )
 from app.models.conversations import DBConversation
@@ -93,10 +95,15 @@ class ConversationService:
         return db_conversation
 
     async def get_conversation(
-        self, conversation_id: str, user_id: int
+        self,
+        conversation_id: str,
+        user_id: Optional[int] = None,
     ) -> Optional[ConversationDetail]:
         """Get conversation by ID with all messages"""
-        db_conversation = await self.repo.get_by_id(conversation_id, user_id)
+        if user_id is None:
+            db_conversation = await self.repo.get(conversation_id)
+        else:
+            db_conversation = await self.repo.get_by_id(conversation_id, user_id)
         if not db_conversation:
             return None
 
@@ -111,20 +118,28 @@ class ConversationService:
         return self._to_detail_with_message_responses(db_conversation, message_responses)
 
     async def update_conversation(
-        self, conversation_id: str, user_id: int, update_data: ConversationUpdate
-    ) -> Optional[ConversationDetail]:
+        self, conversation_id: str, update_data: ConversationUpdateInternal
+    ) -> Optional[ConversationBase]:
         """Update conversation"""
-        db_conversation = await self.repo.update(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            title=update_data.title,
-            is_archived=update_data.is_archived,
-        )
+        try:
+            db_conversation = await self.repo.update(
+                conversation_id=conversation_id,
+                update_data=update_data.model_dump(exclude_unset=True),
+            )
+            if not db_conversation:
+                return None
 
-        if not db_conversation:
+            return ConversationBase(
+                id=db_conversation.conversation_id,
+                conversation_id=db_conversation.conversation_id,
+                title=db_conversation.title,
+                conversation_type=db_conversation.conversation_type,
+                primary_paper_id=db_conversation.primary_paper_id,
+                conversation_metadata=db_conversation.conversation_metadata,
+            )
+        except Exception as e:
+            logger.error(f"Error updating conversation {conversation_id}: {e}")
             return None
-
-        return self._to_detail(db_conversation)
 
     async def delete_conversation(self, conversation_id: str, user_id: int) -> bool:
         """Delete conversation"""

@@ -4,6 +4,7 @@ from pathlib import Path
 import tiktoken
 from typing import List, Optional, Tuple, Dict, Any, NamedTuple
 from app.extensions.logger import create_logger
+from app.modules.r2_storage import R2StorageService
 
 logger = create_logger(__name__)
 
@@ -27,8 +28,8 @@ class ChunkingService:
 
     def __init__(
         self,
-        min_tokens: int = 600,
-        max_tokens: int = 1200,
+        min_tokens: int = 300,
+        max_tokens: int = 600,
         overlap_ratio: float = 0.1,  # 10% overlap
         model: str = "gpt-4",
     ):
@@ -45,6 +46,7 @@ class ChunkingService:
         self.max_tokens = max_tokens
         self.overlap_ratio = overlap_ratio
         self.encoding = tiktoken.encoding_for_model(model)
+        self.r2_storage = R2StorageService()
 
     @staticmethod
     def _normalize_docling_label(label: Optional[str]) -> str:
@@ -71,6 +73,27 @@ class ChunkingService:
         cleaned = re.sub(r"\s+", " ", cleaned)
         cleaned = cleaned.replace("Please cite this article as:", "")
         return cleaned.strip()
+
+    @staticmethod
+    def _is_boilerplate_text(text: str) -> bool:
+        """Detect repeated PDF boilerplate/noise rows from hierarchical export."""
+        normalized = re.sub(r"\s+", " ", (text or "")).strip().lower()
+        if not normalized:
+            return True
+
+        # Symbol-only / OCR artifacts
+        if not re.search(r"[a-z0-9]", normalized):
+            return True
+
+        boilerplate_patterns = (
+            r"^please cite this article as:?$",
+            r"^corresponding author",
+            r"^tel\s*\+?\d",
+        )
+        if any(re.search(pattern, normalized) for pattern in boilerplate_patterns):
+            return True
+
+        return False
 
     def _extract_text_item_content(self, item: Dict[str, Any]) -> str:
         text = (item.get("text") or "").strip()
@@ -118,6 +141,144 @@ class ChunkingService:
 
         return anchors
 
+    def _collect_formula_items(self, texts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Collect formula/equation-like text items for dedicated evidence chunks."""
+        formula_labels = {
+            "formula",
+            "equation",
+            "math",
+            "equation_block",
+            "formula_block",
+        }
+        formula_items: List[Dict[str, Any]] = []
+
+        for item in texts:
+            if item.get("content_layer") == "furniture":
+                continue
+
+            label = self._normalize_docling_label(item.get("label", ""))
+            text = self._extract_text_item_content(item)
+            if not text:
+                continue
+
+            if label in formula_labels or self._is_formula_like_text(text):
+                formula_items.append(item)
+
+        return formula_items
+
+    @staticmethod
+    def _normalize_section_key(section_title: Optional[str]) -> str:
+        if not section_title:
+            return ""
+
+        cleaned = re.sub(
+            r"\s*/\s*(Figure|Table|Formula)\s+Evidence\s*$",
+            "",
+            section_title,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+        return cleaned
+
+    def _link_evidence_to_nearby_text_chunks(
+        self,
+        text_chunks: List[ChunkWithMetadata],
+        evidence_chunks: List[ChunkWithMetadata],
+    ) -> List[ChunkWithMetadata]:
+        """Attach nearest text chunk indices/sections to evidence chunks (tables/figures/formulas)."""
+        if not text_chunks or not evidence_chunks:
+            return evidence_chunks
+
+        text_index_rows: List[Dict[str, Any]] = []
+        for idx, chunk in enumerate(text_chunks):
+            text_index_rows.append(
+                {
+                    "index": idx,
+                    "page": chunk.page_number,
+                    "section_key": self._normalize_section_key(chunk.section_title),
+                    "section_title": chunk.section_title,
+                }
+            )
+
+        linked_chunks: List[ChunkWithMetadata] = []
+
+        for chunk in evidence_chunks:
+            target_page = chunk.page_number
+            target_section_key = self._normalize_section_key(chunk.section_title)
+
+            scored: List[Tuple[float, int, Dict[str, Any]]] = []
+            for row in text_index_rows:
+                score = 0.0
+
+                if target_page is not None and row["page"] == target_page:
+                    score += 3.0
+
+                row_section_key = row["section_key"]
+                if target_section_key and row_section_key:
+                    if row_section_key == target_section_key:
+                        score += 4.0
+                    elif (
+                        row_section_key in target_section_key
+                        or target_section_key in row_section_key
+                    ):
+                        score += 2.0
+
+                if (
+                    target_page is not None
+                    and row["page"] is not None
+                    and row["page"] != target_page
+                ):
+                    distance = abs(int(row["page"]) - int(target_page))
+                    if distance == 1:
+                        score += 1.0
+                    elif distance == 2:
+                        score += 0.5
+
+                if score <= 0:
+                    continue
+
+                page_distance = (
+                    abs(int(row["page"]) - int(target_page))
+                    if target_page is not None and row["page"] is not None
+                    else 99
+                )
+                scored.append((score, page_distance, row))
+
+            scored.sort(key=lambda x: (-x[0], x[1], x[2]["index"]))
+            top_rows = [row for _, _, row in scored[:3]]
+
+            linked_indices = [int(row["index"]) for row in top_rows]
+            linked_sections: List[str] = []
+            for row in top_rows:
+                section_title = row.get("section_title")
+                if isinstance(section_title, str) and section_title and section_title not in linked_sections:
+                    linked_sections.append(section_title)
+
+            metadata = dict(chunk.docling_metadata or {})
+            metadata["linked_text_chunk_indices"] = linked_indices
+            metadata["linked_sections"] = linked_sections[:2]
+            metadata["linkage"] = {
+                "strategy": "section_page_proximity",
+                "target_page": target_page,
+                "target_section_key": target_section_key,
+            }
+
+            linked_chunks.append(
+                ChunkWithMetadata(
+                    text=chunk.text,
+                    token_count=chunk.token_count,
+                    section_title=chunk.section_title,
+                    page_number=chunk.page_number,
+                    label=chunk.label,
+                    level=chunk.level,
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    docling_metadata=metadata,
+                )
+            )
+
+        return linked_chunks
+
     def _read_hierarchical_chunks_from_assets(
         self, doc_dict: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
@@ -140,19 +301,69 @@ class ChunkingService:
             return []
 
     def _read_assets_manifest(self, doc_dict: Dict[str, Any]) -> Dict[str, Any]:
+        inline_manifest = doc_dict.get("asset_manifest")
+        if isinstance(inline_manifest, dict):
+            return inline_manifest
+
         asset_paths = doc_dict.get("asset_paths") or {}
+        inline_manifest = asset_paths.get("manifest_inline")
+        if isinstance(inline_manifest, dict):
+            return inline_manifest
+
         manifest_path = asset_paths.get("manifest_path")
-        if not manifest_path:
-            return {}
-        try:
-            path = Path(manifest_path)
-            if not path.exists() or not path.is_file():
-                return {}
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            return payload if isinstance(payload, dict) else {}
-        except Exception as error:
-            logger.warning(f"Failed to read assets manifest: {error}")
-            return {}
+        if manifest_path:
+            try:
+                path = Path(manifest_path)
+                if path.exists() and path.is_file():
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(payload, dict):
+                        return payload
+            except Exception as error:
+                logger.warning(f"Failed to read assets manifest: {error}")
+
+        manifest_r2_key = asset_paths.get("manifest_r2_key")
+        if isinstance(manifest_r2_key, str) and manifest_r2_key.strip():
+            try:
+                manifest_bytes = self.r2_storage.get_object_bytes(manifest_r2_key)
+                if manifest_bytes:
+                    payload = json.loads(manifest_bytes.decode("utf-8"))
+                    if isinstance(payload, dict):
+                        doc_dict["asset_manifest"] = payload
+                        return payload
+            except Exception as error:
+                logger.warning(f"Failed to read R2 assets manifest: {error}")
+
+        return {}
+
+    @staticmethod
+    def _resolve_manifest_link(entry: Dict[str, Any], field: str) -> Optional[str]:
+        if not isinstance(entry, dict):
+            return None
+
+        # Prefer uploaded R2 references first to avoid leaking local temp paths.
+        r2_block = entry.get("r2")
+        if isinstance(r2_block, dict):
+            r2_value = r2_block.get(field)
+            if isinstance(r2_value, dict):
+                url_value = r2_value.get("url")
+                if isinstance(url_value, str) and url_value.strip():
+                    return url_value
+                key_value = r2_value.get("key")
+                if isinstance(key_value, str) and key_value.strip():
+                    return key_value
+
+        direct_value = entry.get(field)
+        if isinstance(direct_value, str) and direct_value.strip():
+            return direct_value
+        if isinstance(direct_value, dict):
+            url_value = direct_value.get("url")
+            if isinstance(url_value, str) and url_value.strip():
+                return url_value
+            key_value = direct_value.get("key")
+            if isinstance(key_value, str) and key_value.strip():
+                return key_value
+
+        return None
 
     @staticmethod
     def _manifest_entry_by_index(entries: Any, index: int) -> Dict[str, Any]:
@@ -210,7 +421,7 @@ class ChunkingService:
                 rows.setdefault(row_idx, []).append(cell)
 
             row_lines: List[str] = []
-            for row_idx in sorted(rows.keys())[:12]:
+            for row_idx in sorted(rows.keys()):
                 ordered = sorted(rows[row_idx], key=lambda c: int(c.get("start_col_offset_idx", 0) or 0))
                 vals = [str(c.get("text") or "").strip() for c in ordered]
                 vals = [v for v in vals if v]
@@ -246,7 +457,40 @@ class ChunkingService:
             asset = self._manifest_entry_by_index(figure_entries, idx)
             if not asset:
                 continue
-            mapping.setdefault(page_no, []).append(asset)
+            normalized_asset = dict(asset)
+            normalized_asset["metadata_path"] = self._resolve_manifest_link(
+                asset,
+                "metadata_path",
+            )
+            normalized_asset["image_path"] = self._resolve_manifest_link(asset, "image_path")
+            normalized_asset["crop_path"] = self._resolve_manifest_link(asset, "crop_path")
+            mapping.setdefault(page_no, []).append(normalized_asset)
+
+        return mapping
+
+    def _build_table_assets_by_page(
+        self,
+        doc_dict: Dict[str, Any],
+    ) -> Dict[int, List[Dict[str, Any]]]:
+        """Map page -> table asset entries for linking text chunks to table chunks."""
+        mapping: Dict[int, List[Dict[str, Any]]] = {}
+        manifest = self._read_assets_manifest(doc_dict)
+        table_entries = manifest.get("tables", []) if isinstance(manifest, dict) else []
+        tables = doc_dict.get("tables", []) or []
+
+        for idx, table in enumerate(tables):
+            page_no = self._extract_page_number_from_item(table)
+            if page_no is None:
+                continue
+
+            asset = self._manifest_entry_by_index(table_entries, idx)
+            entry = {
+                "table_index": idx,
+                "table_chunk_ref": f"table_{idx:03d}",
+                "path": self._resolve_manifest_link(asset, "path"),
+                "crop_path": self._resolve_manifest_link(asset, "crop_path"),
+            }
+            mapping.setdefault(page_no, []).append(entry)
 
         return mapping
 
@@ -287,7 +531,7 @@ class ChunkingService:
         doc_dict: Dict[str, Any],
         paper_id: str,
     ) -> List[ChunkWithMetadata]:
-        """Build base text chunks from Docling HierarchicalChunker export when present."""
+        """Build paragraph-first chunks from Docling hierarchical export when present."""
         rows = self._read_hierarchical_chunks_from_assets(doc_dict)
         asset_paths = doc_dict.get("asset_paths") or {}
         figure_assets_by_page = self._build_figure_assets_by_page(doc_dict)
@@ -297,9 +541,68 @@ class ChunkingService:
         chunks: List[ChunkWithMetadata] = []
         char_offset = 0
 
+        current_paragraphs: List[str] = []
+        current_tokens = 0
+        current_section_title: Optional[str] = None
+        current_page_number: Optional[int] = None
+        current_meta_rows: List[Dict[str, Any]] = []
+
+        def flush_chunk() -> None:
+            nonlocal char_offset, current_paragraphs, current_tokens, current_section_title, current_page_number, current_meta_rows
+            if not current_paragraphs:
+                return
+
+            chunk_text = "\n\n".join(current_paragraphs).strip()
+            if not chunk_text:
+                current_paragraphs = []
+                current_tokens = 0
+                current_section_title = None
+                current_page_number = None
+                current_meta_rows = []
+                return
+
+            token_count = self.count_tokens(chunk_text)
+            char_start = char_offset
+            char_end = char_offset + len(chunk_text)
+            figure_assets = figure_assets_by_page.get(current_page_number or -1, [])
+
+            chunks.append(
+                ChunkWithMetadata(
+                    text=chunk_text,
+                    token_count=token_count,
+                    section_title=current_section_title,
+                    page_number=current_page_number,
+                    label="hierarchical_text",
+                    level=None,
+                    char_start=char_start,
+                    char_end=char_end,
+                    docling_metadata={
+                        "source": "docling_hierarchical",
+                        "hierarchical_meta": {
+                            "paragraph_count": len(current_meta_rows),
+                            "paragraph_meta": current_meta_rows[:20],
+                        },
+                        "assets_manifest_path": asset_paths.get("manifest_path"),
+                        "figure_assets": figure_assets,
+                        "retrieval_flags": {
+                            "has_figure_assets": len(figure_assets) > 0,
+                            "figure_retrieval_enabled": len(figure_assets) > 0,
+                        },
+                    },
+                )
+            )
+
+            char_offset = char_end + 2
+            current_paragraphs = []
+            current_tokens = 0
+            current_section_title = None
+            current_page_number = None
+            current_meta_rows = []
+
         for row in rows:
-            text = str(row.get("text") or "").strip()
-            if not text:
+            raw = str(row.get("text") or "").strip()
+            text = self._clean_noise_text(raw)
+            if not text or self._is_boilerplate_text(text):
                 continue
 
             metadata = row.get("metadata") if isinstance(row, dict) else None
@@ -307,56 +610,59 @@ class ChunkingService:
             page_number = self._extract_hierarchical_page_number(metadata)
             token_count = self.count_tokens(text)
 
-            if token_count <= self.max_tokens:
-                char_start = char_offset
-                char_end = char_offset + len(text)
-                figure_assets = figure_assets_by_page.get(page_number or -1, [])
-                chunks.append(
-                    ChunkWithMetadata(
-                        text=text,
-                        token_count=token_count,
-                        section_title=section_title,
-                        page_number=page_number,
-                        label="hierarchical_text",
-                        level=None,
-                        char_start=char_start,
-                        char_end=char_end,
-                        docling_metadata={
-                            "source": "docling_hierarchical",
-                            "hierarchical_meta": metadata,
-                            "assets_manifest_path": asset_paths.get("manifest_path"),
-                            "figure_assets": figure_assets,
-                            "retrieval_flags": {
-                                "has_figure_assets": len(figure_assets) > 0,
-                                "figure_retrieval_enabled": len(figure_assets) > 0,
-                            },
+            # Overlong paragraph: split only at sentence boundaries.
+            if token_count > self.max_tokens:
+                flush_chunk()
+                split_chunks = self._split_section_with_overlap(
+                    section_text=text,
+                    section_header=section_title,
+                    section_level=None,
+                    section_page=page_number,
+                    primary_label="hierarchical_text",
+                    metadata_items={
+                        "source": "docling_hierarchical",
+                        "hierarchical_meta": metadata,
+                        "assets_manifest_path": asset_paths.get("manifest_path"),
+                        "figure_assets": figure_assets_by_page.get(page_number or -1, []),
+                        "retrieval_flags": {
+                            "has_figure_assets": len(figure_assets_by_page.get(page_number or -1, [])) > 0,
+                            "figure_retrieval_enabled": len(figure_assets_by_page.get(page_number or -1, [])) > 0,
                         },
-                    )
+                    },
+                    char_offset=char_offset,
                 )
-                char_offset = char_end + 2
+                chunks.extend(split_chunks)
+                if split_chunks and split_chunks[-1].char_end is not None:
+                    char_offset = split_chunks[-1].char_end + 2
                 continue
 
-            split_chunks = self._split_section_with_overlap(
-                section_text=text,
-                section_header=section_title,
-                section_level=None,
-                section_page=page_number,
-                primary_label="hierarchical_text",
-                metadata_items={
-                    "source": "docling_hierarchical",
-                    "hierarchical_meta": metadata,
-                    "assets_manifest_path": asset_paths.get("manifest_path"),
-                    "figure_assets": figure_assets_by_page.get(page_number or -1, []),
-                    "retrieval_flags": {
-                        "has_figure_assets": len(figure_assets_by_page.get(page_number or -1, [])) > 0,
-                        "figure_retrieval_enabled": len(figure_assets_by_page.get(page_number or -1, [])) > 0,
-                    },
-                },
-                char_offset=char_offset,
-            )
-            chunks.extend(split_chunks)
-            if split_chunks and split_chunks[-1].char_end is not None:
-                char_offset = split_chunks[-1].char_end + 2
+            if current_paragraphs:
+                section_changed = (
+                    bool(section_title)
+                    and bool(current_section_title)
+                    and self._normalize_section_key(section_title)
+                    != self._normalize_section_key(current_section_title)
+                )
+                page_changed = (
+                    page_number is not None
+                    and current_page_number is not None
+                    and int(page_number) != int(current_page_number)
+                )
+                token_overflow = current_tokens + token_count > self.max_tokens
+
+                if section_changed or page_changed or token_overflow:
+                    flush_chunk()
+
+            if current_section_title is None:
+                current_section_title = section_title
+            if current_page_number is None:
+                current_page_number = page_number
+
+            current_paragraphs.append(text)
+            current_tokens += token_count
+            current_meta_rows.append(metadata if isinstance(metadata, dict) else {})
+
+        flush_chunk()
 
         if chunks:
             logger.info(
@@ -366,9 +672,12 @@ class ChunkingService:
 
     def _build_evidence_summary_text(self, raw_text: str, kind: str) -> str:
         """Build compact representation suitable for retrieval + generation."""
-        cleaned = re.sub(r"\s+", " ", raw_text).strip()
-        if len(cleaned) > 1200:
-            cleaned = cleaned[:1200] + "..."
+        if kind == "table":
+            cleaned_lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
+            cleaned_lines = [line for line in cleaned_lines if line]
+            cleaned = "\n".join(cleaned_lines)
+        else:
+            cleaned = re.sub(r"\s+", " ", raw_text).strip()
 
         lead = (
             "This chunk summarizes tabular evidence with key values and captions."
@@ -472,7 +781,7 @@ class ChunkingService:
                 rows.setdefault(row_idx, []).append(cell)
 
             row_lines: List[str] = []
-            for row_idx in sorted(rows.keys())[:8]:
+            for row_idx in sorted(rows.keys()):
                 ordered = sorted(
                     rows[row_idx],
                     key=lambda c: int(c.get("start_col_offset_idx", 0) or 0),
@@ -507,14 +816,22 @@ class ChunkingService:
                     char_start=char_start,
                     char_end=char_end,
                     docling_metadata={
-                        "is_multimodal_evidence": True,
-                        "kind": "table",
+                        "type": "table",
+                        "source": "docling",
                         "table_index": idx,
-                        "captions": caption_texts,
-                        "rows_preview": row_lines,
-                        "cell_count": len(cells),
-                        "prov": table.get("prov"),
-                        "assets": self._manifest_entry_by_index(table_entries, idx),
+                        "table_chunk_ref": f"table_{idx:03d}",
+                        "path": self._resolve_manifest_link(
+                            self._manifest_entry_by_index(table_entries, idx),
+                            "path",
+                        ),
+                        "crop_path": self._resolve_manifest_link(
+                            self._manifest_entry_by_index(table_entries, idx),
+                            "crop_path",
+                        ),
+                        "links": {
+                            "figure_paths": [],
+                            "table_chunk_refs": [f"table_{idx:03d}"],
+                        },
                     },
                 )
             )
@@ -578,7 +895,21 @@ class ChunkingService:
                         "picture_index": idx,
                         "captions": caption_texts,
                         "prov": picture.get("prov"),
-                        "assets": self._manifest_entry_by_index(figure_entries, idx),
+                        "assets": {
+                            **self._manifest_entry_by_index(figure_entries, idx),
+                            "metadata_path": self._resolve_manifest_link(
+                                self._manifest_entry_by_index(figure_entries, idx),
+                                "metadata_path",
+                            ),
+                            "image_path": self._resolve_manifest_link(
+                                self._manifest_entry_by_index(figure_entries, idx),
+                                "image_path",
+                            ),
+                            "crop_path": self._resolve_manifest_link(
+                                self._manifest_entry_by_index(figure_entries, idx),
+                                "crop_path",
+                            ),
+                        },
                     },
                 )
             )
@@ -593,30 +924,16 @@ class ChunkingService:
         section_anchors: Dict[int, str],
         start_char_offset: int,
     ) -> List[ChunkWithMetadata]:
-        """Create multimodal evidence chunks from formulas/tables/pictures."""
+        """Create multimodal evidence chunks. Current strategy keeps only table atomic chunks."""
         chunks: List[ChunkWithMetadata] = []
 
-        formula_chunks = self._build_formula_chunks(
-            formula_items, section_anchors, start_char_offset
-        )
-        chunks.extend(formula_chunks)
-
         current_offset = start_char_offset
-        if chunks and chunks[-1].char_end is not None:
-            current_offset = chunks[-1].char_end + 2
 
         table_chunks = self._build_table_evidence_chunks(
             doc_dict, section_anchors, current_offset
         )
         chunks.extend(table_chunks)
 
-        if chunks and chunks[-1].char_end is not None:
-            current_offset = chunks[-1].char_end + 2
-
-        picture_chunks = self._build_picture_evidence_chunks(
-            doc_dict, section_anchors, current_offset
-        )
-        chunks.extend(picture_chunks)
         return chunks
 
     def count_tokens(self, text: str) -> int:
@@ -651,19 +968,10 @@ class ChunkingService:
         section_anchors = self._extract_section_anchor_by_page(texts)
         table_blocks_by_page = self._build_table_blocks_by_page(doc_dict)
         figure_assets_by_page = self._build_figure_assets_by_page(doc_dict)
+        table_assets_by_page = self._build_table_assets_by_page(doc_dict)
 
-        # Step 0: Prefer hierarchical chunks exported by extractor for better Docling structure reuse.
-        hierarchical_chunks = self._build_chunks_from_hierarchical_assets(
-            doc_dict, paper_id
-        )
-
-        if hierarchical_chunks:
-            chunks.extend(hierarchical_chunks)
-            logger.info(
-                f"[{paper_id}] Created {len(chunks)} hybrid chunks "
-                f"({len(hierarchical_chunks)} hierarchical; table/formula kept in base chunks)"
-            )
-            return chunks
+        # Keep formulas inline in text chunks (no dedicated formula chunks).
+        formula_items = self._collect_formula_items(texts)
 
         # Step 1: Group text items by section
         sections = []  # List of {"header": ..., "items": [...]}
@@ -743,13 +1051,30 @@ class ChunkingService:
                 asset_paths=asset_paths,
             )
             section_figure_assets: List[Dict[str, Any]] = []
+            section_table_assets: List[Dict[str, Any]] = []
             for p in section_pages:
                 section_figure_assets.extend(figure_assets_by_page.get(p, []))
-            if section_figure_assets:
-                section_metadata_summary["figure_assets"] = section_figure_assets[:5]
-            section_metadata_summary["retrieval_flags"] = {
-                "has_figure_assets": len(section_figure_assets) > 0,
-                "figure_retrieval_enabled": len(section_figure_assets) > 0,
+                section_table_assets.extend(table_assets_by_page.get(p, []))
+
+            figure_paths = [
+                asset.get("crop_path") or asset.get("image_path")
+                for asset in section_figure_assets
+                if isinstance(asset, dict)
+                and ((asset.get("crop_path") or asset.get("image_path")) is not None)
+            ]
+            table_chunk_refs = [
+                asset.get("table_chunk_ref")
+                for asset in section_table_assets
+                if isinstance(asset, dict) and asset.get("table_chunk_ref")
+            ]
+
+            section_metadata_summary = {
+                "type": "text",
+                "source": "docling",
+                "links": {
+                    "figure_paths": figure_paths[:6],
+                    "table_chunk_refs": table_chunk_refs[:10],
+                },
             }
 
             # Determine primary label for this section
@@ -799,9 +1124,17 @@ class ChunkingService:
                         else (char_offset + len(section_text) + 2)
                     )
 
+        evidence_chunks = self._build_multimodal_evidence_chunks(
+            doc_dict=doc_dict,
+            formula_items=formula_items,
+            section_anchors=section_anchors,
+            start_char_offset=char_offset,
+        )
+        chunks.extend(evidence_chunks)
+
         logger.info(
             f"[{paper_id}] Created {len(chunks)} chunks from docling structure "
-            f"(formula/table kept in normal chunks; figure paths in metadata)"
+            f"({len(evidence_chunks)} table atomic chunks; formulas kept inline)"
         )
         return chunks
 
@@ -884,6 +1217,14 @@ class ChunkingService:
             block_tokens = self.count_tokens(block)
 
             if block_tokens > self.max_tokens:
+                if "$$" in block or "\\(" in block or "\\[" in block:
+                    if current_blocks:
+                        flush_chunk()
+                    current_blocks.append(block)
+                    current_tokens += block_tokens
+                    flush_chunk()
+                    continue
+
                 sentences = self.split_into_sentences(block)
                 sentence_buf: List[str] = []
                 sentence_tokens = 0
@@ -1159,10 +1500,6 @@ class ChunkingService:
         header_parts: List[str] = []
         if chunk.section_title:
             header_parts.append(f"Section: {chunk.section_title}")
-        if chunk.label:
-            header_parts.append(f"Type: {chunk.label}")
-        if chunk.page_number is not None:
-            header_parts.append(f"Page: {chunk.page_number}")
 
         if not header_parts:
             return chunk.text

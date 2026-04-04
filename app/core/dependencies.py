@@ -3,13 +3,17 @@ FastAPI dependency injection helpers.
 Provides container and service dependencies for route handlers.
 """
 from fastapi import Depends
+from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db_session
 from app.core.container import ServiceContainer
 
 
-def get_container(db: AsyncSession = Depends(get_db_session)) -> ServiceContainer:
+def get_container(
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+) -> ServiceContainer:
     """
     FastAPI dependency for ServiceContainer.
     
@@ -31,4 +35,10 @@ def get_container(db: AsyncSession = Depends(get_db_session)) -> ServiceContaine
     - Consistent service lifecycle management
     - Easy testing (mock container instead of individual services)
     """
-    return ServiceContainer(db_session=db)
+    cached_container = getattr(request.state, "service_container", None)
+    if cached_container is not None:
+        return cached_container
+
+    container = ServiceContainer(db_session=db)
+    request.state.service_container = container
+    return container

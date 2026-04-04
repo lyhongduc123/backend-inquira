@@ -27,14 +27,14 @@ class EnrichmentWorker:
         Returns:
             Dict with enrichment results
         """
-        from app.rag_pipeline.pipeline import Pipeline
+        from app.domain.authors.service import AuthorService
         
         async with async_session() as db:
             try:
                 logger.info(f"[WORKER] Starting author enrichment for {author_id}")
                 
-                pipeline = Pipeline(db_session=db)
-                result = await pipeline.run_author_enrichment_workflow(
+                author_service = AuthorService(db)
+                result = await author_service.ingest_author_pipeline(
                     author_id=author_id,
                     limit=limit,
                     compute_relationships=True,
@@ -74,14 +74,14 @@ class EnrichmentWorker:
         Returns:
             Dict with computation results
         """
-        from app.domain.authors.repository import AuthorRepository
+        from app.domain.authors.service import AuthorService
         
         async with async_session() as db:
             try:
                 logger.info(f"[WORKER] Computing relationships for author {author_id}")
                 
-                repository = AuthorRepository(db)
-                result = await repository.compute_author_relationships(author_id)
+                author_service = AuthorService(db)
+                result = await author_service.compute_author_relationships(author_id)
                 
                 logger.info(
                     f"[WORKER] Computed relationships for {author_id}: "

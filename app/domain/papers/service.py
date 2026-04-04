@@ -89,9 +89,7 @@ class PaperService:
 
         return {pid: pid in existing_ids for pid in paper_ids}
 
-    async def enrich_paper_with_authors_institutions(
-        self, db_paper: DBPaper, authors: List[Dict]
-    ):
+    async def link_authors_and_institutions(self, db_paper: DBPaper, authors: List[Dict]):
         """
         Enrich paper with author and institution data.
         Orchestrates author and institution services to link them to the paper.
@@ -114,7 +112,7 @@ class PaperService:
 
         for position, author_data in enumerate(authors, start=1):
             # Directly upsert from merged author data
-            db_author = await self.author_service.upsert_from_merged_author(author_data)
+            db_author = await self.author_service.ingest_author_profile(author_data)
             if not db_author:
                 continue
 
@@ -153,7 +151,7 @@ class PaperService:
             f"Enriched paper {db_paper.paper_id} with {len(authors)} authors and their institutions"
         )
 
-    async def enrich_paper_with_journal(self, db_paper: DBPaper) -> None:
+    async def link_journal_to_paper(self, db_paper: DBPaper) -> None:
         """
         Enrich paper with journal data by linking to SJR database.
 
@@ -161,7 +159,7 @@ class PaperService:
             db_paper: Database paper entity to enrich
         """
         try:
-            journal = await self.journal_service.enrich_paper_with_journal(
+            journal = await self.journal_service.link_journal_to_paper(
                 paper=db_paper,
                 venue=db_paper.venue,
                 issn=(
@@ -289,7 +287,7 @@ class PaperService:
         """
         return await self.repository.delete_paper(paper_id)
 
-    async def create_paper_from_schema(
+    async def ingest_paper_metadata(
         self, paper: Union[PaperDTO, PaperEnrichedDTO], defer_enrichment: bool = False
     ) -> Optional[DBPaper]:
         """
@@ -324,7 +322,7 @@ class PaperService:
                             )
                             for author in paper.authors
                         ]
-                        await self.enrich_paper_with_authors_institutions(
+                        await self.link_authors_and_institutions(
                             db_paper, authors_dict
                         )
                     except Exception as e:
@@ -338,7 +336,7 @@ class PaperService:
 
                 # Enrich with journal data
                 try:
-                    await self.enrich_paper_with_journal(db_paper)
+                    await self.link_journal_to_paper(db_paper)
                 except Exception as e:
                     logger.error(
                         f"Failed to enrich paper {paper.paper_id} with journal: {e}"
@@ -354,7 +352,7 @@ class PaperService:
                 logger.error(f"Failed to rollback transaction: {rollback_error}")
             raise e
 
-    async def batch_enrich_papers_with_authors_journals(
+    async def batch_link_paper_relationships(
         self, papers_with_metadata: List[Tuple[DBPaper, List[Dict[str, Any]]]]
     ) -> Dict[str, int]:
         """
@@ -885,7 +883,7 @@ class PaperService:
             for paper in new_papers:
                 try:
                     # Create paper without enrichment
-                    db_paper = await self.create_paper_from_schema(
+                    db_paper = await self.ingest_paper_metadata(
                         paper, defer_enrichment=True
                     )
                     if db_paper:
@@ -909,7 +907,7 @@ class PaperService:
 
             # Step 3: Batch enrich authors, institutions, and journals
             if enrich and papers_with_metadata:
-                stats = await self.batch_enrich_papers_with_authors_journals(
+                stats = await self.batch_link_paper_relationships(
                     papers_with_metadata
                 )
                 logger.info(

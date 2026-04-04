@@ -12,6 +12,7 @@ class StreamEventType:
     CHUNK = "chunk"  # Each chunk as LLM generates
     PROGRESS = "progress"  # Progress updates
     METADATA = "metadata"  # Metadata updates (e.g., paper metadata)
+    CONVERSATION = "conversation"  # Conversation events (e.g., user/assistant messages)
     DONE = "done"  # End of stream with summary
     ERROR = "error"  # Error occurred
     PING = "ping"  # Keepalive heartbeat

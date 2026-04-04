@@ -75,7 +75,7 @@ class PaperEnrichmentService:
         
         try:
             for author_dto in paper_dto.authors:
-                author = await self.author_service.upsert_from_merged_author(
+                author = await self.author_service.ingest_author_profile(
                     author_dto.model_dump()
                 )
                 

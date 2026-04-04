@@ -5,7 +5,7 @@ import asyncio
 import time
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
-from typing import Optional, TYPE_CHECKING
+from typing import Container, Optional, TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 from .schemas import (
     ChatMessageRequest, 
@@ -25,7 +25,7 @@ from app.models.users import DBUser
 from app.core.responses import ApiResponse, success_response
 from app.core.exceptions import InternalServerException, NotFoundException, ForbiddenException
 from app.core.dependencies import get_container
-from app.domain.chat.redis_streams import read_task_events
+from app.domain.chat.live_stream import get_live_task_stream_broker
 
 if TYPE_CHECKING:
     from app.core.container import ServiceContainer
@@ -70,16 +70,21 @@ async def stream_message(
     try:
         request_id = getattr(http_request.state, 'request_id', None)
         logger.info(
-            f"Stream endpoint with citations called by user {current_user.id}",
+            f"Stream endpoint called by user {current_user.id}",
             extra={"user_id": current_user.id, "query_preview": request.query[:50], "request_id": request_id}
         )
         return StreamingResponse(
-            container.chat_service.stream_message_with_citations(
+            container.chat_service.stream_research_pipeline(
                 request=request,
                 user_id=current_user.id,
                 db_session=db
             ),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
     except Exception as e:
         logger.error(f"Stream endpoint error: {e}", exc_info=True)
@@ -154,7 +159,12 @@ async def stream_paper_detail(
                 user_id=current_user.id,
                 model=request.model
             ),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
     except NotFoundException as e:
         raise e
@@ -256,6 +266,81 @@ async def submit_chat_message(
         raise InternalServerException(f"Failed to submit chat task: {str(e)}")
 
 
+@router.post("/agent", response_model=ApiResponse[ChatSubmitResponse])
+async def submit_agent_chat_message(
+    request: ChatSubmitRequest,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: DBUser = Depends(get_current_user),
+    container: "ServiceContainer" = Depends(get_container)
+):
+    """
+    Agent Mode: Submit a chat message for async background processing using the specialized ChatAgentService.
+    Identical interface to /submit. Returns a task_id to connect to /stream/{task_id}.
+    """
+    try:
+        # Get or create conversation
+        if request.conversation_id:
+            conversation = await container.conversation_service.get_conversation(
+                conversation_id=request.conversation_id,
+                user_id=current_user.id
+            )
+            if not conversation:
+                raise NotFoundException(f"Conversation {request.conversation_id} not found")
+            conversation_id = request.conversation_id
+        else:
+            conversation = await container.conversation_service.create_conversation(
+                user_id=current_user.id,
+                title=request.query[:100]
+            )
+            conversation_id = conversation.conversation_id
+
+        request_filters = (
+            request.filters.model_dump(by_alias=True, exclude_none=True)
+            if request.filters
+            else None
+        )
+        
+        # Create pipeline task
+        task = await container.pipeline_task_service.create_task(
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            query=request.query,
+            pipeline_type="agent",
+            filters=request_filters,
+            client_message_id=request.client_message_id
+        )
+        
+        # Submit task to background worker directly for the isolated agent service
+        # (This avoids modifying the existing worker queues directly to keep it 100% parallel/isolated)
+        import asyncio
+        asyncio.create_task(
+            container.chat_agent_service.stream_agent_workflow(
+                task_id=task.task_id,
+                user_id=current_user.id,
+                conversation_id=conversation_id,
+                query=request.query,
+                filters=request_filters or {}
+            )
+        )
+        
+        logger.info(f"Agent Chat task {task.task_id} submitted for user {current_user.id}")
+        
+        return success_response(
+            data=ChatSubmitResponse(
+                task_id=task.task_id,
+                conversation_id=conversation_id,
+                status="pending",
+                message="Agent Task submitted successfully"
+            )
+        )
+    
+    except NotFoundException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to submit agent chat task: {e}", exc_info=True)
+        raise InternalServerException(f"Failed to submit agent chat task: {str(e)}")
+
+
 @router.get("/stream/{task_id}")
 async def stream_task_events(
     task_id: str,
@@ -265,24 +350,16 @@ async def stream_task_events(
     container: "ServiceContainer" = Depends(get_container)
 ) -> StreamingResponse:
     """
-    Stream pipeline events for a task (resumable, reconnectable).
-    
-    This endpoint supports resume-from-sequence for reconnection:
-    - Client tracks last received sequence number
-    - On reconnect, pass from_sequence to resume from that point
-    - Server streams all events >= from_sequence
-    
-    Events:
-    - step: Progress update (phase, progress_percent)
-    - metadata: Paper metadata
-    - chunk: Response text chunk
-    - reasoning: Model reasoning
-    - error: Error occurred
-    - done: Pipeline completed
+    Stream live LLM completion events for a task.
+
+    Notes:
+    - Only completion streaming events are emitted via SSE (`chunk`, `done`, `error`)
+    - No DB event sequence replay is used
+    - `from_sequence` is ignored for backward compatibility
     
     Args:
         task_id: Task identifier
-        from_sequence: Resume from this sequence number (default 0)
+        from_sequence: Deprecated and ignored
     
     Returns:
         SSE stream of events
@@ -297,134 +374,69 @@ async def stream_task_events(
             raise ForbiddenException("Access denied")
         
         async def event_generator():
-            """Generate SSE events from Redis Streams with DB replay/fallback."""
-            last_sequence = from_sequence - 1
-            redis_stream_id = "$"
+            """Generate live SSE events from in-memory broker (no DB sequence replay)."""
+            broker = get_live_task_stream_broker()
+            queue, buffered_events, terminal_event = await broker.subscribe(task_id)
             last_emit_ts = time.monotonic()
 
-            # Replay persisted events only for resume reconnects.
-            # For fresh streams (from_sequence <= 0), go straight to live Redis to avoid bursty catch-up.
-            if from_sequence > 0:
-                while True:
-                    replay_events = await container.pipeline_event_store.get_events(
-                        task_id=task_id,
-                        from_sequence=last_sequence + 1,
-                        limit=200,
-                    )
-                    if not replay_events:
-                        break
-
-                    for event in replay_events:
-                        event_data = {
-                            "event_type": event.event_type,
-                            "sequence": event.sequence_number,
-                            **event.event_data,
-                        }
-                        async for sse_chunk in stream_event(name=event.event_type, data=event_data):
-                            yield sse_chunk
-
-                        last_sequence = event.sequence_number
-
-                        if event.event_type == "done":
-                            logger.info(f"Task {task_id} streaming completed")
-                            return
-
-                        if event.event_type == "error":
-                            return
-
-            
-            while True:
-                redis_events = []
-                try:
-                    redis_events = await read_task_events(
-                        task_id=task_id,
-                        last_stream_id=redis_stream_id,
-                        count=5,
-                        block_ms=200,
-                    )
-                except Exception as redis_error:
-                    logger.warning(f"Redis stream read failed for task {task_id}: {redis_error}")
-
-                if redis_events:
-                    for event in redis_events:
-                        redis_stream_id = event.stream_id
-                        if event.sequence <= last_sequence:
-                            continue
-
-                        event_data = {
-                            "event_type": event.event_type,
-                            "sequence": event.sequence,
-                            **event.event_data,
-                        }
-
-                        async for sse_chunk in stream_event(name=event.event_type, data=event_data):
-                            yield sse_chunk
-                        last_emit_ts = time.monotonic()
-
-                        last_sequence = event.sequence
-
-                        if event.event_type == "done":
-                            logger.info(f"Task {task_id} streaming completed")
-                            return
-
-                        if event.event_type == "error":
-                            return
-
-                    continue
-
-                # Fallback: in case Redis delivery misses an event, reconcile with DB
-                missed_events = await container.pipeline_event_store.get_events(
-                    task_id=task_id,
-                    from_sequence=last_sequence + 1,
-                    limit=200,
-                )
-
-                if missed_events:
-                    for event in missed_events:
-                        event_data = {
-                            "event_type": event.event_type,
-                            "sequence": event.sequence_number,
-                            **event.event_data,
-                        }
-                        async for sse_chunk in stream_event(name=event.event_type, data=event_data):
-                            yield sse_chunk
-                        last_emit_ts = time.monotonic()
-
-                        last_sequence = event.sequence_number
-
-                        if event.event_type == "done":
-                            logger.info(f"Task {task_id} streaming completed")
-                            return
-                    continue
-
-                # No events available; check final task status
-                updated_task = await container.pipeline_task_service.get_task(task_id)
-                if updated_task and updated_task.status in ("completed", "failed", "cancelled"):
-                    if updated_task.status == "completed":
-                        async for sse_chunk in stream_event(
-                            name="done",
-                            data={"status": "success", "sequence": last_sequence + 1},
-                        ):
-                            yield sse_chunk
-                    else:
-                        error_msg = updated_task.error_message or "Task failed"
-                        async for sse_chunk in stream_event(
-                            name="error",
-                            data={"message": error_msg, "sequence": last_sequence + 1},
-                        ):
-                            yield sse_chunk
-                    return
-
-                # Keep connection alive during long-running silent phases (e.g. reranker warm-up)
-                if time.monotonic() - last_emit_ts >= 3.0:
-                    async for sse_chunk in stream_event(
-                        name="ping",
-                        data={"sequence": last_sequence, "ts": int(time.time() * 1000)},
-                    ):
+            try:
+                # Deliver buffered live events (if any)
+                for event_type, event_data in buffered_events:
+                    async for sse_chunk in stream_event(name=event_type, data=event_data):
                         yield sse_chunk
                     last_emit_ts = time.monotonic()
 
-                await asyncio.sleep(0.05)
+                # If terminal event already available, end immediately
+                if terminal_event is not None:
+                    event_type, event_data = terminal_event
+                    async for sse_chunk in stream_event(name=event_type, data=event_data):
+                        yield sse_chunk
+                    return
+
+                while True:
+                    try:
+                        event_type, event_data = await asyncio.wait_for(queue.get(), timeout=3.0)
+                        async for sse_chunk in stream_event(name=event_type, data=event_data):
+                            yield sse_chunk
+                        last_emit_ts = time.monotonic()
+
+                        if event_type in ("done", "error"):
+                            return
+                    except asyncio.TimeoutError:
+                        updated_task = await container.pipeline_task_service.get_task(task_id)
+                        if updated_task and updated_task.status in ("completed", "failed", "cancelled"):
+                            if updated_task.status == "completed":
+                                # Fallback for late subscribers: emit cached final response once.
+                                if updated_task.response_text:
+                                    async for sse_chunk in stream_event(
+                                        name="chunk",
+                                        data={"type": "chunk", "content": updated_task.response_text},
+                                    ):
+                                        yield sse_chunk
+
+                                async for sse_chunk in stream_event(
+                                    name="done",
+                                    data={"type": "done", "status": "success", "message_id": updated_task.message_id},
+                                ):
+                                    yield sse_chunk
+                            else:
+                                error_msg = updated_task.error_message or "Task failed"
+                                async for sse_chunk in stream_event(
+                                    name="error",
+                                    data={"message": error_msg},
+                                ):
+                                    yield sse_chunk
+                            return
+
+                        if time.monotonic() - last_emit_ts >= 3.0:
+                            async for sse_chunk in stream_event(
+                                name="ping",
+                                data={"ts": int(time.time() * 1000)},
+                            ):
+                                yield sse_chunk
+                            last_emit_ts = time.monotonic()
+            finally:
+                await broker.unsubscribe(task_id, queue)
         
         return StreamingResponse(
             event_generator(),
@@ -484,7 +496,7 @@ async def get_task_status(
 
 @router.post("/test-stream")
 @router.get("/test-stream")
-async def test_stream():
+async def test_stream(container: "ServiceContainer" = Depends(get_container)) -> StreamingResponse:
     """
     Test endpoint for frontend to verify SSE streaming with comprehensive markdown examples.
     
@@ -500,181 +512,9 @@ async def test_stream():
     - Math equations (KaTeX)
     - Citations with paper metadata
     """
-    async def generate_test_stream():
-        # Event 1: Conversation ID
-        async for evt in stream_event(name="conversation", data={"conversation_id": "test-12345"}):
-            yield evt
-        await asyncio.sleep(0.1)
-        
-        # Event 2: Mock paper sources
-        mock_papers = [
-            {
-                "paper_id": "test-paper-1",
-                "title": "Attention Is All You Need",
-                "authors": [{"name": "Vaswani et al."}],
-                "publication_date": "2017-06-12",
-                "venue": "NeurIPS",
-                "url": "https://arxiv.org/abs/1706.03762",
-                "citation_count": 50000,
-                "abstract": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks."
-            },
-            {
-                "paper_id": "test-paper-2",
-                "title": "BERT: Pre-training of Deep Bidirectional Transformers",
-                "authors": [{"name": "Devlin et al."}],
-                "publication_date": "2018-10-11",
-                "venue": "NAACL",
-                "url": "https://arxiv.org/abs/1810.04805",
-                "citation_count": 40000,
-                "abstract": "We introduce a new language representation model called BERT."
-            }
-        ]
-        async for evt in stream_event(name="sources", data=mock_papers):
-            yield evt
-        await asyncio.sleep(0.1)
-        
-        # Event 3: Thought process
-        async for evt in stream_event(name="thought", data="Analyzing research papers and generating comprehensive markdown response..."):
-            yield evt
-        await asyncio.sleep(0.1)
-        
-        # Event 4: Stream markdown content in chunks
-        markdown_content = """# Comprehensive Markdown Test
-
-This is a **complete showcase** of markdown formatting capabilities for the frontend.
-
-## Headers
-
-### H3 Header
-#### H4 Header
-##### H5 Header
-###### H6 Header
-
-## Text Formatting
-
-This text includes **bold text**, *italic text*, ***bold and italic***, ~~strikethrough~~, and `inline code`.
-
-## Lists
-
-### Unordered List
-- First item
-- Second item
-  - Nested item 1
-  - Nested item 2
-    - Deep nested item
-- Third item
-
-### Ordered List
-1. First step
-2. Second step
-   1. Sub-step A
-   2. Sub-step B
-3. Third step
-
-## Code Blocks
-
-Here's a Python code example:
-
-```python
-def hello_world():
-    \"\"\"A simple function demonstrating code syntax highlighting\"\"\"
-    print("Hello, World!")
-    return True
-
-# Using list comprehension
-squares = [x**2 for x in range(10)]
-```
-
-JavaScript example:
-
-```javascript
-const fetchData = async (url) => {
-  const response = await fetch(url);
-  return response.json();
-};
-```
-
-## Blockquotes
-
-> This is a blockquote.
-> 
-> It can span multiple lines and is often used for citations or important notes.
-> 
-> > Nested blockquotes are also supported.
-
-## Links and Citations
-
-You can read more about [Transformers on Wikipedia](https://en.wikipedia.org/wiki/Transformer_(machine_learning_model)).
-
-According to recent research [1], attention mechanisms have revolutionized NLP.
-
-## Tables
-
-| Model | Parameters | Year | Performance |
-|-------|-----------|------|-------------|
-| GPT-2 | 1.5B | 2019 | Good |
-| GPT-3 | 175B | 2020 | Excellent |
-| GPT-4 | Unknown | 2023 | Outstanding |
-
-## Math Equations
-
-Inline math: The equation $E = mc^2$ is Einstein's famous formula.
-
-Block equation:
-
-$$
-\\frac{\\partial L}{\\partial w} = \\frac{1}{n} \\sum_{i=1}^{n} (h_w(x_i) - y_i) \\cdot x_i
-$$
-
-Transformer attention mechanism:
-
-$$
-\\text{Attention}(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V
-$$
-
-## Task Lists
-
-- [x] Implement streaming endpoint
-- [x] Add markdown examples
-- [ ] Test on frontend
-- [ ] Add more edge cases
-
-## Horizontal Rule
-
----
-
-## Special Characters
-
-Escaping special characters: \\* \\_ \\` \\[ \\]
-
-## Citations and References
-
-The transformer architecture [1] introduced multi-head attention, which was later refined in BERT [2]. Both papers demonstrate significant improvements over previous state-of-the-art models.
-
-### References
-
-[1] Vaswani et al. (2017). "Attention Is All You Need." *NeurIPS*.  
-[2] Devlin et al. (2018). "BERT: Pre-training of Deep Bidirectional Transformers." *NAACL*.
-
----
-
-**Note**: This test covers most common markdown elements. Your frontend should handle all of these gracefully!
-"""
-        
-        # Split into chunks and stream with realistic delays
-        chunk_size = 50  # characters per chunk
-        for i in range(0, len(markdown_content), chunk_size):
-            chunk = markdown_content[i:i + chunk_size]
-            async for evt in stream_event(name="chunk", data=chunk):
-                yield evt
-            await asyncio.sleep(0.05)  # Simulate realistic streaming delay
-        
-        # Event 5: Done
-        async for evt in stream_event(name="done", data=""):
-            yield evt
     
     return StreamingResponse(
-        generate_test_stream(),
+        container.chat_service.test_streaming_response(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

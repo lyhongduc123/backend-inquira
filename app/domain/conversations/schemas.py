@@ -15,32 +15,90 @@ def convert_dict_to_camel(data: Any) -> Any:
         return data
 
 
+class ConversationBase(BaseModel):
+    """Base model for conversation with common fields"""
+
+    id: str
+    conversation_id: str
+    title: Optional[str] = Field(
+        default=None, max_length=200, description="Conversation title"
+    )
+    conversation_type: Optional[str] = Field(
+        default="multi_paper_rag", description="Type of conversation"
+    )
+    primary_paper_id: Optional[str] = Field(
+        default=None, description="Primary paper ID for single-paper conversations"
+    )
+    conversation_metadata: Optional[Dict[str, Any]] = Field(
+        default=None, description="Additional metadata for the conversation"
+    )
+
+    class Config:
+        from_attributes = True
+
+
+class ConversationUpdateInternal(BaseModel):
+    """Internal model for updating conversation fields"""
+
+    title: Optional[str] = Field(default=None, max_length=200, description="New title")
+    is_archived: Optional[bool] = Field(default=None, description="Archive status")
+    conversation_metadata: Optional[Dict[str, Any]] = Field(
+        default=None, description="Additional metadata for the conversation"
+    )
+
+
+# ------------------ Request and Response Models ------------------
+
+
 class ConversationCreate(CamelModel):
     """Request model for creating a new conversation"""
-    title: Optional[str] = Field(None, max_length=200, description="Optional conversation title")
-    conversation_type: Optional[str] = Field("multi_paper_rag", description="Type of conversation")
-    primary_paper_id: Optional[str] = Field(None, description="Primary paper ID for single-paper conversations")
+
+    title: Optional[str] = Field(
+        None, max_length=200, description="Optional conversation title"
+    )
+    conversation_type: Optional[str] = Field(
+        "multi_paper_rag", description="Type of conversation"
+    )
+    primary_paper_id: Optional[str] = Field(
+        None, description="Primary paper ID for single-paper conversations"
+    )
+    conversation_metadata: Optional[Dict[str, Any]] = Field(
+        None, description="Additional metadata for the conversation"
+    )
 
 
 class ConversationUpdate(CamelModel):
     """Request model for updating a conversation"""
+
     title: Optional[str] = Field(None, max_length=200, description="New title")
     is_archived: Optional[bool] = Field(None, description="Archive status")
+    conversation_metadata: Optional[Dict[str, Any]] = Field(
+        None, description="Additional metadata for the conversation"
+    )
 
 
 class Message(CamelModel):
     """Message within a conversation"""
+
     id: int
     role: str  # "user" or "assistant"
     content: str
     sources: Optional[List[Dict[str, Any]]] = None  # Deprecated: use paper_snapshots
     paper_snapshots: Optional[List[Dict[str, Any]]] = None  # Paper metadata snapshots
-    progress_events: Optional[List[Dict[str, Any]]] = None  # RAG pipeline progress events
-    scoped_quote_refs: Optional[List[Dict[str, Any]]] = None  # Scoped chunk quote references
+    progress_events: Optional[List[Dict[str, Any]]] = (
+        None  # RAG pipeline progress events
+    )
+    scoped_quote_refs: Optional[List[Dict[str, Any]]] = (
+        None  # Scoped chunk quote references
+    )
     created_at: datetime
-    
-    @field_serializer('paper_snapshots', 'sources', 'progress_events', 'scoped_quote_refs')
-    def serialize_metadata(self, value: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+
+    @field_serializer(
+        "paper_snapshots", "sources", "progress_events", "scoped_quote_refs"
+    )
+    def serialize_metadata(
+        self, value: Optional[List[Dict[str, Any]]]
+    ) -> Optional[List[Dict[str, Any]]]:
         """Convert nested dict keys to camelCase"""
         if value is None:
             return None
@@ -49,6 +107,7 @@ class Message(CamelModel):
 
 class ConversationDetail(CamelModel):
     """Detailed conversation with messages"""
+
     conversation_id: str
     title: Optional[str]
     created_at: datetime
@@ -58,11 +117,12 @@ class ConversationDetail(CamelModel):
     conversation_type: str = "multi_paper_rag"
     primary_paper_id: Optional[str] = None
     messages: List[Message]
-    metadata: Optional[Dict[str, Any]] = None 
+    conversation_metadata: Optional[Dict[str, Any]] = None
 
 
 class ConversationSummary(CamelModel):
     """Summary of a conversation for list view"""
+
     id: str  # UUID string
     title: Optional[str]
     preview: Optional[str] = None  # First message or summary
@@ -75,6 +135,7 @@ class ConversationSummary(CamelModel):
 
 class ConversationListResponse(CamelModel):
     """Response model for conversation list"""
+
     conversations: List[ConversationSummary]
     total: int
     page: int
@@ -83,4 +144,5 @@ class ConversationListResponse(CamelModel):
 
 class DeleteResponse(CamelModel):
     """Response for delete operations"""
+
     message: str

@@ -1,7 +1,7 @@
 from typing import List, Optional, Dict, Any, TYPE_CHECKING, Tuple
 from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, and_
+from sqlalchemy import select, update, and_, literal_column
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload, joinedload
 from datetime import datetime, date
@@ -184,7 +184,7 @@ class PaperRepository:
         if load_options.authors:
             from app.models.authors import DBAuthorPaper
             query = query.options(
-                selectinload(DBPaper.paper_authors).selectinload(DBAuthorPaper.author)
+                selectinload(DBPaper.authors).selectinload(DBAuthorPaper.author)
             )
         if load_options.journal:
             from app.models.journals import DBJournal
@@ -265,7 +265,7 @@ class PaperRepository:
         if load_options.authors:
             from app.models.authors import DBAuthorPaper
             query = query.options(
-                selectinload(DBPaper.paper_authors).selectinload(DBAuthorPaper.author)
+                selectinload(DBPaper.authors).selectinload(DBAuthorPaper.author)
             )
         if load_options.journal:
             from app.models.journals import DBJournal
@@ -300,7 +300,7 @@ class PaperRepository:
         if load_options.authors:
             from app.models.authors import DBAuthorPaper
             query = query.options(
-                selectinload(DBPaper.paper_authors).selectinload(DBAuthorPaper.author)
+                selectinload(DBPaper.authors).selectinload(DBAuthorPaper.author)
             )
         if load_options.journal:
             from app.models.journals import DBJournal
@@ -681,11 +681,18 @@ class PaperRepository:
         """
         from sqlalchemy import func, text, and_
         from app.models.authors import DBAuthor, DBAuthorPaper
+        
+        ts_query = func.websearch_to_tsquery("english", query)
 
-        ts_query = func.plainto_tsquery("english", query)
-        ts_vector = func.to_tsvector(
-            "english", func.coalesce(DBPaper.title, "") + " " + func.coalesce(DBPaper.abstract, "")
+        title_vector = func.setweight(
+            func.to_tsvector("english", func.coalesce(DBPaper.title, "")), 
+            literal_column("'A'::\"char\"")
         )
+        abstract_vector = func.setweight(
+            func.to_tsvector("english", func.coalesce(DBPaper.abstract, "")), 
+            literal_column("'B'::\"char\"")
+        )
+        ts_vector = title_vector.op('||')(abstract_vector)
         bm25_score = func.ts_rank_cd(ts_vector, ts_query)
 
         query_stmt = select(DBPaper, bm25_score.label("bm25_score")).where(

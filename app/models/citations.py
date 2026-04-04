@@ -22,18 +22,14 @@ class DBCitation(Base):
     citing_paper_id: Mapped[int] = mapped_column(ForeignKey("papers.id"), nullable=False, index=True)
     cited_paper_id: Mapped[int] = mapped_column(ForeignKey("papers.id"), nullable=False, index=True)
     
-    # Citation context
-    citation_context: Mapped[str] = mapped_column(Text, nullable=True)  # Sentence/paragraph where citation appears
-    section: Mapped[str] = mapped_column(String(100), nullable=True)  # Introduction, Methods, Discussion, etc.
+    # citation_context: Mapped[str] = mapped_column(Text, nullable=True)  
+    # section: Mapped[str] = mapped_column(String(100), nullable=True)  
     
-    # Citation type/intent
-    intent: Mapped[str] = mapped_column(String(50), nullable=True)  # background, method, result, supporting, contrasting
-    is_self_citation: Mapped[bool] = mapped_column(Boolean, default=False, index=True)  # Same author(s)
-    is_same_institution: Mapped[bool] = mapped_column(Boolean, default=False)  # Same institution
-    
-    # Citation quality signals
-    is_influential: Mapped[bool] = mapped_column(Boolean, default=False)  # Semantic Scholar influential citation
-    mention_count: Mapped[int] = mapped_column(Integer, default=1)  # How many times cited 
+    intent: Mapped[str] = mapped_column(String(50), nullable=True)  
+    is_self_citation: Mapped[bool] = mapped_column(Boolean, default=False, index=True) 
+    is_same_institution: Mapped[bool] = mapped_column(Boolean, default=False)  
+
+    is_influential: Mapped[bool] = mapped_column(Boolean, default=False) 
     citation_year: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
     years_since_publication: Mapped[int] = mapped_column(Integer, nullable=True)  # Recency
     

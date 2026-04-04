@@ -321,7 +321,7 @@ class RetrievalService:
         Returns:
             Enriched results with OpenAlex metadata merged
         """
-        openalex_provider: OpenAlexProvider = self.providers[RetrievalServiceType.OPENALEX]  # type: ignore[assignment]
+        openalex_provider: OpenAlexProvider = self.providers[RetrievalServiceType.OPENALEX]  
 
         dois = []
         doi_to_semantic = {}
@@ -338,7 +338,7 @@ class RetrievalService:
         if dois:
             openalex_id_results = []
             try:
-                openalex_id_results = await openalex_provider.get_papers_by_dois(dois)
+                openalex_id_results = await openalex_provider.get_papers_by_dois(dois, limit=len(dois))
             except Exception as e:
                 logger.error(f"Error fetching OpenAlex data for enrichment: {e}")
             for oa_result in openalex_id_results:
@@ -413,6 +413,7 @@ class RetrievalService:
             oa_author = self._find_matching_author(s2_author, oa_authors, i)
             merged_author = s2_author.model_copy()
             if oa_author:
+                merged_author.institutions = oa_author.institutions
                 merged_author.affiliations = oa_author.affiliations
                 merged_author.openalex_id = oa_author.author_id
                 merged_author.orcid = oa_author.orcid

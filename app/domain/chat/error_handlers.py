@@ -4,24 +4,26 @@ Handles gibberish input, no results, and other edge cases.
 """
 
 from typing import AsyncGenerator
+
+from redis import event
 from app.domain.conversations.service import ConversationService
 from app.extensions import stream_event
 from app.extensions.logger import create_logger
-from .event_emitter import EventEmitter
+from .event_emitter import ChatEventEmitter
+from app.domain.chat import event_emitter
 
 logger = create_logger(__name__)
 
 
 class ChatErrorHandler:
     """Handles error cases and special responses for chat"""
-    
     @staticmethod
-    async def _stream_text_in_chunks(text: str, delay: float = 0.05) -> AsyncGenerator[str, None]:
+    async def _stream_text_in_chunks(text: str, event_emitter: ChatEventEmitter, delay: float = 0.05) -> AsyncGenerator[str, None]:
         """Simulates LLM streaming by yielding paragraphs or sentences."""
         tokens = text.split(" ")
         for i, token in enumerate(tokens):
             content = token if i == len(tokens) - 1 else token + " "
-            async for evt in EventEmitter.emit_chunk_event(content):
+            async for evt in event_emitter.emit_chunk_event(content):
                 yield evt
 
     @staticmethod
@@ -30,6 +32,7 @@ class ChatErrorHandler:
         conversation_id: str,
         user_id: int,
         query: str,
+        event_emitter: ChatEventEmitter
     ) -> AsyncGenerator[str, None]:
         """
         Handle gibberish input with helpful introduction message.
@@ -104,6 +107,7 @@ class ChatErrorHandler:
         conversation_id: str,
         user_id: int,
         conversation_service: ConversationService,
+        event_emitter: ChatEventEmitter
     ) -> AsyncGenerator[str, None]:
         """
         Handle when no papers are found.
@@ -136,9 +140,9 @@ Please try asking a different question or rephrase your current one."""
             logger.error(f"Failed to save no results message: {e}")
         
         # Stream the message
-        async for evt in EventEmitter.emit_chunk_event(msg):
+        async for evt in event_emitter.emit_chunk_event(msg):
             yield evt
         
         # Signal completion
-        async for evt in EventEmitter.emit_done_event():
+        async for evt in event_emitter.emit_done_event():
             yield evt

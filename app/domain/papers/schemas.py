@@ -10,6 +10,10 @@ from app.core.dtos import AuthorDTO
 from app.domain.authors.schemas import AuthorMetadata
 from app.domain.common.schemas import SJRMetadata
 
+from app.extensions.logger import create_logger
+
+logger = create_logger(__name__)
+
 
 class PaperUpdateRequest(CamelModel):
     """API request for updating a paper"""
@@ -70,6 +74,24 @@ class PaperMetadata(CamelModel):
         from_attributes = True
         ignore_extra = True
 
+    @staticmethod
+    def _safe_db_paper_payload(db_paper: Any) -> Dict[str, Any]:
+        """Extract only DB column attributes to avoid relationship validation issues."""
+        if isinstance(db_paper, dict):
+            return db_paper
+
+        try:
+            from sqlalchemy import inspect as sa_inspect
+        except Exception:
+            return db_paper.__dict__ if hasattr(db_paper, "__dict__") else {}
+
+        state = sa_inspect(db_paper)
+        payload: Dict[str, Any] = {
+            attr.key: getattr(db_paper, attr.key)
+            for attr in state.mapper.column_attrs
+        }
+        return payload
+
     
     @classmethod
     def from_db_model(cls, db_paper) -> "PaperMetadata":
@@ -78,12 +100,14 @@ class PaperMetadata(CamelModel):
         
         if not db_paper:
             raise ValueError("DBPaper is None")
-        authors = [AuthorMetadata.model_validate(author_paper.author) for author_paper in db_paper.paper_authors]
+        authors = [
+            AuthorMetadata.model_validate(author_paper.author, from_attributes=True)
+            for author_paper in (db_paper.authors or [])
+            if getattr(author_paper, "author", None)
+        ]
         year = db_paper.publication_date.year if db_paper.publication_date else None
-        
-        # Validate paper but exclude journal ORM relationship
-        paper_metadata = cls.model_validate(db_paper, from_attributes=True)
-        paper_metadata.journal = None  # Clear ORM object to avoid serialization issues
+
+        paper_metadata = cls.model_validate(cls._safe_db_paper_payload(db_paper))
         paper_metadata.authors = authors
         paper_metadata.year = year
             
@@ -106,16 +130,18 @@ class PaperMetadata(CamelModel):
         
         paper = ranked_paper.paper
         year = paper.publication_date.year if paper.publication_date else None
+        logger.debug(f"Paper: {paper}")
         authors = []
-        for author_paper in paper.paper_authors:
-            author_dict = {
-                "author_id": author_paper.author.author_id if author_paper.author else None,
-                "name": author_paper.author.name if author_paper.author else None,
-                "author_position": author_paper.author_position,
-            }
-            authors.append(AuthorMetadata.model_validate(author_dict))
+        for author_paper in paper.authors:
+            if author_paper:
+                author_dict = {
+                    "author_id": str(author_paper.author.author_id) if author_paper.author and author_paper.author.author_id is not None else None,
+                    "name": author_paper.author.name if author_paper.author else None,
+                    "author_position": author_paper.author_position,
+                   }
+                authors.append(AuthorMetadata.model_validate(author_dict))
         
-        paper_metadata = cls.model_validate(paper, from_attributes=True)
+        paper_metadata = cls.model_validate(cls._safe_db_paper_payload(paper))
         paper_metadata.journal = None  # Clear ORM object
         paper_metadata.authors = authors
         paper_metadata.year = year
@@ -226,7 +252,7 @@ class PaperDetailResponse(CamelModel):
         try:
             from app.models.papers import DBPaper
             from sqlalchemy import inspect as sa_inspect
-            from sqlalchemy.orm.attributes import NO_VALUE
+            from sqlalchemy.orm import NO_VALUE
         except Exception:
             return value
 
@@ -251,8 +277,8 @@ class PaperDetailResponse(CamelModel):
 
 class CitingPaperData(CamelModel):
     """Nested paper data from Semantic Scholar citations API"""
-    paper_id: str = Field(alias="paperId")
-    corpus_id: Optional[int] = Field(None, alias="corpusId")
+    paper_id: str = Field(...)
+    corpus_id: Optional[int] = None
     title: Optional[str] = None
     abstract: Optional[str] = None
     authors: Optional[List[Dict[str, Any]]] = None
@@ -267,8 +293,8 @@ class CitingPaperData(CamelModel):
 
 class CitingPaper(CamelModel):
     """A paper that cites the target paper (S2 API wrapper format)"""
-    citing_paper: CitingPaperData = Field(alias="citingPaper")
-    is_influential: Optional[bool] = Field(None, alias="isInfluential")
+    citing_paper: CitingPaperData = Field(...)
+    is_influential: Optional[bool] = Field(None)
     contexts: Optional[List[str]] = None
     intents: Optional[List[str]] = None
     
@@ -279,7 +305,7 @@ class CitingPaper(CamelModel):
 
 class ReferencedPaperData(CamelModel):
     """Nested paper data from Semantic Scholar references API"""
-    paper_id: str = Field(alias="paperId")
+    paper_id: str = Field(...)
     corpus_id: Optional[int] = Field(None, alias="corpusId")
     title: Optional[str] = None
     abstract: Optional[str] = None

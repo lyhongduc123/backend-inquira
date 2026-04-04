@@ -2,7 +2,7 @@
 Repository for conversation database operations
 """
 from typing import Optional, List, Dict, Any
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.conversations import DBConversation
@@ -103,24 +103,20 @@ class ConversationRepository:
     async def update(
         self,
         conversation_id: str,
-        user_id: int,
-        title: Optional[str] = None,
-        is_archived: Optional[bool] = None
+        update_data: Dict[str, Any]
     ) -> Optional[DBConversation]:
-        """Update conversation details"""
-        conversation = await self.get_by_id(conversation_id, user_id)
-        if not conversation:
-            return None
-        
-        if title is not None:
-            conversation.title = title
-        if is_archived is not None:
-            conversation.is_archived = is_archived
-        
-        await self.db.commit()
-        await self.db.refresh(conversation)
-        
-        return conversation
+        """Update conversation details"""   
+        try:     
+            query = update(DBConversation).where(
+                DBConversation.conversation_id == conversation_id
+            ).values(**update_data)
+            await self.db.execute(query)
+            await self.db.commit()
+        except Exception as e:
+            await self.db.rollback()
+            raise e
+
+        return await self.get(conversation_id)
     
     async def delete(
         self,

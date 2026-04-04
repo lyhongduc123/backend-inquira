@@ -14,7 +14,7 @@ from .schemas import (
     ConversationSummary,
     DeleteResponse
 )
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, get_current_user_optional
 from app.models.users import DBUser
 from app.core.responses import PaginatedData
 from app.core.exceptions import NotFoundException
@@ -76,7 +76,7 @@ async def create_conversation(
     """
     conversation = await container.conversation_service.create_conversation(
         user_id=current_user.id,
-        title=request.title
+        title=request.title or "New Conversation"
     )
     
     return conversation
@@ -86,7 +86,7 @@ async def get_conversation(
     http_request: Request,
     conversation_id: str,
     db: AsyncSession = Depends(get_db_session),
-    current_user: DBUser = Depends(get_current_user)
+    current_user: Optional[DBUser] = Depends(get_current_user_optional)
 ) -> ConversationDetail:
     """
     Get detailed conversation including all messages
@@ -95,7 +95,10 @@ async def get_conversation(
     """
     service = ConversationService(db)
     
-    conversation = await service.get_conversation(conversation_id, current_user.id)
+    conversation = await service.get_conversation(
+        conversation_id=conversation_id,
+        user_id=current_user.id if current_user else None,
+    )
     if not conversation:
         raise NotFoundException(f"Conversation {conversation_id} not found")
     

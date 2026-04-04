@@ -16,7 +16,7 @@ from app.extensions.logger import create_logger
 from app.processor.preprocessing_repository import PreprocessingRepository
 from app.processor.preprocessing_service import PreprocessingService
 from app.retriever.service import RetrievalService
-from app.domain.papers.enrichment_service import PaperEnrichmentService
+from app.domain.papers.linking_service import PaperLinkingService
 from app.processor.services.zeroshot_tagger import ZeroShotTaggerService
 
 logger = create_logger(__name__)
@@ -44,13 +44,13 @@ class PreprocessingPhaseService:
         preprocessing_service: PreprocessingService,
         preprocessing_repository: PreprocessingRepository,
         retriever: RetrievalService,
-        enrichment_service: PaperEnrichmentService,
+        linking_service: PaperLinkingService,
         zeroshot_tagger_service: ZeroShotTaggerService,
     ):
         self.preprocessing_service = preprocessing_service
         self.preprocessing_repository = preprocessing_repository
         self.retriever = retriever
-        self.enrichment_service = enrichment_service
+        self.linking_service = linking_service
         self.zeroshot_tagger_service = zeroshot_tagger_service
 
     async def run_embedding_backfill(self) -> Dict[str, int]:
@@ -112,7 +112,7 @@ class PreprocessingPhaseService:
             }
 
         citation_links_attempted = sum(len(ref_ids) for _, ref_ids in citation_data)
-        citation_links_created = await self.enrichment_service.batch_link_citations_references(
+        citation_links_created = await self.linking_service.batch_link_citations_references(
             citation_data=citation_data
         )
 
@@ -130,7 +130,7 @@ class PreprocessingPhaseService:
         batch_size: int = 200,
     ) -> Dict[str, int]:
         """Run author trust metric computation phase."""
-        return await self.preprocessing_service.compute_all_author_trust_metrics(
+        return await self.preprocessing_service.compute_all_author_metrics(
             only_unprocessed=only_unprocessed,
             conflict_threshold_percent=conflict_threshold_percent,
             batch_size=batch_size,

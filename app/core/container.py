@@ -155,14 +155,16 @@ class ServiceContainer:
         return ConferenceService(db_session=self.db_session)
     
     @cached_property
-    def paper_enrichment_service(self):
-        """Paper enrichment service for citation/reference linking"""
-        from app.domain.papers.enrichment_service import PaperEnrichmentService
-        return PaperEnrichmentService(
-            db=self.db_session,
-            paper_repository=self.paper_repository
+    def paper_linking_service(self):
+        """Get or create PaperLinkingService singleton"""
+        from app.domain.papers.linking_service import PaperLinkingService
+        return PaperLinkingService(
+            self.db_session,
+            paper_repository=self.paper_repository,
+            author_service=self.author_service,
+            institution_service=self.institution_service
         )
-
+    
     # ==================== CHAT HELPERS (Request-scoped utilities) ====================
     
     @cached_property
@@ -269,7 +271,7 @@ class ServiceContainer:
             processor=self.paper_processor,
             journal_service=self.journal_service,
             conference_service=self.conference_service,
-            enrichment_service=self.paper_enrichment_service,
+            linking_service=self.paper_linking_service,
         )
 
     @cached_property
@@ -285,7 +287,7 @@ class ServiceContainer:
             preprocessing_service=self.preprocessing_service,
             preprocessing_repository=preprocessing_repo,
             retriever=self.retrieval_service,
-            enrichment_service=self.paper_enrichment_service,
+            linking_service=self.paper_linking_service,
             zeroshot_tagger_service=self.zeroshot_tagger_service,
         )
 
@@ -352,9 +354,27 @@ class ServiceContainer:
             rag_pipeline=self.pipeline,
             hybrid_pipeline=self.hybrid_pipeline,
             database_pipeline=self.database_pipeline,
+            scoped_pipeline=self.scoped_pipeline,
             llm_service=self.llm_service,
             message_service=self.message_service,
             context_manager=self.conversation_context_manager,
             summarization_service=self.conversation_summarization_service,
             background_tasks=self.chat_background_tasks,
         )
+
+    @cached_property
+    def agent_pipeline(self):
+        """Agentic explicit search pipeline"""
+        from app.rag_pipeline.agent_pipeline import AgentPipeline
+
+        return AgentPipeline(
+            db_session=self.db_session,
+            container=self,
+        )
+
+    @property
+    def chat_agent_service(self):
+        """Chat Agent service for Agent Mode"""
+        from app.domain.chat.agent_service import ChatAgentService
+
+        return ChatAgentService()

@@ -13,7 +13,11 @@ from app.models.pipeline_tasks import PipelineTaskStatus, PipelinePhase, Pipelin
 from app.extensions.logger import create_logger
 from app.domain.chat.query_router import route_query
 from app.domain.chat.pre_response import PreResponsePresets
-from app.domain.chat.redis_streams import publish_task_event
+from app.domain.chat.live_stream import get_live_task_stream_broker
+from app.validation.service import save_validation_result, validate_answer
+from app.validation.schemas import ValidationRequest
+from app.db.database import async_session
+from app.rag_pipeline.schemas import SearchWorkflowConfig
 
 logger = create_logger(__name__)
 
@@ -132,11 +136,6 @@ async def execute_chat_pipeline(
         filters: Optional search filters
     """
     pipeline_start_time = time.time()
-
-    # Create worker-specific database session
-    engine = create_async_engine(settings.DATABASE_URL, echo=False)
-    async_session = async_sessionmaker(engine, expire_on_commit=False)
-    
     container = None  # Define outside try block
     
     async with async_session() as db:
@@ -150,25 +149,26 @@ async def execute_chat_pipeline(
             emitted_step_types: set[str] = set()
             current_step = 0
 
+            stream_broker = get_live_task_stream_broker()
+            live_stream_event_types = {
+                PipelineEventType.CHUNK,
+                PipelineEventType.METADATA,
+                PipelineEventType.REASONING,
+                PipelineEventType.STEP,
+                PipelineEventType.ERROR,
+                PipelineEventType.DONE,
+            }
+
             async def emit_event(event_type: str, event_data: Dict[str, Any]) -> None:
-                """Persist event to DB and publish to Redis Stream for live delivery."""
-                db_event = await container.pipeline_event_store.save_event(
+                """Publish live SSE events only for LLM completion stream payloads."""
+                if event_type not in live_stream_event_types:
+                    return
+
+                await stream_broker.publish(
                     task_id=task_id,
                     event_type=event_type,
-                    event_data=event_data,
+                    data=event_data,
                 )
-
-                try:
-                    await publish_task_event(
-                        task_id=task_id,
-                        event_type=event_type,
-                        sequence=db_event.sequence_number,
-                        event_data=event_data,
-                    )
-                except Exception as redis_error:
-                    logger.warning(
-                        f"Task {task_id}: Redis stream publish failed for {event_type}: {redis_error}"
-                    )
 
             async def emit_step_event(mapped_step_event: Dict[str, Any]) -> None:
                 nonlocal current_step
@@ -254,13 +254,16 @@ async def execute_chat_pipeline(
                         from app.rag_pipeline.schemas import RAGResult
                         rag_result = event_data if isinstance(event_data, RAGResult) else None
 
-            elif pipeline_type == "database":
+            elif pipeline_type == "database" or pipeline_type == "research":
                 # Use database pipeline (fast, DB-only)
                 async for event in container.database_pipeline.run_database_search_workflow(
-                    query=query,
-                    top_papers=50,
-                    top_chunks=40,
-                    filters=filters or {},
+                    config=SearchWorkflowConfig(
+                        query=query,
+                        top_papers=50,
+                        top_chunks=40,
+                        filters=filters or {},
+                        conversation_id=conversation_id,
+                    )
                 ):
                     event_type_str = event.type
                     event_data = event.data
@@ -316,6 +319,7 @@ async def execute_chat_pipeline(
             if not rag_result or not rag_result.papers:
                 llm_no_results_chunks: List[str] = []
                 no_results_message = _get_no_results_message()
+                validation_model_name = container.llm_service.llm_provider.get_model()
 
                 try:
                     from app.extensions import get_stream_response_content
@@ -391,6 +395,28 @@ async def execute_chat_pipeline(
                     completion_time_ms=pipeline_completion_time,
                 )
 
+                try:
+                    no_results_context = (
+                        "No relevant papers were retrieved from current search indexes. "
+                        "Provide guidance and possible intended query reformulations."
+                    )
+                    validation_request = ValidationRequest(
+                        query=query,
+                        context=no_results_context,
+                        enhanced_query=query,
+                        context_chunks=[],
+                        generated_answer=no_results_message,
+                        model_name=validation_model_name,
+                        message_id=assistant_message_id,
+                    )
+                    validation_result = await validate_answer(validation_request)
+                    await save_validation_result(db, validation_request, validation_result)
+                except Exception as validation_error:
+                    logger.error(
+                        f"Task {task_id}: Immediate validation failed for no-results response: {validation_error}",
+                        exc_info=True,
+                    )
+
                 await container.pipeline_task_service.save_results(
                     task_id=task_id,
                     papers=[],
@@ -456,8 +482,10 @@ async def execute_chat_pipeline(
             from app.domain.chat.response_builder import ChatResponseBuilder
             response_builder = ChatResponseBuilder()
             context, chunk_papers = response_builder.build_context_from_results(rag_result)
+            context_chunks = response_builder.extract_context_chunks_from_results(rag_result)
             retrieved_paper_ids = response_builder.get_retrieved_paper_ids(rag_result)
             paper_snapshots = response_builder.extract_metadata_from_results(rag_result)
+            validation_model_name = container.llm_service.llm_provider.get_model()
 
             scoped_quote_index: Dict[str, Dict[str, Any]] = {}
             scoped_seen_markers: set[str] = set()
@@ -582,6 +610,24 @@ async def execute_chat_pipeline(
                 pipeline_type=pipeline_type,
                 completion_time_ms=pipeline_completion_time,
             )
+
+            try:
+                validation_request = ValidationRequest(
+                    query=query,
+                    context=context,
+                    enhanced_query=enhanced_query,
+                    context_chunks=context_chunks,
+                    generated_answer=full_response,
+                    model_name=validation_model_name,
+                    message_id=assistant_message_id,
+                )
+                validation_result = await validate_answer(validation_request)
+                await save_validation_result(db, validation_request, validation_result)
+            except Exception as validation_error:
+                logger.error(
+                    f"Task {task_id}: Immediate validation failed for assistant message {assistant_message_id}: {validation_error}",
+                    exc_info=True,
+                )
             
             # Save results to task
             serialized_papers = _serialize_ranked_papers_for_cache(rag_result)
@@ -624,7 +670,7 @@ async def execute_chat_pipeline(
         except Exception as e:
             logger.error(f"Task {task_id}: Failed with error: {e}", exc_info=True)
             
-            # Save error event (container might be None if init failed)
+            # Publish error event and persist task failure (container might be None if init failed)
             if container:
                 try:
                     error_payload = {
@@ -632,23 +678,11 @@ async def execute_chat_pipeline(
                         "error_type": type(e).__name__
                     }
 
-                    db_error_event = await container.pipeline_event_store.save_event(
+                    await get_live_task_stream_broker().publish(
                         task_id=task_id,
                         event_type=PipelineEventType.ERROR,
-                        event_data=error_payload,
+                        data=error_payload,
                     )
-
-                    try:
-                        await publish_task_event(
-                            task_id=task_id,
-                            event_type=PipelineEventType.ERROR,
-                            sequence=db_error_event.sequence_number,
-                            event_data=error_payload,
-                        )
-                    except Exception as redis_error:
-                        logger.warning(
-                            f"Task {task_id}: Redis stream publish failed for error event: {redis_error}"
-                        )
                     
                     # Mark task as failed
                     await container.pipeline_task_service.complete_task(
@@ -659,4 +693,5 @@ async def execute_chat_pipeline(
                     logger.error(f"Task {task_id}: Failed to save error state: {inner_e}")
         
         finally:
-            await engine.dispose()
+            # Session lifecycle is managed by async_session() context manager.
+            pass

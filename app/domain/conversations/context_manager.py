@@ -99,7 +99,6 @@ class ConversationContextManager:
         formatted_messages = []
         total_tokens = 0
         
-        # Add summary as system message if provided
         if include_summary:
             summary_msg = {
                 "role": "system",
@@ -110,8 +109,6 @@ class ConversationContextManager:
             total_tokens += summary_tokens
             logger.info(f"Added conversation summary ({summary_tokens} tokens)")
         
-        # Process messages from newest to oldest (reverse)
-        # Always include the last message (current query)
         messages_to_include = []
         remaining_budget = self.max_context_tokens - total_tokens
         
@@ -130,19 +127,14 @@ class ConversationContextManager:
                 messages_to_include.append((msg_formatted, msg_tokens))
                 remaining_budget -= msg_tokens
             else:
-                # Budget exceeded, stop adding messages
                 logger.info(f"Context budget exceeded. Including {len(messages_to_include)} most recent messages.")
                 break
             
-            # Check max message limit
             if self.max_messages and len(messages_to_include) >= self.max_messages:
                 logger.info(f"Reached max message limit ({self.max_messages})")
                 break
         
-        # Reverse back to chronological order (oldest to newest)
         messages_to_include.reverse()
-        
-        # Add to formatted messages
         for msg, tokens in messages_to_include:
             formatted_messages.append(msg)
             total_tokens += tokens
@@ -176,21 +168,48 @@ class ConversationContextManager:
         repo = MessageRepository(db_session)
         messages = await repo.list_by_conversation(
             conversation_id=conversation_id,
-            include_inactive=False
+            include_inactive=False,
+            limit=10
         )
         
         if not messages:
             return [], 0
         
-        # Optionally exclude the last message (if it's being processed)
         if not include_current_query and len(messages) > 0:
             messages = messages[:-1]
         
-        # TODO: Load conversation summary if it exists
-        # For now, we'll implement summary loading in phase 2
         conversation_summary = None
         
         return self.build_context_from_messages(messages, conversation_summary)
+    
+    async def get_conversation_top_history(
+        self,
+        conversation_id: str,
+        db_session: AsyncSession,
+        top_n: int = 5
+    ) -> List[Dict[str, str]]:
+        """
+        Get top N most recent messages from conversation.
+        
+        Args:
+            conversation_id: Conversation ID
+            db_session: Database session
+            top_n: Number of recent messages to retrieve
+        """
+        from app.domain.messages.repository import MessageRepository
+        
+        repo = MessageRepository(db_session)
+        messages = await repo.list_by_conversation(
+            conversation_id=conversation_id,
+            include_inactive=False,
+            limit=top_n
+        )
+        
+        formatted_messages = [self.format_message_for_llm(msg) for msg in messages]
+        
+        logger.info(f"Retrieved top {len(formatted_messages)} messages for conversation {conversation_id}")
+        
+        return formatted_messages
     
     def should_summarize_conversation(
         self,
@@ -217,15 +236,12 @@ class ConversationContextManager:
         
         total_messages = len(messages)
         
-        # No summary yet and many messages
         if not current_summary and total_messages > 20:
             return True
         
-        # Has summary but many new messages
         if current_summary and total_messages > 10:
             return True
-        
-        # Check total token count
+
         total_tokens = sum(self.estimate_tokens(msg.content) for msg in messages)
         if total_tokens > (self.max_context_tokens * 2):
             return True
