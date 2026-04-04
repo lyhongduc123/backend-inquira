@@ -9,6 +9,7 @@ openai
 beautifulsoup4
 pgvector
 docling
+PyMuPDF
 tiktoken
 rich
 ollama
@@ -18,3 +19,5 @@ httpx
 python-multipart
 beir
 numpy
+redis
+boto3

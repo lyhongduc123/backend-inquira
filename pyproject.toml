@@ -29,6 +29,8 @@ dependencies = [
     "torch>=2.0.0",
     "ollama>=0.1.0",
     "numpy>=2.0.0",
+    "redis>=5.0.0",
+    "PyMuPDF>=1.22.0",
 ]
 
 
