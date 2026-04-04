@@ -45,7 +45,7 @@ class SJRDownloader:
     """Downloads SJR data from Scimago website."""
     
     BASE_URL = "https://www.scimagojr.com/journalrank.php"
-    DATA_DIR = backend_dir / "data"
+    DATA_DIR = backend_dir / "data/scimagojr"
     
     # SJR data is available from 1999 to current year
     MIN_YEAR = 1999

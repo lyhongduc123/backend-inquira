@@ -25,7 +25,7 @@ import argparse
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import logging
-from sqlalchemy import select
+from sqlalchemy import select, delete, text
 from sqlalchemy.dialects.postgresql import insert
 
 from app.db.database import get_db_session, init_db
@@ -50,12 +50,17 @@ class SJRDataImporter:
         """
         if data_dir is None:
             # Default to data directory in project root
-            self.data_dir = Path(__file__).parent.parent / "data"
+            self.data_dir = Path(__file__).parent.parent / "data/scimagojr"
         else:
             self.data_dir = Path(data_dir)
         
         if not self.data_dir.exists():
             raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
+        
+    def chunked(self, seq, size):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+
     
     def normalize_title(self, title: str) -> str:
         """
@@ -141,12 +146,19 @@ class SJRDataImporter:
         ]
         search_terms = ' '.join(filter(None, search_terms_parts))
         
+        # Parse ISSN: CSV has comma-separated string like "15882578, 02366495"
+        # Model expects ARRAY(String), so split into a proper list
+        raw_issn = row.get('Issn', '').strip()
+        issn_list = [v.strip() for v in raw_issn.replace(';', ',').split(',') if v.strip()] if raw_issn else []
+        issn_text = ', '.join(issn_list) if issn_list else None
+
         return {
             'source_id': row.get('Sourceid', '').strip(),
             'title': title,
             'title_normalized': self.normalize_title(title),
             'type': row.get('Type', 'journal').strip().lower(),
-            'issn': row.get('Issn', '').strip() or None,
+            'issn': issn_list or None,
+            'issn_text': issn_text,
             'publisher': row.get('Publisher', '').strip() or None,
             'country': row.get('Country', '').strip() or None,
             'region': row.get('Region', '').strip() or None,
@@ -173,6 +185,17 @@ class SJRDataImporter:
             'search_terms': search_terms.lower(),
         }
     
+    async def truncate_table(self) -> int:
+        """Delete all records from the journals table."""
+        async for session in get_db_session():
+            result = await session.execute(select(DBJournal))
+            count = len(result.scalars().all())
+            await session.execute(delete(DBJournal))
+            await session.commit()
+            logger.info(f"Truncated journals table: {count} records deleted")
+            return count
+        return 0
+
     async def import_csv_file(
         self, 
         file_path: Path, 
@@ -211,7 +234,7 @@ class SJRDataImporter:
                 except Exception as e:
                     logger.error(f"Error parsing row: {e}")
                     logger.debug(f"Problematic row: {row}")
-                    continue
+                    raise
         
         logger.info(f"Parsed {len(records)} records from {file_path.name}")
         
@@ -223,46 +246,37 @@ class SJRDataImporter:
         async for session in get_db_session():
             try:
                 if update:
-                    # Upsert: Insert or update on conflict
-                    stmt = insert(DBJournal).values(records)
-                    stmt = stmt.on_conflict_do_update(
-                        constraint='uq_journal_source_year',
-                        set_={
-                            'title': stmt.excluded.title,
-                            'title_normalized': stmt.excluded.title_normalized,
-                            'type': stmt.excluded.type,
-                            'issn': stmt.excluded.issn,
-                            'publisher': stmt.excluded.publisher,
-                            'country': stmt.excluded.country,
-                            'region': stmt.excluded.region,
-                            'coverage': stmt.excluded.coverage,
-                            'is_open_access': stmt.excluded.is_open_access,
-                            'is_open_access_diamond': stmt.excluded.is_open_access_diamond,
-                            'sjr_score': stmt.excluded.sjr_score,
-                            'sjr_best_quartile': stmt.excluded.sjr_best_quartile,
-                            'h_index': stmt.excluded.h_index,
-                            'total_docs_current_year': stmt.excluded.total_docs_current_year,
-                            'total_docs_3years': stmt.excluded.total_docs_3years,
-                            'total_refs': stmt.excluded.total_refs,
-                            'total_cites_3years': stmt.excluded.total_cites_3years,
-                            'citable_docs_3years': stmt.excluded.citable_docs_3years,
-                            'cites_per_doc_2years': stmt.excluded.cites_per_doc_2years,
-                            'refs_per_doc': stmt.excluded.refs_per_doc,
-                            'percent_female': stmt.excluded.percent_female,
-                            'overton_count': stmt.excluded.overton_count,
-                            'sdg_count': stmt.excluded.sdg_count,
-                            'categories': stmt.excluded.categories,
-                            'areas': stmt.excluded.areas,
-                            'rank': stmt.excluded.rank,
-                            'search_terms': stmt.excluded.search_terms,
-                            'updated_at': stmt.excluded.updated_at,
-                        }
-                    )
-                    await session.execute(stmt)
-                    logger.info(f"Upserted {len(records)} records for year {year}")
+                    # Use batching to avoid PostgreSQL parameter limit
+                    BATCH_SIZE = 50
+                    inserted = 0
+                    skipped = 0
+
+                    # Columns to update on conflict.
+                    # Exclude: PK, constraint keys, and server-managed timestamps.
+                    SKIP_ON_UPDATE = {'id', 'source_id', 'data_year', 'created_at', 'updated_at'}
+                    update_cols = [
+                        c.name for c in DBJournal.__table__.columns
+                        if c.name not in SKIP_ON_UPDATE
+                    ]
+
+                    for batch in self.chunked(records, BATCH_SIZE):
+                        try:
+                            stmt = insert(DBJournal).values(batch)
+                            stmt = stmt.on_conflict_do_update(
+                                index_elements=['source_id', 'data_year'],
+                                set_={col: stmt.excluded[col] for col in update_cols}
+                            )
+                            await session.execute(stmt)
+                            inserted += len(batch)
+                        except Exception as batch_error:
+                            logger.error(f"Batch error: {batch_error}")
+                            skipped += len(batch)
+                            raise batch_error
+
+                    logger.info(f"Upserted {inserted} records, skipped {skipped} due to errors")
                 else:
                     # Insert only (will fail on conflicts)
-                    session.add_all([DBJournal(**record) for record in records])
+                    await session.execute(insert(DBJournal), records)
                     logger.info(f"Inserted {len(records)} records for year {year}")
                 
                 await session.commit()
@@ -318,6 +332,7 @@ async def main():
     parser.add_argument('--all', action='store_true', help='Import all available years')
     parser.add_argument('--year', type=int, help='Import specific year')
     parser.add_argument('--update', action='store_true', help='Update existing records (upsert)')
+    parser.add_argument('--truncate', action='store_true', help='Delete ALL existing journal records before importing')
     parser.add_argument('--dry-run', action='store_true', help='Parse files but don\'t write to database')
     parser.add_argument('--data-dir', type=str, help='Custom data directory path')
     
@@ -332,6 +347,14 @@ async def main():
     # Create importer
     importer = SJRDataImporter(data_dir=args.data_dir)
     
+    # Optionally wipe the table first
+    if args.truncate and not args.dry_run:
+        confirm = input("This will DELETE ALL records in the journals table. Type 'yes' to confirm: ")
+        if confirm.strip().lower() != 'yes':
+            logger.info("Aborted.")
+            return
+        await importer.truncate_table()
+
     # Import data
     if args.all:
         results = await importer.import_all_years(dry_run=args.dry_run, update=args.update)

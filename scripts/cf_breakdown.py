@@ -4,6 +4,7 @@ import requests
 import time
 from pathlib import Path
 from app.core.config import settings
+from app.llm.ollama_client import OllamaClient
 
 ACCOUNT_ID = settings.R2_ACCOUNT_ID
 API_TOKEN = settings.CF_API_TOKEN
@@ -14,9 +15,9 @@ if not ACCOUNT_ID or not API_TOKEN:
 print(f"Using Cloudflare API with Account ID: {ACCOUNT_ID}")
 print(f"API Token starts with: {API_TOKEN[:10]}...")
 
-MODEL_ID = "@cf/mistralai/mistral-small-3.1-24b-instruct"
-API_URL = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run/{MODEL_ID}"
-
+# MODEL_ID = "@cf/mistralai/mistral-small-3.1-24b-instruct"
+# API_URL = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run/{MODEL_ID}"
+API_URL = "http://localhost:11434/api/chat"
 HEADERS = {
     "Authorization": f"Bearer {API_TOKEN}",
     "Content-Type": "application/json"
@@ -63,6 +64,37 @@ def clean_json_response(response_text: str) -> dict:
         clean_text = clean_text[:-3]
     
     return json.loads(clean_text.strip())
+
+def generate_query_mapping_ollama(original_query: str) -> dict | None:
+    """Calls local Ollama with strict JSON enforcement."""
+    payload = {
+        "model": "llama3.1:8b", 
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Scientific Claim: {original_query}"}
+        ],
+        "stream": False,
+        "format": "json", # <--- THE MAGIC BUTTON: Forces valid JSON
+        "options": {
+            "temperature": 0.1,
+            "num_predict": 500
+        }
+    }
+
+    try:
+        # Increase timeout to 120s since it's local and 24B models can be slow
+        response = requests.post(API_URL, json=payload, timeout=120)
+        response.raise_for_status()
+        
+        result = response.json()
+        content = result.get("message", {}).get("content", "")
+        
+        # No more "Regex cleaners" needed! Ollama's 'format: json' is perfect.
+        return json.loads(content)
+        
+    except Exception as e:
+        print(f"❌ Local Ollama Error for '{original_query[:30]}': {e}")
+        return None
 
 def generate_query_mapping(original_query: str, max_retries: int = 3) -> dict | None:
     """Calls Cloudflare AI to decompose the query."""
@@ -143,7 +175,7 @@ def process_scifact_queries(input_filepath: str, output_filepath: str):
                 
             print(f"Processing [{query_id}]: {original_text[:60]}...")
             
-            decomposed_result = generate_query_mapping(original_text)
+            decomposed_result = generate_query_mapping_ollama(original_text)
             
             if decomposed_result:
                 # Map exactly 1-1, nesting the generated data inside a new key
