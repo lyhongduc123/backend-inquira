@@ -786,28 +786,8 @@ class AuthorService:
             refresh_live_metrics=refresh_live_metrics
         )
 
-        counts_by_year: Dict[int, Dict[str, int]] = {}
-        cached_openalex_yearly = getattr(author, "openalex_counts_by_year", None)
-        if isinstance(cached_openalex_yearly, dict):
-            for year, payload in cached_openalex_yearly.items():
-                if not str(year).isdigit():
-                    continue
-                counts_by_year[int(year)] = {
-                    "papers": int((payload or {}).get("papers", 0)),
-                    "citations": int((payload or {}).get("citations", 0)),
-                }
-
-        papers_by_year = {
-            int(year): int(values.get("papers", 0))
-            for year, values in counts_by_year.items()
-        }
-
-        if not papers_by_year:
-            db_counts_by_year = await self.repository.get_counts_by_year(author_id)
-            papers_by_year = {
-                int(year): int(metrics.get("papers", 0))
-                for year, metrics in db_counts_by_year.items()
-            }
+        counts_by_year = await self.repository.get_counts_by_year(author_id)
+        cached_openalex_yearly = author.openalex_counts_by_year
 
         i10_index = getattr(author, "i10_index", None)
         if i10_index is not None:
@@ -818,8 +798,8 @@ class AuthorService:
             "papers": paper_metadata_list,
             "quartile_breakdown": quartile_dict,
             "co_authors": co_author_data,
-            "papers_by_year": papers_by_year,
             "counts_by_year": counts_by_year,
+            "openalex_counts_by_year": cached_openalex_yearly,
             "enrichment_status": enrichment_status,
             "is_enriched": author.last_paper_indexed_at is not None
         }

@@ -28,6 +28,7 @@ class MessageService:
         user_id: int,
         content: str,
         role: str = "user",
+        status: str = "sent",
         paper_ids: Optional[List[str]] = None,
         paper_snapshots: Optional[List[Dict[str, Any]]] = None,
         progress_events: Optional[List[Dict[str, Any]]] = None,
@@ -52,7 +53,6 @@ class MessageService:
         Returns:
             Created DBMessage
         """
-        # Build message metadata
         message_metadata = {}
         if paper_snapshots:
             message_metadata["paper_snapshots"] = paper_snapshots
@@ -62,8 +62,7 @@ class MessageService:
             message_metadata["scoped_quote_refs"] = scoped_quote_refs
         if client_message_id:
             message_metadata["client_message_id"] = client_message_id
-        
-        # Create message
+
         message = await self.repo.create(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -71,12 +70,11 @@ class MessageService:
             role=role,
             message_metadata=message_metadata if message_metadata else None,
             is_active=True,
-            status="pending",
+            status=status,
             pipeline_type=pipeline_type,
             completion_time_ms=completion_time_ms,
         )
         
-        # Link papers if provided
         if paper_ids:
             logger.debug(f"Linking {len(paper_ids)} papers to message {message.id}")
             if role != "assistant":
@@ -203,7 +201,8 @@ class MessageService:
         self,
         message_id: int,
         user_id: Optional[int] = None,
-        soft_delete: bool = True
+        soft_delete: bool = True,
+        delete_assistant_reply_for_user: bool = True,
     ) -> bool:
         """
         Delete a message
@@ -212,11 +211,18 @@ class MessageService:
             message_id: Message ID
             user_id: Optional user ID for authorization check
             soft_delete: If True, mark as inactive; if False, delete from DB
+            delete_assistant_reply_for_user: If True and target is a user message,
+                also delete the first assistant message after it and before the next user message
             
         Returns:
             True if deleted, False if not found
         """
-        return await self.repo.delete(message_id, user_id, soft_delete)
+        return await self.repo.delete(
+            message_id,
+            user_id,
+            soft_delete,
+            delete_assistant_reply_for_user=delete_assistant_reply_for_user,
+        )
     
     def _to_response(self, message: DBMessage) -> MessageWithPapersResponse:
         """
@@ -244,6 +250,7 @@ class MessageService:
             role=message.role,
             content=message.content,
             status=message.status,
+            pipeline_type=message.pipeline_type,
             is_active=message.is_active,
             created_at=message.created_at,
             updated_at=message.updated_at,

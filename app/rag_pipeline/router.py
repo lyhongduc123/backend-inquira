@@ -14,7 +14,7 @@ from fastapi import BackgroundTasks
 router = APIRouter(prefix="/debug", tags=["test"])
 logger = create_logger(__name__)
 
-@router.get("/", response_model=None)
+@router.get("", response_model=None)
 async def pipeline_debug(
     query: str, 
     db_session = Depends(get_db_session)

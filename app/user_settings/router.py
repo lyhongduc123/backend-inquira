@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 router = APIRouter()
 
 
-@router.get("/", response_model=UserSettingsResponse)
+@router.get("", response_model=UserSettingsResponse)
 async def get_user_settings(
     current_user: DBUser = Depends(get_current_user),
     container: "ServiceContainer" = Depends(get_container)
@@ -28,7 +28,7 @@ async def get_user_settings(
     return settings
 
 
-@router.patch("/", response_model=UserSettingsResponse)
+@router.patch("", response_model=UserSettingsResponse)
 async def update_user_settings(
     request: UserSettingsUpdate,
     current_user: DBUser = Depends(get_current_user),

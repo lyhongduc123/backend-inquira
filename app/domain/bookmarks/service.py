@@ -49,9 +49,29 @@ class BookmarkService:
             paper=paper_metadata
         )
 
-    async def list_bookmarks(self, user_id: int, skip: int = 0, limit: int = 50) -> BookmarkListResponse:
-        """List all bookmarks for a user"""
-        bookmarks, total = await self.repo.list_by_user(user_id, skip, limit)
+    async def list_bookmarks(
+        self,
+        user_id: int,
+        skip: int = 0,
+        limit: int = 50,
+        query: Optional[str] = None,
+        year: Optional[int] = None,
+        is_open_access: Optional[bool] = None,
+        has_notes: Optional[bool] = None,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = None,
+    ) -> BookmarkListResponse:
+        """List bookmarks for a user with optional API-side search and filters."""
+        bookmarks, total = await self.repo.list_by_user(
+            user_id=user_id,
+            skip=skip,
+            limit=limit,
+            query=query,
+            is_open_access=is_open_access,
+            has_notes=has_notes,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
         
         items = []
         for bookmark in bookmarks:

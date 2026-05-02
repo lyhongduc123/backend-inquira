@@ -4,10 +4,13 @@ Handles CRUD operations for authors and author-paper relationships.
 """
 
 from typing import Optional, List, Dict, Any
+from psycopg2 import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update, delete, Integer, cast
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import selectinload, joinedload
 from app.models.authors import DBAuthor, DBAuthorPaper, DBAuthorInstitution
+from app.models.citations import DBCitation
 from app.models.papers import DBPaper
 from app.models.journals import DBJournal
 from app.extensions.logger import create_logger
@@ -269,49 +272,29 @@ class AuthorRepository:
         Returns:
             Created or updated DBAuthorInstitution object
         """
-        # Check if link already exists
-        result = await self.db.execute(
-            select(DBAuthorInstitution).where(
-                DBAuthorInstitution.author_id == author_id,
-                DBAuthorInstitution.institution_id == institution_id,
-            )
-        )
-        existing = result.scalar_one_or_none()
-
-        if existing:
-            # Update paper count and year range
-            existing.paper_count += 1
-            if year:
-                if not existing.start_year or year < existing.start_year:
-                    existing.start_year = year
-                if not existing.end_year or year > existing.end_year:
-                    existing.end_year = year
-            if is_current:
-                existing.is_current = True
-
-            await self.db.commit()
-            await self.db.refresh(existing)
-            logger.debug(
-                f"Updated author-institution link: author_id={author_id}, institution_id={institution_id}"
-            )
-            return existing
-
-        db_author_institution = DBAuthorInstitution(
+        stmt = insert(DBAuthorInstitution).values(
             author_id=author_id,
             institution_id=institution_id,
             start_year=year,
             end_year=year,
             is_current=is_current,
             paper_count=1,
-        )
+        ).on_conflict_do_update(
+            index_elements=["author_id", "institution_id"],
+            set_={
+                "paper_count": DBAuthorInstitution.paper_count + 1,
+                "start_year": func.least(DBAuthorInstitution.start_year, year),
+                "end_year": func.greatest(DBAuthorInstitution.end_year, year),
+                "is_current": DBAuthorInstitution.is_current | is_current,
+            },
+        ).returning(DBAuthorInstitution)
 
-        self.db.add(db_author_institution)
+        result = await self.db.execute(stmt)
         await self.db.commit()
-        await self.db.refresh(db_author_institution)
-
-        logger.debug(
-            f"Created author-institution link: author_id={author_id}, institution_id={institution_id}"
-        )
+        
+        db_author_institution = result.scalar_one()
+        
+        logger.debug(f"Upserted author-institution link: author_id={author_id}, institution_id={institution_id}")
         return db_author_institution
 
     async def get_author_papers_with_metadata(self, author_id: str) -> List:
@@ -469,10 +452,10 @@ class AuthorRepository:
 
     async def get_counts_by_year(self, author_id: str) -> Dict[int, Dict[str, int]]:
         """
-        Get yearly publication counts for an author.
+        Get counts of papers and citations by year for an author.
 
         Returns:
-            Dict like {2024: {"papers": 12}, ...}
+            Dict like {2024: {"papers": 12, "citations": 5}, ...}
         """
         author = await self.get_author(author_id)
         if not author:
@@ -499,8 +482,36 @@ class AuthorRepository:
                 continue
             counts_by_year[int(year)] = {
                 "papers": int(papers or 0),
+                "citations": 0, 
             }
+            
+        stmt = (
+            select(
+                DBCitation.citation_year.label("year"),
+                func.count(DBCitation.id).label("citations"),
+            )
+            .select_from(DBAuthorPaper)
+            .join(DBPaper, DBAuthorPaper.paper_id == DBPaper.id)
+            .join(DBCitation, DBCitation.cited_paper_id == DBPaper.id)
+            .where(DBAuthorPaper.author_id == author.id)
+            .where(DBCitation.citation_year.isnot(None))
+            .group_by(DBCitation.citation_year)
+            .order_by(DBCitation.citation_year.desc())
+        )
 
+        result = await self.db.execute(stmt)
+        
+        for year, citations in result.all():
+            if year is None:
+                continue
+            year = int(year)
+            if year not in counts_by_year:
+                counts_by_year[year] = {
+                    "papers": 0,
+                    "citations": 0,
+                }
+            counts_by_year[year]["citations"] = int(citations or 0)
+    
         return counts_by_year
 
     async def get_co_authors(

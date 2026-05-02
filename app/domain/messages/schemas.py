@@ -35,6 +35,7 @@ class MessageResponse(CamelModel):
     role: str
     content: str
     status: str = "sent"
+    pipeline_type: Optional[str] = None
     is_active: bool = True
     created_at: datetime
     updated_at: datetime
