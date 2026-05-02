@@ -7,12 +7,17 @@ from app.domain.papers.schemas import PaperMetadata
 
 class ChatSubmitFilters(CamelModel):
     """Typed filters for chat submit requests."""
-    author: Optional[str] = Field(None, description="Author name filter")
+    author_name: Optional[str] = Field(None, description="Author name filter")
     year_min: Optional[int] = Field(None, description="Minimum publication year")
     year_max: Optional[int] = Field(None, description="Maximum publication year")
     venue: Optional[str] = Field(None, description="Venue/journal/conference filter")
-    min_citations: Optional[int] = Field(None, description="Minimum citation count")
-    max_citations: Optional[int] = Field(None, description="Maximum citation count")
+    min_citation_count: Optional[int] = Field(None, description="Minimum citation count")
+    max_citation_count: Optional[int] = Field(None, description="Maximum citation count")
+    journal_quartile: Optional[str] = Field(None, description="Journal quartile filter (Q1/Q2/Q3/Q4)")
+    field_of_study: Optional[List[str]] = Field(
+        None,
+        description="Field(s) of study filter (OR semantics)",
+    )
     paper_ids: Optional[List[str]] = Field(
         None,
         description="Scoped paper IDs for paper-constrained answering (serialized as paperIds)",
@@ -32,6 +37,10 @@ class ChatMessageRequest(CamelModel):
     query: str = Field(..., min_length=1, max_length=5000, description="User's message/question")
     conversation_id: Optional[str] = Field(None, description="UUID of existing conversation")
     filters: Optional[ChatSubmitFilters] = Field(None, description="Optional filters for retrieval")
+    paper_ids: Optional[List[str]] = Field(
+        None,
+        description="Scoped paper IDs for paper-constrained answering (top-level compatibility field)",
+    )
     model: Optional[str] = Field(None, description="Optional model override")
     stream: bool = Field(True, description="Whether to stream the response")
     is_retry: bool = Field(False, description="Whether this is a retry of a failed request")
@@ -67,6 +76,10 @@ class ChatSubmitRequest(CamelModel):
     query: str = Field(..., min_length=1, max_length=5000, description="User's message/question")
     conversation_id: Optional[str] = Field(None, description="UUID of existing conversation")
     filters: Optional[ChatSubmitFilters] = Field(None, description="Optional typed filters for retrieval")
+    paper_ids: Optional[List[str]] = Field(
+        None,
+        description="Scoped paper IDs for paper-constrained answering (top-level compatibility field)",
+    )
     model: Optional[str] = Field(None, description="Optional model override")
     client_message_id: Optional[str] = Field(None, description="Client-generated message ID for deduplication")
     pipeline: Literal["database", "hybrid", "research", "agent"] = Field("database", description="Pipeline type")

@@ -131,8 +131,7 @@ class ChunkService:
             List of ChunkRetrieved with relevance scores
         """
         from app.processor.services.embeddings import get_embedding_service
-        
-        # Generate query embedding
+
         embedding_service = get_embedding_service()
         query_embedding = await embedding_service.create_embedding(query, task="search_query")
         
@@ -140,12 +139,10 @@ class ChunkService:
             logger.error("Failed to generate query embedding for chunks")
             return []
         
-        # Normalize weights
         total_weight = bm25_weight + semantic_weight
         normalized_bm25 = bm25_weight / total_weight
         normalized_semantic = semantic_weight / total_weight
         
-        # Call repository for data access
         chunks_with_scores = await self.repository.hybrid_search_chunks(
             query=query,
             query_embedding=query_embedding,

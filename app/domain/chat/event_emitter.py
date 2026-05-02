@@ -9,6 +9,8 @@ class EventType:
     SEARCHING = "searching"
     RANKING = "ranking"
     REASONING = "reasoning"
+    SEARCHING_EXTERNAL = "searching_external"
+    INGESTING = "ingesting"
     
     PAPER_METADATA = "papers_metadata"
 
@@ -20,6 +22,12 @@ class ChatEventEmitter:
         """Initialize with empty event collection."""
         self._collected_events: List[Dict[str, Any]] = []
         self._reasoning_buffer: str = ""  # Buffer to accumulate reasoning chunks
+        self._pipeline_type: Optional[str] = None
+
+    def set_pipeline_type(self, pipeline_type: Optional[str]) -> None:
+        """Set current pipeline type so streamed/collected progress events can be mapped by frontend."""
+        normalized = (pipeline_type or "").strip().lower()
+        self._pipeline_type = normalized or None
     
     def get_collected_events(self) -> List[Dict[str, Any]]:
         """Get all collected events for storage."""
@@ -31,6 +39,8 @@ class ChatEventEmitter:
             "type": event_type,
             "timestamp": int(time.time() * 1000),
         }
+        if self._pipeline_type:
+            event["pipeline_type"] = self._pipeline_type
         if content:
             event["content"] = content
         if metadata:
@@ -119,6 +129,7 @@ class ChatEventEmitter:
             name=StreamEventType.PROGRESS,
             data=json.dumps({
                 "type": EventType.SEARCHING,
+                "pipeline_type": self._pipeline_type,
                 "content": f"Searching relevant works and documents",
                 "metadata": {"queries": query},
             }),
@@ -152,6 +163,7 @@ class ChatEventEmitter:
             name=StreamEventType.PROGRESS,
             data=json.dumps({
                 "type": EventType.RANKING,
+                "pipeline_type": self._pipeline_type,
                 "content": f"Filtering {total_papers} retrieved papers by content relevance, quality, authors,...",
                 "metadata": {"total_papers": total_papers, "chunks": chunks},
             }),
@@ -176,7 +188,54 @@ class ChatEventEmitter:
             name=StreamEventType.PROGRESS,
             data=json.dumps({
                 "type": EventType.REASONING,
+                "pipeline_type": self._pipeline_type,
                 "content": content,
+            }),
+        ):
+            yield evt
+            
+    async def emit_searching_external_event(self, source: str, query: str) -> AsyncGenerator[str, None]:
+        """
+        Emit a searching external event.
+
+        Frontend receives:
+        event: progress
+        data: {"type":"searching_external","content":"Searching external source: ...","metadata":{"source":"...","query":"..."}}
+
+        Args:
+            source: Name of the external source being searched
+            query: The search query being used
+        """
+        async for evt in stream_event(
+            name=StreamEventType.PROGRESS,
+            data=json.dumps({
+                "type": EventType.SEARCHING_EXTERNAL,
+                "pipeline_type": self._pipeline_type,
+                "content": f"Searching external source: {source}",
+                "metadata": {"source": source, "query": query},
+            }),
+        ):
+            yield evt
+            
+    async def emit_ingesting_event(self, count: int) -> AsyncGenerator[str, None]:
+        """
+        Emit an ingesting event.
+
+        Frontend receives:
+        event: progress
+        data: {"type":"ingesting","content":"Ingesting X papers from source: ...","metadata":{"source":"...","count":X}}
+
+        Args:
+            source: Name of the source being ingested
+            count: Number of papers ingested so far
+        """
+        async for evt in stream_event(
+            name=StreamEventType.PROGRESS,
+            data=json.dumps({
+                "type": EventType.INGESTING,
+                "pipeline_type": self._pipeline_type,
+                "content": f"Ingesting {count} papers",
+                "metadata": {"count": count},
             }),
         ):
             yield evt

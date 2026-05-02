@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 import secrets
 
 from app.models.users import DBUser
@@ -175,7 +176,20 @@ async def get_or_create_user(db: AsyncSession, user_data: Dict[str, Any]) -> DBU
     existing_user = result.scalar_one_or_none()
     
     if existing_user:
-        logger.warning(f"Email {user_data['email']} exists with different provider")
+        logger.warning(
+            "Email %s already exists with provider %s. Reusing existing account for OAuth login via %s.",
+            user_data["email"],
+            existing_user.provider,
+            user_data["provider"],
+        )
+
+        # Keep a single account per email to avoid duplicate-user conflicts.
+        existing_user.name = user_data.get("name") or existing_user.name
+        existing_user.avatar_url = user_data.get("avatar_url") or existing_user.avatar_url
+        existing_user.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(existing_user)
+        return existing_user
     
     # Create new user
     new_user = DBUser(
@@ -190,7 +204,29 @@ async def get_or_create_user(db: AsyncSession, user_data: Dict[str, Any]) -> DBU
     )
     
     db.add(new_user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        result = await db.execute(
+            select(DBUser).where(
+                DBUser.provider == user_data["provider"],
+                DBUser.provider_id == user_data["provider_id"],
+            )
+        )
+        concurrent_user = result.scalar_one_or_none()
+
+        if concurrent_user:
+            return concurrent_user
+
+        # Fallback to email lookup to support unique-email conflict.
+        result = await db.execute(
+            select(DBUser).where(DBUser.email == user_data["email"])
+        )
+        concurrent_user = result.scalar_one_or_none()
+        if concurrent_user:
+            return concurrent_user
+        raise
     await db.refresh(new_user)
     
     return new_user

@@ -159,6 +159,101 @@ class ExtractorService:
             logger.error(f"Error extracting PDF structure with docling: {e}")
             raise Exception(f"Failed to extract PDF structure: {e}")
 
+    def extract_pdf_structure_with_pymupdf(
+        self,
+        pdf_bytes: bytes,
+        paper_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Extract a lightweight docling-like structure using PyMuPDF.
+
+        This path is intended for live ingestion where latency is prioritized.
+        The output shape remains compatible with chunking logic expecting
+        `texts`, `tables`, and `pictures` keys.
+        """
+        if fitz is None:
+            raise RuntimeError("PyMuPDF is not available for live PDF extraction")
+
+        try:
+            pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            text_items: List[Dict[str, Any]] = []
+
+            for page_index in range(len(pdf_doc)):
+                page = pdf_doc.load_page(page_index)
+                page_no = page_index + 1
+
+                blocks = page.get_text("blocks") or []
+                for block in blocks:
+                    if not isinstance(block, (list, tuple)) or len(block) < 5:
+                        continue
+
+                    x0, y0, x1, y1, text = block[:5]
+                    if not isinstance(text, str):
+                        continue
+
+                    cleaned = self._fix_text_encoding(text)
+                    if not cleaned:
+                        continue
+
+                    label = "section_header" if self._looks_like_section_header(cleaned) else "text"
+                    text_items.append(
+                        {
+                            "text": cleaned,
+                            "orig": cleaned,
+                            "label": label,
+                            "level": 1 if label == "section_header" else 2,
+                            "content_layer": "body",
+                            "prov": [
+                                {
+                                    "page_no": page_no,
+                                    "bbox": {
+                                        "l": float(x0),
+                                        "t": float(y0),
+                                        "r": float(x1),
+                                        "b": float(y1),
+                                        "coord_origin": "TOPLEFT",
+                                    },
+                                }
+                            ],
+                        }
+                    )
+
+            try:
+                pdf_doc.close()
+            except Exception:
+                pass
+
+            logger.info(
+                "Successfully extracted lightweight document structure using PyMuPDF"
+                + (f" for {paper_id}" if paper_id else "")
+            )
+
+            return {
+                "texts": text_items,
+                "tables": [],
+                "pictures": [],
+                "asset_paths": {},
+                "extraction_backend": "pymupdf",
+            }
+        except Exception as e:
+            logger.error(f"Error extracting PDF structure with PyMuPDF: {e}")
+            raise Exception(f"Failed to extract PDF structure with PyMuPDF: {e}")
+
+    @staticmethod
+    def _looks_like_section_header(text: str) -> bool:
+        candidate = (text or "").strip()
+        if not candidate:
+            return False
+
+        # Heuristic: short heading-like lines are treated as section headers.
+        if len(candidate) > 120:
+            return False
+
+        if "\n" in candidate:
+            return False
+
+        return bool(re.match(r"^(\d+(?:\.\d+)*)?\s*[A-Z][A-Za-z0-9\-,:()\s]{2,}$", candidate))
+
     @staticmethod
     def _resolve_ref_index(ref_obj: Dict[str, Any], expected: str) -> Optional[int]:
         ref = ref_obj.get("$ref")
@@ -588,12 +683,12 @@ class ExtractorService:
                         chunk_text = ""
 
                 meta = getattr(chunk, "meta", None)
-                if hasattr(meta, "model_dump"):
+                if meta is not None and hasattr(meta, "model_dump"):
                     try:
                         meta = meta.model_dump(mode="json")
                     except Exception:
                         meta = str(meta)
-                elif hasattr(meta, "dict"):
+                elif meta is not None and hasattr(meta, "dict"):
                     try:
                         meta = meta.dict()
                     except Exception:

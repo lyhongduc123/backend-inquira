@@ -14,7 +14,8 @@ from app.extensions.logger import create_logger
 from app.domain.chat.query_router import route_query
 from app.domain.chat.pre_response import PreResponsePresets
 from app.domain.chat.live_stream import get_live_task_stream_broker
-from app.validation.service import save_validation_result, validate_answer
+from app.validation.repository import save_validation_result
+from app.validation.service import validate_answer
 from app.validation.schemas import ValidationRequest
 from app.db.database import async_session
 from app.rag_pipeline.schemas import SearchWorkflowConfig
@@ -147,7 +148,6 @@ async def execute_chat_pipeline(
             progress_events: List[Dict[str, Any]] = []
             route_decision = route_query(pipeline_type, filters or {})
             emitted_step_types: set[str] = set()
-            current_step = 0
 
             stream_broker = get_live_task_stream_broker()
             live_stream_event_types = {
@@ -171,18 +171,15 @@ async def execute_chat_pipeline(
                 )
 
             async def emit_step_event(mapped_step_event: Dict[str, Any]) -> None:
-                nonlocal current_step
                 step_type = str(mapped_step_event.get("type", "")).strip()
                 if not step_type or step_type in emitted_step_types:
                     return
 
                 emitted_step_types.add(step_type)
-                current_step += 1
 
                 payload = {
                     **mapped_step_event,
-                    "current_step": current_step,
-                    "total_steps": route_decision.total_steps,
+                    "pipeline_type": pipeline_type,
                 }
 
                 await emit_event(
@@ -193,6 +190,7 @@ async def execute_chat_pipeline(
                 progress_events.append(
                     {
                         "type": payload.get("type"),
+                        "pipeline_type": payload.get("pipeline_type"),
                         "timestamp": int(time.time() * 1000),
                         "content": payload.get("content"),
                         "metadata": payload.get("metadata"),
@@ -209,15 +207,6 @@ async def execute_chat_pipeline(
             await container.pipeline_task_service.update_status(
                 task_id=task_id,
                 status=PipelineTaskStatus.RUNNING
-            )
-            
-            # Send step count first (skip init step)
-            await emit_event(
-                event_type=PipelineEventType.STEP,
-                event_data={
-                    "type": "step_count",
-                    "total_steps": route_decision.total_steps,
-                },
             )
             
             # Create user message first

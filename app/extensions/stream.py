@@ -1,5 +1,7 @@
 import json
 from typing import Any, AsyncGenerator, Optional
+import time
+import random
 
 from app.extensions.logger import create_logger
 
@@ -52,10 +54,13 @@ async def stream_heartbeat() -> AsyncGenerator[str, None]:
         yield evt
 
 
-# ========================================
-# Structured Streaming Events
-# ========================================
-
+def stream_like_llm(text):
+    i = 0
+    while i < len(text):
+        step = random.randint(1, 4) 
+        yield text[i:i+step]
+        i += step
+        time.sleep(random.uniform(0.02, 0.12))
 
 async def stream_chunk(content: str) -> AsyncGenerator[str, None]:
     """
@@ -70,10 +75,6 @@ async def stream_chunk(content: str) -> AsyncGenerator[str, None]:
         data=json.dumps({"type": StreamEventType.CHUNK, "content": content}),
     ):
         yield evt
-
-# ========================================
-# Response Content Extraction Helpers
-# ========================================
 
 
 def get_simple_response_content(response: Any) -> str:

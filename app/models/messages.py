@@ -32,13 +32,11 @@ class DBMessage(Base):
     status: Mapped[str] = mapped_column(
         Enum("pending", "sent", "failed", name="message_status"), default="pending"
     )
-    
-    # Pipeline tracking
     pipeline_type: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,
         index=True,
-        comment="Pipeline type used: 'standard' or 'hybrid'"
+        comment="Agent/Research"
     )
     completion_time_ms: Mapped[int | None] = mapped_column(
         Integer,

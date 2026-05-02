@@ -20,6 +20,8 @@ class CitationExtractor:
     SCOPED_CITATION_PATTERN = re.compile(
         r'\(cite:(?P<paper_id>[^\|\)]+)\|(?P<chunk_id>[^\|\)]+)(?:\|(?P<char_start>\d+)\|(?P<char_end>\d+))?\)'
     )
+    # Pattern to match numeric bracket citations used in validation text, e.g. (cite:1), (cite:2)
+    NUMERIC_CITATION_PATTERN = re.compile(r'\(cite:(\d+)\)')
     
     @staticmethod
     def extract_citations_from_text(text: str) -> List[str]:
@@ -34,6 +36,12 @@ class CitationExtractor:
         """
         matches = CitationExtractor.CITATION_PATTERN.findall(text)
         return list(set(matches))  # Remove duplicates
+
+    @staticmethod
+    def extract_numeric_citations(text: str) -> List[str]:
+        """Extract citation numbers from bracket format like (cite:1), (cite:2), preserving numeric order."""
+        matches = CitationExtractor.NUMERIC_CITATION_PATTERN.findall(text or "")
+        return sorted(list(set(matches)), key=int)
     
     @staticmethod
     def extract_citation_with_context(

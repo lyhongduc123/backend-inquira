@@ -2,7 +2,7 @@
 Papers module for CRUD operations on papers
 """
 from .service import PaperService
-from .repository import PaperRepository, LoadOptions
+from .repository import PaperRepository, LoadOptions, SearchFilterOptions
 from .schemas import (
     PaperDetailResponse,
     PaperUpdateRequest,
@@ -18,6 +18,7 @@ __all__ = [
     "PaperService",
     "PaperRepository",
     "LoadOptions",
+    "SearchFilterOptions",
     "PaperDetailResponse",
     "PaperUpdateRequest",
     "PaperMetadata",

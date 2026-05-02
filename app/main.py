@@ -20,6 +20,7 @@ import app.models
 # Import routers from domain modules
 from app.domain.chat.router import router as chat_router
 from app.domain.conversations.router import router as conversations_router
+from app.domain.messages.router import router as messages_router
 from app.domain.authors.router import router as authors_router
 from app.domain.papers.router import router as papers_router
 from app.domain.institutions.router import router as institutions_router
@@ -30,7 +31,6 @@ from app.processor.router import router as preprocessing_router
 from app.validation import router as validation_router
 from app.domain.bookmarks import router as bookmarks_router
 from app.user_settings import router as user_settings_router
-from app.benchmarking import benchmark_router
 from app.rag_pipeline.router import router as rag_pipeline_router
 
 # Import core components for error handling
@@ -178,6 +178,11 @@ app.include_router(
     tags=["conversations"]
 )
 app.include_router(
+    messages_router,
+    prefix="/api/v1/messages",
+    tags=["messages"],
+)
+app.include_router(
     papers_router,
     prefix="/api/v1/papers",
     tags=["papers"]
@@ -211,10 +216,6 @@ app.include_router(
     user_settings_router,
     prefix="/api/v1/user/settings",
     tags=["user", "settings"]
-)
-app.include_router(
-    benchmark_router,
-    tags=["admin", "benchmarking"]
 )
 app.include_router(
     rag_pipeline_router,

@@ -7,6 +7,7 @@ import datetime
 import time
 from typing import AsyncGenerator, Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.database import db_session_context
 from app.core.exceptions import BadRequestException
 from app.domain.authors.schemas import AuthorMetadata
 from app.domain.conversations.schemas import (
@@ -24,7 +25,7 @@ from app.extensions import (
 )
 from app.extensions.prompt_filter import is_gibberish
 from app.domain.chat.query_router import route_query
-from app.llm.schemas.chat import QuestionBreakdownResponse
+from app.llm.schemas.chat import GeneratedQueryPlanResponse, QuestionBreakdownResponse
 from app.rag_pipeline.pipeline import Pipeline as RAGPipeline
 from app.rag_pipeline.hybrid_pipeline import HybridPipeline
 from app.rag_pipeline.database_pipeline import DatabasePipeline
@@ -95,7 +96,6 @@ class ChatService:
         self,
         request: ChatMessageRequest,
         user_id: int,
-        db_session=None,
     ) -> AsyncGenerator[str, None]:
         """
         Stream chat message with citation extraction.
@@ -103,8 +103,6 @@ class ChatService:
         Args:
             request: Chat message request
             user_id: User ID
-            db_session: Database session
-
         Yields:
             SSE events:
             - conversation: Conversation ID
@@ -114,54 +112,58 @@ class ChatService:
             - citation: When a citation is detected (with claim, confidence)
             - done: Completion with cited vs retrieved paper lists
         """
-        if not db_session:
-            logger.error("Database session required for stream_message_with_citations")
-            async for evt in stream_event(
-                name="error", data={"error": "Database connection error"}
-            ):
-                yield evt
-            return
-
         pipeline_start_time = time.time()
-        conversation_service = ConversationService(db_session)
         event_emitter = ChatEventEmitter()
 
-        conversation, is_new_conversation = await self._setup_conversation(
-            conversation_service, request.conversation_id, user_id
-        )
-        conversation_id = conversation.conversation_id
+        async with db_session_context() as setup_session:
+            conversation_service = ConversationService(setup_session)
 
-        # Emit conversation ID immediately to frontend
-        async for evt in event_emitter.emit_conversation_event(
-            conversation_id=conversation_id
-        ):
-            yield evt
+            conversation, is_new_conversation = await self._setup_conversation(
+                conversation_service, request.conversation_id, user_id
+            )
+            conversation_id = conversation.conversation_id
 
-        pipeline_type, route_decision = self._determine_pipeline(request)
-
-        logger.info(
-            f"Pipeline selection: request={request.pipeline}, resolved={pipeline_type}, route_type={route_decision.route_type}",
-            extra={"pipeline_type": pipeline_type, "route": route_decision.route_type},
-        )
-
-        await self._handle_user_message(
-            conversation_service, request, conversation_id, user_id, is_new_conversation
-        )
-
-        if is_gibberish(request.query):
-            async for evt in self.error_handler.handle_gibberish_input(
-                conversation_service,
-                conversation_id,
-                user_id,
-                request.query,
-                event_emitter,
+            # Emit conversation ID immediately to frontend
+            async for evt in event_emitter.emit_conversation_event(
+                conversation_id=conversation_id
             ):
                 yield evt
-            return
 
-        config, conversation_title = await self._prepare_search_config(
-            request, conversation_id, conversation_service, is_new_conversation
-        )
+            pipeline_type, route_decision = self._determine_pipeline(request)
+            event_emitter.set_pipeline_type(pipeline_type)
+
+            logger.info(
+                f"Pipeline selection: request={request.pipeline}, resolved={pipeline_type}, route_type={route_decision.route_type}",
+                extra={"pipeline_type": pipeline_type, "route": route_decision.route_type},
+            )
+
+            await self._handle_user_message(
+                conversation_service,
+                request,
+                conversation_id,
+                user_id,
+                is_new_conversation,
+            )
+
+            if is_gibberish(request.query):
+                async for evt in self.error_handler.handle_gibberish_input(
+                    conversation_service,
+                    conversation_id,
+                    user_id,
+                    request.query,
+                    event_emitter,
+                ):
+                    yield evt
+                return
+
+            config, conversation_title = await self._prepare_search_config(
+                request,
+                conversation_id,
+                conversation_service,
+                is_new_conversation,
+                setup_session,
+            )
+
         if conversation_title:
             async for evt in event_emitter.emit_conversation_event(
                 conversation_id=conversation_id, title=conversation_title
@@ -207,7 +209,6 @@ class ChatService:
             results,
             pipeline_type,
             pipeline_start_time,
-            conversation_service,
         ):
             yield evt
 
@@ -225,8 +226,6 @@ class ChatService:
             iterator = self.scoped_pipeline.run_scoped_search_workflow(
                 query=config.query,
                 paper_ids=scoped_ids,
-                top_chunks=40,
-                top_papers=20,
                 enable_reranking=True,
             )
         elif pipeline_type in ["database", "research"]:
@@ -284,12 +283,13 @@ class ChatService:
         conv_id: str,
         service: ConversationService,
         is_new: bool,
+        db_session: AsyncSession,
     ) -> tuple[SearchWorkflowConfig, str | None]:
         """Decompose the query and generate the SearchWorkflowConfig."""
         history = []
         if not is_new:
             history = await self.context_manager.get_conversation_top_history(
-                conv_id, self.db_session, top_n=5
+                conv_id, db_session, top_n=5
             )
 
         breakdown = await self._decompose_query(request.query, history)
@@ -302,10 +302,13 @@ class ChatService:
 
         return SearchWorkflowConfig(
             query=request.query,
-            bm25_query=breakdown.bm25_query if breakdown else None,
-            semantic_queries=breakdown.semantic_queries if breakdown else None,
+            search_queries=(
+                breakdown.hybrid_queries if breakdown and breakdown.hybrid_queries else [request.query]
+            ),
             filters=(
-                request.filters.model_dump(by_alias=True) if request.filters else None
+                request.filters.model_dump(exclude_none=True)
+                if request.filters
+                else None
             ),
             intent=breakdown.intent if breakdown else None,
         ), (conversation.title if conversation else None)
@@ -315,10 +318,18 @@ class ChatService:
     ) -> tuple[Any, bool]:
         """Fetch existing or create new conversation."""
         if conv_id:
-            conversation = await service.get_a_conversation(conv_id)
+            conversation, was_cloned = await service.get_or_clone_conversation_for_user(
+                conversation_id=conv_id,
+                user_id=user_id,
+            )
             if not conversation:
                 logger.warning(f"Invalid conversation_id: {conv_id}")
                 raise BadRequestException("Conversation does not exist.")
+            if was_cloned:
+                logger.info(
+                    "Conversation was shared from another user; deep-cloned for isolated follow-up.",
+                    extra={"source_conversation_id": conv_id, "cloned_conversation_id": conversation.conversation_id},
+                )
             return conversation, False
 
         conversation = await service.create_conversation(user_id=user_id)
@@ -332,8 +343,11 @@ class ChatService:
             else (request.pipeline or "database").strip().lower()
         )
         request_filters = (
-            request.filters.model_dump(by_alias=True) if request.filters else {}
+            request.filters.model_dump(exclude_none=True) if request.filters else {}
         )
+        if getattr(request, "paper_ids", None):
+            request_filters = dict(request_filters)
+            request_filters["paper_ids"] = list(getattr(request, "paper_ids") or [])
         route_decision = route_query(pipeline_selection, request_filters)
 
         logger.info(f"Resolved pipeline: {route_decision.route_type}")
@@ -373,16 +387,15 @@ class ChatService:
         results: RAGResult,
         pipeline_type: str,
         start_time: float,
-        conv_service: ConversationService,
     ):
         """Format chunks, stream final LLM answer, save to DB, and trigger background tasks."""
         from app.domain.papers.schemas import PaperMetadata
 
-        conv_context, _ = await self.context_manager.get_conversation_context(
-            conv_id, self.db_session, include_current_query=True
-        )
+        async with db_session_context() as context_session:
+            conv_context, _ = await self.context_manager.get_conversation_context(
+                conv_id, context_session, include_current_query=True
+            )
         context_string, _ = self.response_builder.build_context_from_results(results)
-        logger.debug(f"Generated Context:\n{context_string}")
         enhanced_query = self.response_builder.build_enhanced_query(
             request.query,
             conversation_history=conv_context,
@@ -417,19 +430,21 @@ class ChatService:
 
         # 3. Save Assistant Message
         try:
-            msg_id = await conv_service.add_message_to_conversation(
-                conversation_id=conv_id,
-                user_id=user_id,
-                message_text=full_response,
-                role="assistant",
-                pipeline_type=pipeline_type,
-                completion_time_ms=int((time.time() - start_time) * 1000),
-                paper_ids=self.response_builder.get_retrieved_paper_ids(results),
-                paper_snapshots=self.response_builder.extract_metadata_from_results(
-                    results
-                ),
-                progress_events=event_emitter.get_collected_events(),
-            )
+            async with db_session_context() as save_session:
+                conv_service = ConversationService(save_session)
+                msg_id = await conv_service.add_message_to_conversation(
+                    conversation_id=conv_id,
+                    user_id=user_id,
+                    message_text=full_response,
+                    role="assistant",
+                    pipeline_type=pipeline_type,
+                    completion_time_ms=int((time.time() - start_time) * 1000),
+                    paper_ids=self.response_builder.get_retrieved_paper_ids(results),
+                    paper_snapshots=self.response_builder.extract_metadata_from_results(
+                        results
+                    ),
+                    progress_events=event_emitter.get_collected_events(),
+                )
         except Exception as e:
             logger.error(f"Failed to save assistant message: {e}")
             msg_id = None
@@ -448,7 +463,7 @@ class ChatService:
                 message_id=msg_id,
             )
             asyncio.create_task(
-                self.background_tasks.validate_answer(val_req, self.db_session)
+                self.background_tasks.run_validation_with_new_session(val_req)
             )
             asyncio.create_task(
                 self.background_tasks.run_summarization_with_new_session(conv_id)
@@ -481,11 +496,11 @@ class ChatService:
 
     async def _decompose_query(
         self, query: str, conversation_histories: Optional[List[Dict[str, Any]]] = None
-    ) -> Optional[QuestionBreakdownResponse]:
+    ) -> Optional[GeneratedQueryPlanResponse]:
         """Decompose query into subqueries using LLM."""
         decomposition_start_time = time.time()
         try:
-            breakdown_response = await self.llm_service.decompose_user_query_v2(
+            breakdown_response = await self.llm_service.decompose_user_query_v3(
                 query, conversation_history=conversation_histories
             )
         except Exception as e:
@@ -590,6 +605,15 @@ class ChatService:
 
         async for evt in event_emitter.emit_chunk_event(
             "This is a test response chunk."
+        ):
+            yield evt
+            
+        async for evt in event_emitter.emit_chunk_event(
+            "This is another test response chunk."
+        ):
+            yield evt
+        async for evt in event_emitter.emit_chunk_event(
+            "This is the final test response chunk."
         ):
             yield evt
 

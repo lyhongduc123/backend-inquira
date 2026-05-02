@@ -53,6 +53,8 @@ class MessageRepository:
             is_active=is_active,
             status=status,
             message_metadata=message_metadata or {},
+            pipeline_type=pipeline_type,
+            completion_time_ms=completion_time_ms,
         )
         
         self.db.add(message)
@@ -226,7 +228,8 @@ class MessageRepository:
         self,
         message_id: int,
         user_id: Optional[int] = None,
-        soft_delete: bool = True
+        soft_delete: bool = True,
+        delete_assistant_reply_for_user: bool = True,
     ) -> bool:
         """
         Delete a message (soft or hard delete)
@@ -250,10 +253,48 @@ class MessageRepository:
         if not message:
             return False
         
+        assistant_reply: Optional[DBMessage] = None
+        if delete_assistant_reply_for_user and message.role == "user":
+            next_user_result = await self.db.execute(
+                select(DBMessage.id)
+                .where(
+                    DBMessage.conversation_id == message.conversation_id,
+                    DBMessage.role == "user",
+                    DBMessage.id > message.id,
+                )
+                .order_by(DBMessage.id.asc())
+                .limit(1)
+            )
+            next_user_id = next_user_result.scalar_one_or_none()
+
+            assistant_query = (
+                select(DBMessage)
+                .where(
+                    DBMessage.conversation_id == message.conversation_id,
+                    DBMessage.role == "assistant",
+                    DBMessage.id > message.id,
+                )
+                .order_by(DBMessage.id.asc())
+                .limit(1)
+            )
+
+            if next_user_id is not None:
+                assistant_query = assistant_query.where(DBMessage.id < next_user_id)
+
+            if user_id is not None:
+                assistant_query = assistant_query.where(DBMessage.user_id == user_id)
+
+            assistant_result = await self.db.execute(assistant_query)
+            assistant_reply = assistant_result.scalar_one_or_none()
+
         if soft_delete:
             message.is_active = False
+            if assistant_reply:
+                assistant_reply.is_active = False
             await self.db.commit()
         else:
+            if assistant_reply:
+                await self.db.delete(assistant_reply)
             await self.db.delete(message)
             await self.db.commit()
         

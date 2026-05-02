@@ -16,11 +16,10 @@ from .schemas import (
     ChatSubmitResponse,
     PipelineTaskResponse
 )
-from .services import ChatService
 from app.db.database import get_db_session
 from app.extensions.stream import stream_event
 from app.extensions.logger import create_logger
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, get_current_user_or_anonymous
 from app.models.users import DBUser
 from app.core.responses import ApiResponse, success_response
 from app.core.exceptions import InternalServerException, NotFoundException, ForbiddenException
@@ -39,8 +38,7 @@ logger = create_logger(__name__)
 async def stream_message(
     http_request: Request,
     request: ChatMessageRequest,
-    db: AsyncSession = Depends(get_db_session),
-    current_user: DBUser = Depends(get_current_user),
+    current_user: DBUser = Depends(get_current_user_or_anonymous),
     container: "ServiceContainer" = Depends(get_container)
 ) -> StreamingResponse:
     """
@@ -77,7 +75,6 @@ async def stream_message(
             container.chat_service.stream_research_pipeline(
                 request=request,
                 user_id=current_user.id,
-                db_session=db
             ),
             media_type="text/event-stream",
             headers={
@@ -173,99 +170,6 @@ async def stream_paper_detail(
         raise InternalServerException(f"Failed to stream paper chat: {str(e)}")
 
 
-# ==================== EVENT-DRIVEN ENDPOINTS (v2) ====================
-
-@router.post("/submit", response_model=ApiResponse[ChatSubmitResponse])
-async def submit_chat_message(
-    request: ChatSubmitRequest,
-    db: AsyncSession = Depends(get_db_session),
-    current_user: DBUser = Depends(get_current_user),
-    container: "ServiceContainer" = Depends(get_container)
-):
-    """
-    Submit a chat message for async background processing (Event-Driven Architecture v2).
-    
-    This endpoint immediately returns a task_id without blocking.
-    The pipeline executes in the background and clients stream events via /stream/{task_id}.
-    
-    Benefits:
-    - User can reload page without cancelling pipeline
-    - Supports reconnection and resume
-    - Non-blocking API
-    
-    Workflow:
-    1. POST /submit -> Get task_id
-    2. GET /stream/{task_id} -> Stream events (reconnectable)
-    3. GET /tasks/{task_id} -> Check status
-    
-    Returns:
-        task_id: Unique identifier for tracking
-        conversation_id: Conversation this belongs to
-        status: "pending" initially
-    """
-
-    try:
-        # Get or create conversation
-        if request.conversation_id:
-            conversation = await container.conversation_service.get_conversation(
-                conversation_id=request.conversation_id,
-                user_id=current_user.id
-            )
-            if not conversation:
-                raise NotFoundException(f"Conversation {request.conversation_id} not found")
-            conversation_id = request.conversation_id
-        else:
-            conversation = await container.conversation_service.create_conversation(
-                user_id=current_user.id,
-                title=request.query[:100]  # Use query preview as title
-            )
-            conversation_id = conversation.conversation_id
-
-        request_filters = (
-            request.filters.model_dump(by_alias=True, exclude_none=True)
-            if request.filters
-            else None
-        )
-        
-        # Create pipeline task
-        task = await container.pipeline_task_service.create_task(
-            user_id=current_user.id,
-            conversation_id=conversation_id,
-            query=request.query,
-            pipeline_type=request.pipeline,
-            filters=request_filters,
-            client_message_id=request.client_message_id
-        )
-        
-        # Submit task to background worker
-        from app.workers.task_queue import get_task_queue
-        await get_task_queue().submit_chat_task(
-            task_id=task.task_id,
-            user_id=current_user.id,
-            conversation_id=conversation_id,
-            query=request.query,
-            pipeline_type=request.pipeline,
-            filters=request_filters or {}
-        )
-        
-        logger.info(f"Chat task {task.task_id} submitted for user {current_user.id}")
-        
-        return success_response(
-            data=ChatSubmitResponse(
-                task_id=task.task_id,
-                conversation_id=conversation_id,
-                status="pending",
-                message="Task submitted successfully"
-            )
-        )
-    
-    except NotFoundException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Failed to submit chat task: {e}", exc_info=True)
-        raise InternalServerException(f"Failed to submit chat task: {str(e)}")
-
-
 @router.post("/agent", response_model=ApiResponse[ChatSubmitResponse])
 async def submit_agent_chat_message(
     request: ChatSubmitRequest,
@@ -280,13 +184,13 @@ async def submit_agent_chat_message(
     try:
         # Get or create conversation
         if request.conversation_id:
-            conversation = await container.conversation_service.get_conversation(
+            source_or_clone, _ = await container.conversation_service.get_or_clone_conversation_for_user(
                 conversation_id=request.conversation_id,
-                user_id=current_user.id
+                user_id=current_user.id,
             )
-            if not conversation:
+            if not source_or_clone:
                 raise NotFoundException(f"Conversation {request.conversation_id} not found")
-            conversation_id = request.conversation_id
+            conversation_id = source_or_clone.conversation_id
         else:
             conversation = await container.conversation_service.create_conversation(
                 user_id=current_user.id,
@@ -295,7 +199,7 @@ async def submit_agent_chat_message(
             conversation_id = conversation.conversation_id
 
         request_filters = (
-            request.filters.model_dump(by_alias=True, exclude_none=True)
+            request.filters.model_dump(exclude_none=True)
             if request.filters
             else None
         )

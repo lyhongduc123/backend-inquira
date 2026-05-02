@@ -12,16 +12,9 @@ class QueryIntent(str, Enum):
     AUTHOR_PAPERS = "author_papers"  # Author-specific: simple retrieval, skip scoring
     COMPARISON = "comparison"  # Compare specific papers: targeted retrieval
     FOUNDATIONAL = "foundational"  # Original/seminal papers: use specific paper titles
-
-
-class SearchSummaryResponse(BaseModel):
-    """Response model for search results summary"""
-    query: str = Field(..., description="Original search query")
-    results_processed: int = Field(..., description="Number of results processed")
-    total_results: int = Field(..., description="Total results available")
-    summary: str = Field(..., description="Generated summary")
-    model_used: str = Field(..., description="Model used for summarization")
-
+    GENERAL = "general"  # General questions: may not require retrieval, more open-ended generation
+    GIBBERISH = "gibberish"  # Nonsense input: skip retrieval, return generic response
+    SYSTEM = "system"  # System-level queries: skip retrieval, return system info or guidance
 
 class QuestionBreakdownResponse(BaseModel):
     """Response model for question breakdown with intent classification"""
@@ -33,7 +26,6 @@ class QuestionBreakdownResponse(BaseModel):
     specific_papers: Optional[List[str]] = Field(default=None, description="Specific paper titles to search for exact matches")
     num_queries: int = Field(..., description="Number of search queries")
     complexity: Literal["simple", "intermediate", "advanced"] = Field(..., description="Question complexity level")
-    reasoning_content: Optional[str] = Field(None, description="LLM's reasoning process for generating the breakdown")
     model_used: str = Field(..., description="Model used for breakdown")
     
     # Query Intent Classification (merged from QueryIntentResponse)
@@ -43,6 +35,23 @@ class QuestionBreakdownResponse(BaseModel):
     skip_ranking: bool = Field(default=False, description="Skip paper ranking step")
     skip_title_abstract_filter: bool = Field(default=False, description="Skip title/abstract similarity filter")
     filters: Optional[Dict[str, Any]] = Field(default=None, description="Extracted filters (author, year, venue)")
+
+
+class GeneratedQueryPlanResponse(BaseModel):
+    """Unified query plan for retrieval-first orchestration."""
+
+    original_question: str = Field(..., description="Original user question")
+    clarified_question: str = Field(..., description="Single clarified question used for reranking")
+    hybrid_queries: List[str] = Field(..., description="Combined BM25 and semantic queries for retrieval")
+    specific_papers: List[str] = Field(default_factory=list, description="Exact target paper titles")
+    intent: QueryIntent = Field(default=QueryIntent.COMPREHENSIVE_SEARCH)
+    skip: List[str] = Field(default_factory=list)
+    filters: Dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def generated_queries(self) -> List[str]:
+        """Backward-compatible alias for older callers."""
+        return self.hybrid_queries
 
 
 class ChatResponse(BaseModel):

@@ -9,13 +9,16 @@ from app.extensions.stream import (
 )
 from app.llm import LiteLLMProvider
 from app.llm.prompts import PromptPresets, PromptBuilder
+from app.llm.prompts.prompt_configs import PromptConfig
 from app.llm.schemas import (
     QuestionBreakdownResponse,
+    GeneratedQueryPlanResponse,
     QueryIntent,
-    RelatedTopicsResponse
+    RelatedTopicsResponse,
 )
 from app.extensions.logger import create_logger
 import re
+import json
 
 logger = create_logger(__name__)
 
@@ -66,10 +69,12 @@ class LLMService:
 
         # Build prompt with optional conversation context
         if conversation_history:
-            history_text = "\n".join([
-                f"{msg['role'].upper()}: {msg['content']}"
-                for msg in conversation_history[-5:]  # Last 5 messages for context
-            ])
+            history_text = "\n".join(
+                [
+                    f"{msg['role'].upper()}: {msg['content']}"
+                    for msg in conversation_history[-5:]  # Last 5 messages for context
+                ]
+            )
             prompt = f"""
         Previous Conversation:
         {history_text}
@@ -105,10 +110,9 @@ class LLMService:
         bm25_query: Optional[str] = None
         semantic_queries: List[str] = []
         specific_papers: List[str] = []
-        
+
         intent_str: Optional[str] = None
         skip_flags: List[str] = []
-        diversity = False
         filters_dict: Dict[str, Any] = {}
 
         current_section: Optional[str] = None
@@ -123,13 +127,20 @@ class LLMService:
                 clarified_text = line.replace("CLARIFIED:", "").strip()
                 clarified_question = clarified_text.strip('"').strip()
                 current_section = None
-            elif "KEYWORD_QUERIES:" in line.upper() or "KEYWORD QUERIES" in line.upper():
+            elif (
+                "KEYWORD_QUERIES:" in line.upper() or "KEYWORD QUERIES" in line.upper()
+            ):
                 current_section = "keyword"
                 continue
-            elif "SEMANTIC_QUERIES:" in line.upper() or "SEMANTIC QUERIES" in line.upper():
+            elif (
+                "SEMANTIC_QUERIES:" in line.upper()
+                or "SEMANTIC QUERIES" in line.upper()
+            ):
                 current_section = "semantic"
                 continue
-            elif "SPECIFIC_PAPERS:" in line.upper() or "SPECIFIC PAPERS" in line.upper():
+            elif (
+                "SPECIFIC_PAPERS:" in line.upper() or "SPECIFIC PAPERS" in line.upper()
+            ):
                 current_section = "specific"
                 continue
             elif line.startswith("INTENT:"):
@@ -139,10 +150,6 @@ class LLMService:
                 skip_text = line.replace("SKIP:", "").strip().lower()
                 if skip_text != "none":
                     skip_flags = [s.strip() for s in skip_text.split(",")]
-                current_section = None
-            elif line.startswith("DIVERSITY:"):
-                diversity_text = line.replace("DIVERSITY:", "").strip().lower()
-                diversity = diversity_text in ["true", "yes", "1"]
                 current_section = None
             elif line.startswith("FILTERS:"):
                 filters_text = line.replace("FILTERS:", "").strip()
@@ -168,7 +175,7 @@ class LLMService:
                 # Remove bullet points
                 for prefix in ["•", "-", "*", ">", "○", "▪"]:
                     if clean_line.startswith(prefix):
-                        clean_line = clean_line[len(prefix):].strip()
+                        clean_line = clean_line[len(prefix) :].strip()
                         break
 
                 # Remove markdown and quotes
@@ -187,8 +194,12 @@ class LLMService:
                 elif current_section == "specific":
                     specific_papers.append(clean_line)
 
-        all_queries = [bm25_query] + semantic_queries if bm25_query else semantic_queries
-        subtopics = [s.strip() for s in all_queries if s.strip() and len(s.strip()) > 5][:4]
+        all_queries = (
+            [bm25_query] + semantic_queries if bm25_query else semantic_queries
+        )
+        subtopics = [
+            s.strip() for s in all_queries if s.strip() and len(s.strip()) > 5
+        ][:4]
         reasoning_content = get_simple_response_reasoning(response)
 
         query_intent: Optional[QueryIntent] = None
@@ -198,7 +209,9 @@ class LLMService:
                 query_intent = QueryIntent(intent_str)
                 intent_confidence = 0.9  # High confidence since directly from LLM
             except ValueError:
-                logger.warning(f"Invalid intent: {intent_str}, defaulting to comprehensive_search")
+                logger.warning(
+                    f"Invalid intent: {intent_str}, defaulting to comprehensive_search"
+                )
                 query_intent = QueryIntent.COMPREHENSIVE_SEARCH
                 intent_confidence = 0.5
 
@@ -213,8 +226,7 @@ class LLMService:
             semantic_queries=semantic_queries if semantic_queries else None,
             specific_papers=specific_papers if specific_papers else None,
             num_queries=len(subtopics),
-            complexity="simple", 
-            reasoning_content=reasoning_content,
+            complexity="simple",
             model_used=self.llm_provider.get_model(),
             intent=query_intent,
             intent_confidence=intent_confidence,
@@ -248,12 +260,13 @@ class LLMService:
         """
         import json
 
-        # Build prompt with optional conversation context
         if conversation_history:
-            history_text = "\n".join([
-                f"{msg['role'].upper()}: {msg['content']}"
-                for msg in conversation_history[-5:]  # Last 5 messages for context
-            ])
+            history_text = "\n".join(
+                [
+                    f"{msg['role'].upper()}: {msg['content']}"
+                    for msg in conversation_history[-5:]
+                ]
+            )
             prompt = f"""
 <conversation_context>
 {history_text}
@@ -281,12 +294,10 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
         response = self.llm_provider.simple_prompt(messages=messages, **config)
         content = get_simple_response_content(response)
         reasoning_content = get_simple_response_reasoning(response)
-        
+
         logger.info(f"LLM V2 response for question breakdown: {content[:200]}...")
 
-        # Parse JSON response
         try:
-            # Clean up potential markdown code blocks
             content = content.strip()
             if content.startswith("```json"):
                 content = content[7:]
@@ -295,7 +306,7 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
             if content.endswith("```"):
                 content = content[:-3]
             content = content.strip()
-            
+
             data = json.loads(content)
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON response: {e}\nContent: {content}")
@@ -307,55 +318,43 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
                 num_queries=1,
                 complexity="simple",
                 model_used=self.llm_provider.get_model(),
-                reasoning_content=reasoning_content,
             )
 
-        # Extract fields from JSON
         clarified_question = data.get("clarified_question", user_question)
         search_queries = data.get("search_queries", [])
         specific_papers = data.get("specific_papers", [])
         intent_str = data.get("intent", "COMPREHENSIVE").lower()
         filters_dict = data.get("filters", {})
-        
-        # Parse keyword and semantic queries if present
         bm25_query = data.get("bm25_query")
         semantic_queries = data.get("semantic_queries")
-        
-        # If not separated, use search_queries for both
         if not bm25_query and not semantic_queries and search_queries:
-            bm25_query = search_queries[:2] if len(search_queries) > 1 else search_queries
+            bm25_query = (
+                search_queries[:2] if len(search_queries) > 1 else search_queries
+            )
             semantic_queries = search_queries[1:] if len(search_queries) > 1 else []
 
-        # Parse intent
         query_intent = QueryIntent.COMPREHENSIVE_SEARCH
         intent_confidence = 0.9
-        
+
         intent_mapping = {
             "author_papers": QueryIntent.AUTHOR_PAPERS,
             "comparison": QueryIntent.COMPARISON,
             "foundational": QueryIntent.FOUNDATIONAL,
             "comprehensive": QueryIntent.COMPREHENSIVE_SEARCH,
         }
-        
+
         query_intent = intent_mapping.get(intent_str, QueryIntent.COMPREHENSIVE_SEARCH)
-        
-        # Parse skip flags
+
         skip_flags = data.get("skip", [])
         if isinstance(skip_flags, str):
             skip_flags = [s.strip() for s in skip_flags.split(",")]
-        
+
         skip_ranking = "ranking" in skip_flags
         skip_title_filter = "title_filter" in skip_flags or "filter" in skip_flags
-        
-        # Parse diversity flag
-        diversity = data.get("diversity", False)
-        if isinstance(diversity, str):
-            diversity = diversity.lower() in ["true", "yes", "1"]
 
-        # Clean up filters - remove None values
         if filters_dict:
             filters_dict = {k: v for k, v in filters_dict.items() if v and v != "null"}
-        
+
         return QuestionBreakdownResponse(
             original_question=user_question,
             clarified_question=clarified_question,
@@ -365,7 +364,6 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
             specific_papers=specific_papers if specific_papers else None,
             num_queries=len(search_queries),
             complexity="simple",
-            reasoning_content=reasoning_content,
             model_used=self.llm_provider.get_model(),
             intent=query_intent,
             intent_confidence=intent_confidence,
@@ -373,130 +371,176 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
             skip_title_abstract_filter=skip_title_filter,
             filters=filters_dict if filters_dict else None,
         )
-        
-    # async def condensed_decompose_user_query(
-    #     self,
-    #     user_question: str,
-    #     conversation_history: Optional[List[Dict[str, str]]] = None,
-    # ) -> QuestionBreakdownResponse:
-    #     """
-    #     Condensed version of query decomposition that returns a single clarified query.
-    #     Used for scoped retrieval where we want to keep the original question but just clarify it.
 
-    #     Args:
-    #         user_question: The user's original question
-    #         conversation_history: Optional conversation history for context
-    #     Returns:
-    #         QuestionBreakdownResponse with clarified question and original question as the only search query
-    #     """
-        
-    #     breakdown = await self.decompose_user_query_v2(
-    #         user_question=user_question,
-    #         conversation_history=conversation_history,
-    #     )
-
-    #     return QuestionBreakdownResponse(
-    #         original_question=user_question,
-    #         clarified_question=breakdown.clarified_question or user_question,
-    #         search_queries=[user_question],  # Keep original question as the search query for scoped retrieval
-    #         num_queries=1,
-    #         complexity="simple",
-    #         reasoning_content=breakdown.reasoning_content,
-    #         model_used=breakdown.model_used,
-    #         intent=breakdown.intent,
-    #         intent_confidence=breakdown.intent_confidence,
-    #         skip_ranking=breakdown.skip_ranking,
-    #         skip_title_abstract_filter=breakdown.skip_title_abstract_filter,
-    #         filters=breakdown.filters,
-    #     )
-
-    def suggest_related_topics(
+    async def decompose_user_query_v3(
         self,
-        current_topic: str,
-        search_results: Optional[List[Dict[str, Any]]] = None,
-        num_suggestions: int = 5,
-        temperature: Optional[float] = None,
+        user_question: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
         **llm_params,
-    ) -> RelatedTopicsResponse:
+    ) -> GeneratedQueryPlanResponse:
         """
-        Suggest related research topics based on current topic and search results
+        V3: Experimental version that uses a more advanced prompt and expects a structured JSON response with enhanced reasoning and context handling.
+        This version is designed to better handle complex questions and multi-turn conversations.
 
         Args:
-            current_topic: Current research topic
-            search_results: Optional search results for context
-            num_suggestions: Number of suggestions to generate
+            user_question: The user's original question
+            conversation_history: Optional conversation history for context
 
         Returns:
-            List of related topic suggestions
+            QuestionBreakdownResponse with structured query decomposition and enhanced reasoning
         """
-        context = ""
-        if search_results:
-            titles = [result.get("title", "") for result in search_results[:5]]
-            context = f"\nBased on recent research: {', '.join(titles)}"
+        import json
 
-        prompt = f"""Suggest {num_suggestions} related research topics to: "{current_topic}"{context}
-        
-        The suggestions should be:
-        - Related but distinct from the original topic
-        - Currently relevant in academic research
-        - Specific enough to be actionable
-        - Covering different angles or approaches
-        
-        Return only the topic suggestions, one per line."""
+        if conversation_history:
+            history_text = "\n".join(
+                [
+                    f"{msg['role'].upper()}: {msg['content']}"
+                    for msg in conversation_history[-5:]
+                ]
+            )
+            prompt = f"""
+<conversation_context>
+{history_text}
+</conversation_context>
 
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a research strategist who identifies promising research directions.",
-            },
-            {"role": "user", "content": prompt},
-        ]
+NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "it", "they", "this method") in the user's current question. Do not generate searches for old questions.
+"""
+            prompt += f'Current user Question: "{user_question}"'
+        else:
+            prompt = f'User Question: "{user_question}"'
 
-        # Use CREATIVE preset for diverse suggestions
+        messages, version = PromptBuilder.build(
+            prompt_name="decompose_query_v3",
+            user_input=prompt,
+            additional_content=None,
+            dynamic_instruction=None,
+        )
+
         config = PromptPresets.merge_with_overrides(
-            PromptPresets.CREATIVE,
+            PromptPresets.DETERMINISTIC,
+            response_format={"type": "json_object"},
             **llm_params,
         )
 
         response = self.llm_provider.simple_prompt(messages=messages, **config)
+        content = get_simple_response_content(response)
 
-        # Parse suggestions
-        suggestions = []
-        for line in get_simple_response_content(response).split("\n"):
-            line = line.strip()
-            if line:
-                # Check for bullet points or numbering
-                has_marker = any(
-                    line.startswith(marker)
-                    for marker in [
-                        "•",
-                        "-",
-                        "1.",
-                        "2.",
-                        "3.",
-                        "4.",
-                        "5.",
-                        "6.",
-                        "7.",
-                        "8.",
-                        "9.",
-                    ]
-                )
+        try:
+            raw = json.loads(content)
+            if not isinstance(raw, dict):
+                raw = {}
+        except Exception:
+            logger.warning("decompose_user_query_v3 returned invalid JSON; using fallback")
+            raw = {}
 
-                if has_marker:
-                    # Remove bullet points or numbering
-                    clean_line = line.lstrip("•-").split(".", 1)[-1].strip()
-                    if clean_line:
-                        suggestions.append(clean_line)
-                else:
-                    suggestions.append(line)
+        clarified_question = str(raw.get("clarified_question") or user_question).strip()
+        hybrid_queries_raw = raw.get("hybrid_queries")
+        hybrid_queries = []
 
-        return RelatedTopicsResponse(
-            current_topic=current_topic,
-            suggestions=suggestions[:num_suggestions],
-            num_suggestions=len(suggestions[:num_suggestions]),
-            model_used=self.llm_provider.get_model(),
+        if isinstance(hybrid_queries_raw, list):
+            hybrid_queries = [
+                str(q).strip() for q in hybrid_queries_raw if str(q).strip()
+            ]
+
+        # Backward compatibility: accept older v2-style fields when hybrid_queries
+        # is not present, then normalize to the unified hybrid list.
+        if not hybrid_queries:
+            bm25_query_raw = raw.get("bm25_query")
+            bm25_query = str(bm25_query_raw).strip() if bm25_query_raw else None
+
+            semantic_queries_raw = raw.get("semantic_queries") or []
+            semantic_queries = (
+                [str(q).strip() for q in semantic_queries_raw if str(q).strip()]
+                if isinstance(semantic_queries_raw, list)
+                else []
+            )
+
+            hybrid_queries = []
+            if bm25_query:
+                hybrid_queries.append(bm25_query)
+            hybrid_queries.extend(semantic_queries)
+
+        hybrid_queries = list(dict.fromkeys([q for q in hybrid_queries if q]))
+        if not hybrid_queries:
+            hybrid_queries = [clarified_question]
+
+        specific_papers_raw = raw.get("specific_papers") or []
+        specific_papers = [
+            str(p).strip() for p in specific_papers_raw if str(p).strip()
+        ] if isinstance(specific_papers_raw, list) else []
+
+        intent_raw = str(raw.get("intent") or QueryIntent.COMPREHENSIVE_SEARCH.value).strip().lower()
+        try:
+            intent = QueryIntent(intent_raw)
+        except ValueError:
+            intent = QueryIntent.COMPREHENSIVE_SEARCH
+
+        skip_raw = raw.get("skip") or []
+        if isinstance(skip_raw, list):
+            skip = [str(flag).strip().lower() for flag in skip_raw if str(flag).strip()]
+        elif isinstance(skip_raw, str):
+            skip = [value.strip().lower() for value in skip_raw.split(",") if value.strip()]
+        else:
+            skip = []
+
+        filters_raw = raw.get("filters")
+        filters = filters_raw if isinstance(filters_raw, dict) else {}
+
+        return GeneratedQueryPlanResponse(
+            original_question=user_question,
+            clarified_question=clarified_question,
+            hybrid_queries=hybrid_queries,
+            specific_papers=specific_papers,
+            intent=intent,
+            skip=skip,
+            filters=filters,
         )
+
+    def prompt_json(
+        self,
+        *,
+        system_prompt: str,
+        user_payload: Union[str, Dict[str, Any], List[Any]],
+        preset: Optional[PromptConfig] = None,
+        **llm_params,
+    ) -> Dict[str, Any]:
+        """Execute a deterministic JSON prompt and return parsed object safely."""
+        if isinstance(user_payload, str):
+            user_content = user_payload
+        else:
+            user_content = json.dumps(user_payload)
+
+        config = PromptPresets.merge_with_overrides(
+            preset or PromptPresets.DETERMINISTIC,
+            response_format={"type": "json_object"},
+            **llm_params,
+        )
+
+        response = self.llm_provider.simple_prompt(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            **config,
+        )
+
+        content = get_simple_response_content(response).strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                return parsed
+            return {}
+        except Exception:
+            logger.warning("Failed to parse JSON response in prompt_json")
+            return {}
 
     async def summarize_conversation_context(
         self,
@@ -508,20 +552,20 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
     ) -> str:
         """
         Generate a summary of conversation context using LLM.
-        
+
         This method handles the prompt structure and LLM interaction for conversation summarization.
         Can create fresh summaries or incremental summaries that build on previous ones.
-        
+
         Args:
             conversation_text: Formatted conversation text to summarize
             existing_summary: Previous summary (if any) for incremental summarization
             temperature: LLM temperature (default: 0.3 for consistent summaries)
             max_tokens: Maximum tokens for summary (default: 800, roughly 500 words)
             **llm_params: Additional LLM parameters
-            
+
         Returns:
             Generated summary text
-            
+
         Raises:
             Exception: If LLM call fails
         """
@@ -562,30 +606,30 @@ Create a summary that:
 5. Keeps the summary under 500 words
 
 Summary:"""
-        
+
         config = PromptPresets.merge_with_overrides(
             PromptPresets.SUMMARIZATION,
             max_tokens=max_tokens,
             **llm_params,
         )
-        
+
         messages, version = PromptBuilder.build(
             prompt_name="conversation_summarization",
             user_input=prompt,
             additional_content=None,
             dynamic_instruction=None,
         )
-        
+
         response = self.llm_provider.simple_prompt(
             messages=messages,
             **config,
         )
-        
+
         summary = get_simple_response_content(response)
-        
+
         if not summary:
             raise ValueError("LLM returned empty summary")
-        
+
         return summary.strip()
 
     async def stream_citation_based_response(
@@ -616,12 +660,12 @@ Summary:"""
             additional_content=None,
             dynamic_instruction=None,
         )[0]
-    
+
         config = PromptPresets.merge_with_overrides(
             PromptPresets.FACTUAL,
             **llm_params,
         )
-        
+
         for chunk in self.llm_provider.stream_completion(messages=messages, **config):
             chunk_count += 1
             if chunk_count % 10 == 0:
@@ -630,5 +674,3 @@ Summary:"""
             yield chunk
 
         print(f"[DEBUG] Finished streaming. Total chunks: {chunk_count}")
- 
-    

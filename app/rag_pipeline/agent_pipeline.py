@@ -20,7 +20,7 @@ from typing import AsyncGenerator, List, Optional, Dict, Any, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.container import ServiceContainer
-from app.domain.papers import LoadOptions
+from app.domain.papers import LoadOptions, SearchFilterOptions
 from app.domain.chunks.schemas import ChunkRetrieved
 from app.core.singletons import get_ranking_service
 from app.models.papers import DBPaper
@@ -66,37 +66,22 @@ class AgentPipeline:
         original_query: str,
         search_queries: List[str],
         intent: QueryIntent,
+        rerank_query: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         top_papers: int = 50,
         top_chunks: int = 40,
         enable_reranking: bool = True,
         enable_paper_ranking: bool = True,
         relevance_threshold: float = 0.3,
-    ) -> AsyncGenerator[RAGPipelineEvent, None]:
+    ) -> Optional[RAGResult]:
         """
         Database search without internal decomposition step.
         """
         
-        ctx = RAGPipelineContext(original_query)
+        ctx = RAGPipelineContext(query=original_query)
         ctx.search_queries = search_queries
         
-        yield RAGPipelineEvent(
-            type=RAGEventType.SEARCHING,
-            data={
-                "queries": search_queries,
-                "original": original_query,
-                "intent": intent.value,
-                "filters": filters or {},
-            },
-        )
-
-        # Step 1: Database split retrieval with filters
-        yield RAGPipelineEvent(
-            type=RAGEventType.PROCESSING,
-            data={"message": "Executing Agent's search sub-queries via Hybrid RAG"},
-        )
-        
-        paper_rankings: List[List[tuple[DBPaper, float]]] = []
+        paper_rankings: List[List[tuple[str, float]]] = []
         
         for search_query in search_queries:
             bm25_results, semantic_results = await self._database_split_search(
@@ -106,51 +91,56 @@ class AgentPipeline:
                 intent=intent,
             )
             if bm25_results:
-                paper_rankings.append(bm25_results)
+                paper_rankings.append(
+                    [(str(paper.paper_id), score) for paper, score in bm25_results]
+                )
             if semantic_results:
-                paper_rankings.append(semantic_results)
+                paper_rankings.append(
+                    [(str(paper.paper_id), score) for paper, score in semantic_results]
+                )
 
             logger.info(
                 f"Agent Query '{search_query[:50]}...' retrieved "
                 f"bm25={len(bm25_results)}, semantic={len(semantic_results)}"
             )
 
-        db_papers_with_scores = self._fuse_rankings_with_rrf(
+        fused_paper_ids_with_scores = self._fuse_rankings_with_rrf(
             paper_rankings=paper_rankings,
             k=60,
             limit=top_papers * 2,
         )
+
+        rerank_basis_query = (rerank_query or original_query).strip() or original_query
         
-        logger.info(f"After RRF deduplication: {len(db_papers_with_scores)} unique papers")
+        logger.info(f"After RRF deduplication: {len(fused_paper_ids_with_scores)} unique papers")
         
-        if not db_papers_with_scores:
+        if not fused_paper_ids_with_scores:
             logger.warning("No papers found in database explicitly")
-            yield RAGPipelineEvent(
-                type=RAGEventType.RESULT,
-                data=RAGResult(papers=[], chunks=[])
-            )
-            return
+            return RAGResult(papers=[], chunks=[])
+
+        fused_paper_ids = [paper_id for paper_id, _ in fused_paper_ids_with_scores]
+        db_papers, _ = await self.repository.get_papers(
+            paper_ids=fused_paper_ids,
+            limit=len(fused_paper_ids),
+        )
+        paper_map = {str(p.paper_id): p for p in db_papers}
+        db_papers_with_scores = [
+            (paper_map[paper_id], score)
+            for paper_id, score in fused_paper_ids_with_scores
+            if paper_id in paper_map
+        ]
         
         ctx.papers_with_hybrid_scores = db_papers_with_scores
         paper_ids = [p.paper_id for p, _ in db_papers_with_scores[:top_papers]]
         
-        # Step 2: Fetch Chunks
         if paper_ids:
-            yield RAGPipelineEvent(
-                type=RAGEventType.PROCESSING,
-                data={"message": "Searching chunks in filtered papers"},
-            )
-            
-            # Using the primary search query for chunk search ranking
-            primary_query = search_queries[0] if search_queries else original_query
             chunks = await self._chunk_search(
-                query=primary_query,
+                query=rerank_basis_query,
                 paper_ids=paper_ids,
                 top_chunks=top_chunks,
                 intent=intent,
             )
             
-            # Add virtual abstract chunks if no real chunks found for a paper
             papers_with_chunks = {chunk.paper_id for chunk in chunks}
             papers_without_chunks = [
                 (paper, score) for paper, score in db_papers_with_scores[:top_papers]
@@ -181,24 +171,14 @@ class AgentPipeline:
             
             ctx.chunks = chunks
         
-        # Step 3: Reranking
         if enable_reranking and ctx.chunks:
-            primary_query = search_queries[0] if search_queries else original_query
             try:
-                ctx.chunks = self.ranking_service.rerank_chunks(primary_query, ctx.chunks)
+                ctx.chunks = self.ranking_service.rerank_chunks(rerank_basis_query, ctx.chunks)
+                ctx.chunks = [c for c in ctx.chunks if getattr(c, "relevance_score", 0.0) >= relevance_threshold]
             except Exception as e:
                 logger.error(f"Error reranking chunks: {e}")
         
-        # Step 4: Paper ranking
         if enable_paper_ranking and ctx.papers_with_hybrid_scores:
-            yield RAGPipelineEvent(
-                type=RAGEventType.RANKING,
-                data={
-                    "total_papers": len(ctx.papers_with_hybrid_scores),
-                    "total_chunks": len(ctx.chunks),
-                },
-            )
-            
             try:
                 paper_ids_to_rank = [p.paper_id for p, _ in ctx.papers_with_hybrid_scores[:top_papers]]
                 enriched_papers, _ = await self.repository.get_papers(
@@ -209,7 +189,7 @@ class AgentPipeline:
                 paper_hybrid_scores = {p.paper_id: score for p, score in ctx.papers_with_hybrid_scores}
                 
                 ranked_papers = await self._rank_papers(
-                    query=original_query,
+                    query=rerank_basis_query,
                     papers=enriched_papers,
                     chunks=ctx.chunks,
                     paper_hybrid_scores=paper_hybrid_scores,
@@ -229,15 +209,23 @@ class AgentPipeline:
                     )
                     for p, score in ctx.papers_with_hybrid_scores[:top_papers]
                 ]
+        elif not enable_paper_ranking and ctx.papers_with_hybrid_scores:
+            ctx.result_papers = [
+                RankedPaper(
+                    id=p.id,
+                    paper_id=p.paper_id,
+                    paper=p,
+                    relevance_score=score,
+                    ranking_scores={"hybrid_score": score}
+                )
+                for p, score in ctx.papers_with_hybrid_scores[:top_papers]
+            ]
         
         ctx.chunks = [chunk for chunk in ctx.chunks if chunk.paper_id in [rp.paper_id for rp in ctx.result_papers]]
-        
-        yield RAGPipelineEvent(
-            type=RAGEventType.RESULT,
-            data=RAGResult(
-                papers=ctx.result_papers,
-                chunks=ctx.chunks[:top_chunks],
-            ),
+
+        return RAGResult(
+            papers=ctx.result_papers,
+            chunks=ctx.chunks[:top_chunks],
         )
 
     async def _database_split_search(
@@ -250,22 +238,46 @@ class AgentPipeline:
         try:
             from app.processor.services.embeddings import get_embedding_service
 
-            author_name = filters.get("author") if filters else None
+            author_name = (filters.get("author_name") or filters.get("author")) if filters else None
             year_min = filters.get("year_min") if filters else None
             year_max = filters.get("year_max") if filters else None
             venue = filters.get("venue") if filters else None
-            min_citations = filters.get("min_citations") if filters else None
-            max_citations = filters.get("max_citations") if filters else None
+            min_citations = (
+                (filters.get("min_citation_count") if filters else None)
+                or (filters.get("min_citations") if filters else None)
+            )
+            max_citations = (
+                (filters.get("max_citation_count") if filters else None)
+                or (filters.get("max_citations") if filters else None)
+            )
+            journal_quartile = (
+                (filters.get("journal_quartile") if filters else None)
+                or (filters.get("journal_rank") if filters else None)
+            )
+            field_of_study = filters.get("field_of_study") if filters else None
+            fields_of_study: Optional[List[str]] = None
+            if isinstance(field_of_study, str) and field_of_study.strip():
+                fields_of_study = [field_of_study.strip()]
+            elif filters:
+                fields = filters.get("fields_of_study")
+                if isinstance(fields, list):
+                    fields_of_study = [str(f).strip() for f in fields if str(f).strip()]
 
-            bm25_results = await self.repository.bm25_search_papers_with_filters(
-                query=query,
-                limit=limit,
+            filter_options = SearchFilterOptions(
                 author_name=author_name,
                 year_min=year_min,
                 year_max=year_max,
                 venue=venue,
                 min_citation_count=min_citations,
                 max_citation_count=max_citations,
+                journal_quartile=journal_quartile,
+                field_of_study=fields_of_study,
+            )
+
+            bm25_results = await self.repository.bm25_search(
+                query=query,
+                limit=limit,
+                filter_options=filter_options,
             )
 
             semantic_results: List[tuple[DBPaper, float]] = []
@@ -275,15 +287,10 @@ class AgentPipeline:
             )
             
             if query_embedding:
-                semantic_results = await self.repository.semantic_search_papers_with_filters(
+                semantic_results = await self.repository.semantic_search(
                     query_embedding=query_embedding,
                     limit=limit,
-                    author_name=author_name,
-                    year_min=year_min,
-                    year_max=year_max,
-                    venue=venue,
-                    min_citation_count=min_citations,
-                    max_citation_count=max_citations,
+                    filter_options=filter_options,
                 )
 
             return bm25_results, semantic_results
@@ -293,22 +300,18 @@ class AgentPipeline:
 
     def _fuse_rankings_with_rrf(
         self,
-        paper_rankings: List[List[tuple[DBPaper, float]]],
+        paper_rankings: List[List[tuple[str, float]]],
         k: int = 60,
         limit: int = 100,
-    ) -> List[tuple[DBPaper, float]]:
+    ) -> List[tuple[str, float]]:
         rrf_scores: Dict[str, float] = {}
-        paper_map: Dict[str, DBPaper] = {}
 
         for ranking in paper_rankings:
-            for rank, (paper, _) in enumerate(ranking, start=1):
-                pid = paper.paper_id
+            for rank, (pid, _) in enumerate(ranking, start=1):
                 rrf_scores[pid] = rrf_scores.get(pid, 0.0) + (1.0 / (k + rank))
-                if pid not in paper_map:
-                    paper_map[pid] = paper
 
         ranked_ids = sorted(rrf_scores.keys(), key=lambda pid: rrf_scores[pid], reverse=True)[:limit]
-        return [(paper_map[pid], rrf_scores[pid]) for pid in ranked_ids]
+        return [(pid, rrf_scores[pid]) for pid in ranked_ids]
 
     async def _chunk_search(
         self,
@@ -345,15 +348,9 @@ class AgentPipeline:
         intent: Optional[QueryIntent] = None,
     ) -> List[RankedPaper]:
         try:
-            weights = {
-                'relevance': 0.7,
-                'authority': 0.3,
-            }
-            return self.ranking_service.rank_papers(
-                query=query,
+            return self.ranking_service.rank_papers_v2(
                 papers=papers,
                 chunks=chunks,
-                weights=weights,
             )
         except Exception as e:
             logger.error(f"Paper ranking failed: {e}")

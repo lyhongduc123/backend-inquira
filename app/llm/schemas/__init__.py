@@ -26,8 +26,8 @@ from .summarization import (
     ProgressiveSummaryResponse
 )
 from .chat import (
-    SearchSummaryResponse,
     QuestionBreakdownResponse,
+    GeneratedQueryPlanResponse,
     ChatResponse,
     QueryIntent,
     RelatedTopicsResponse,
@@ -74,6 +74,7 @@ __all__ = [
     # Chat
     "SearchSummaryResponse",
     "QuestionBreakdownResponse",
+    "GeneratedQueryPlanResponse",
     "ChatResponse",
     "QueryIntent",
     "RelatedTopicsResponse",

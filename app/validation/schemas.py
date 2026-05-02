@@ -13,7 +13,7 @@ class ValidationRequest(CamelModel):
     enhanced_query: Optional[str] = None
     context_chunks: Optional[List[Dict[str, Any]]] = None
     generated_answer: Optional[str] = None
-    model_name: str = "gpt-4o-mini"
+    model_name: str = "gemini/gemma-4-31b-it"
     conversation_id: Optional[int] = None
     message_id: Optional[int] = None
 
@@ -67,13 +67,12 @@ class ValidationResult(CamelModel):
     """Detailed validation result for inspection"""
     query: str
     generated_answer: str
+    # Context snapshot used for validation (matches DB column `context_used`)
     context_used: str
-    
-    # Detailed analysis for frontend display
     text_match: TextMatchAnalysis
     context_evidence: ContextEvidence
     
-    # Metrics
+    # Metrics (match DB naming)
     has_hallucination: bool
     hallucination_count: int = 0
     hallucination_details: Optional[List[str]] = None

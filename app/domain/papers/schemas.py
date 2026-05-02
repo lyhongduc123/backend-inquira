@@ -14,6 +14,15 @@ from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
 
+class PaperFilterOptions(BaseModel):
+    """Filtering options for paper search"""
+    year_from: Optional[int] = Field(None, description="Filter papers published from this year (inclusive)")
+    year_to: Optional[int] = Field(None, description="Filter papers published up to this year (inclusive)")
+    open_access: Optional[bool] = Field(None, description="Filter for open access papers")
+    min_citation_count: Optional[int] = Field(None, description="Filter for papers with at least this many citations")
+    max_citation_count: Optional[int] = Field(None, description="Filter for papers with at most this many citations")
+    fields_of_study: Optional[List[str]] = Field(None, description="Filter for specific fields of study (e.g., Computer Science)")
+    publication_types: Optional[List[str]] = Field(None, description="Filter for specific publication types (e.g., Journal, Conference)")
 
 class PaperUpdateRequest(CamelModel):
     """API request for updating a paper"""
@@ -56,7 +65,6 @@ class PaperMetadata(CamelModel):
     reference_count: Optional[int]
     citation_styles: Optional[Dict[str, str]] = None
     author_trust_score: Optional[float]
-    institutional_trust_score: Optional[float]
     fwci: Optional[float]
     is_open_access: bool
     is_retracted: bool
@@ -82,14 +90,15 @@ class PaperMetadata(CamelModel):
 
         try:
             from sqlalchemy import inspect as sa_inspect
+            from sqlalchemy.orm import NO_VALUE
         except Exception:
             return db_paper.__dict__ if hasattr(db_paper, "__dict__") else {}
 
         state = sa_inspect(db_paper)
-        payload: Dict[str, Any] = {
-            attr.key: getattr(db_paper, attr.key)
-            for attr in state.mapper.column_attrs
-        }
+        payload: Dict[str, Any] = {}
+        for attr in state.mapper.column_attrs:
+            loaded_value = state.attrs[attr.key].loaded_value
+            payload[attr.key] = None if loaded_value is NO_VALUE else loaded_value
         return payload
 
     
@@ -127,21 +136,39 @@ class PaperMetadata(CamelModel):
             Consistent paper metadata dictionary with all fields
         """
         from app.domain.authors.schemas import AuthorMetadata
+        from sqlalchemy import inspect as sa_inspect
         
         paper = ranked_paper.paper
-        year = paper.publication_date.year if paper.publication_date else None
-        logger.debug(f"Paper: {paper}")
-        authors = []
-        for author_paper in paper.authors:
-            if author_paper:
+        authors: List[AuthorMetadata] = []
+        state = sa_inspect(paper)
+        unloaded = set(getattr(state, "unloaded", set()))
+        paper_payload = cls._safe_db_paper_payload(paper)
+        publication_date = paper_payload.get("publication_date")
+        year = publication_date.year if publication_date else None
+
+        # Avoid triggering lazy-load in async contexts that are outside greenlet_spawn.
+        if "authors" not in unloaded:
+            for author_paper in (paper.authors or []):
+                if not author_paper:
+                    continue
                 author_dict = {
-                    "author_id": str(author_paper.author.author_id) if author_paper.author and author_paper.author.author_id is not None else None,
+                    "author_id": (
+                        str(author_paper.author.author_id)
+                        if author_paper.author and author_paper.author.author_id is not None
+                        else None
+                    ),
                     "name": author_paper.author.name if author_paper.author else None,
                     "author_position": author_paper.author_position,
-                   }
+                }
                 authors.append(AuthorMetadata.model_validate(author_dict))
         
-        paper_metadata = cls.model_validate(cls._safe_db_paper_payload(paper))
+        paper_payload["paper_id"] = paper_payload.get("paper_id") or str(ranked_paper.paper_id or "")
+        paper_payload["title"] = paper_payload.get("title") or ""
+        paper_payload["citation_count"] = int(paper_payload.get("citation_count") or 0)
+        paper_payload["is_open_access"] = bool(paper_payload.get("is_open_access") or False)
+        paper_payload["is_retracted"] = bool(paper_payload.get("is_retracted") or False)
+
+        paper_metadata = cls.model_validate(paper_payload)
         paper_metadata.journal = None  # Clear ORM object
         paper_metadata.authors = authors
         paper_metadata.year = year
@@ -211,8 +238,6 @@ class PaperDetailResponse(CamelModel):
     
     # Trust scores
     author_trust_score: Optional[float] = None
-    institutional_trust_score: Optional[float] = None
-    network_diversity_score: Optional[float] = None
     
     # Quality indicators
     is_retracted: bool = False

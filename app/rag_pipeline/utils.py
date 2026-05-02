@@ -33,7 +33,7 @@ def deduplicate_papers_with_rrf(
         Deduplicated list of papers sorted by RRF score (descending)
     """
     rrf_scores = defaultdict(float)
-    paper_map = {}  # Map paper_id to paper object
+    paper_map = {} 
     
     # Calculate RRF scores
     for ranking in paper_rankings:
@@ -43,7 +43,6 @@ def deduplicate_papers_with_rrf(
             if paper_id not in paper_map:
                 paper_map[paper_id] = paper
     
-    # Sort papers by RRF score (descending)
     sorted_paper_ids = sorted(rrf_scores.keys(), key=lambda pid: rrf_scores[pid], reverse=True)
     
     return [paper_map[pid] for pid in sorted_paper_ids]

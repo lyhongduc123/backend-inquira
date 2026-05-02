@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db_session
 from app.validation import schemas
 from app.validation import service
+from app.validation import repository
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
@@ -27,7 +28,7 @@ async def validate_answer(
 
         validation_id: int | None = None
         if request.message_id is not None:
-            db_validation = await service.save_validation_result(
+            db_validation = await repository.save_validation_result(
                 db=db,
                 request=request,
                 result=validation_result,
@@ -60,7 +61,7 @@ async def get_validation_history(
     Use this endpoint to view and analyze validation results for benchmarking.
     """
     try:
-        result = await service.get_validation_history(
+        result = await repository.get_validation_history(
             db=db,
             skip=skip,
             limit=limit,
@@ -87,7 +88,7 @@ async def get_validation_detail(
     View full validation results including hallucination details,
     citation accuracy, and relevance scores.
     """
-    validation = await service.get_validation_detail(db=db, validation_id=validation_id)
+    validation = await repository.get_validation_detail(db=db, validation_id=validation_id)
 
     if not validation:
         raise HTTPException(status_code=404, detail="Validation not found")
@@ -111,7 +112,7 @@ async def get_validation_stats(
     - Statistics by pipeline type (if available)
     """
     try:
-        stats = await service.get_validation_stats(db=db, message_id=message_id)
+        stats = await repository.get_validation_stats(db=db, message_id=message_id)
         return stats
     except Exception as e:
         logger.error(f"Error fetching validation stats: {str(e)}", exc_info=True)
@@ -124,20 +125,9 @@ async def delete_validation(
     db: AsyncSession = Depends(get_db_session)
 ):
     """Delete a validation from history."""
-    from sqlalchemy import delete as sql_delete
-    from app.models.answer_vaidations import DBAnswerValidation
-    
-    result = await db.execute(
-        select(DBAnswerValidation).where(DBAnswerValidation.id == validation_id)
-    )
-    validation = result.scalar_one_or_none()
-    
-    if not validation:
+    deleted = await repository.delete_validation(db=db, validation_id=validation_id)
+
+    if not deleted:
         raise HTTPException(status_code=404, detail="Validation not found")
-    
-    await db.execute(
-        sql_delete(DBAnswerValidation).where(DBAnswerValidation.id == validation_id)
-    )
-    await db.commit()
-    
+
     return {"message": "Validation deleted successfully"}

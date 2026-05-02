@@ -1,8 +1,9 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 def load_prompt(path: str) -> str:
-    with open(f"app/llm/prompts/{path}", "r") as f:
-        return f.read()
+    base_dir = Path(__file__).resolve().parent
+    return (base_dir / path).read_text(encoding="utf-8")
 
 @dataclass(frozen=True)
 class PromptDefinition:
@@ -15,32 +16,47 @@ PROMPT_REGISTRY = {
     "generate_answer": PromptDefinition(
         name="generate_answer",
         version=1,
-        system_template=load_prompt("system/generate_answer.txt"),
+        system_template=load_prompt("system/generate_answer.md"),
     ),
     "generate_no_results_guidance": PromptDefinition(
         name="generate_no_results_guidance",
         version=1,
-        system_template=load_prompt("system/generate_no_results_guidance.txt"),
+        system_template=load_prompt("system/generate_no_results_guidance.md"),
     ),
     "generate_answer_scoped": PromptDefinition(
         name="generate_answer_scoped",
         version=1,
-        system_template=load_prompt("system/generate_answer_scoped.txt"),
+        system_template=load_prompt("system/generate_answer_scoped.md"),
+    ),
+    "generate_sub_agent_summary": PromptDefinition(
+        name="generate_sub_agent_summary",
+        version=1,
+        system_template=load_prompt("system/generate_sub_agent_summary.md"),
+    ),
+    "generate_literature_review_brief": PromptDefinition(
+        name="generate_literature_review_brief",
+        version=1,
+        system_template=load_prompt("system/generate_literature_review_brief.md"),
     ),
     "decompose_query": PromptDefinition(
         name="decompose_query",
         version=1,
-        system_template=load_prompt("system/decompose_query.txt"),
+        system_template=load_prompt("system/decompose_query.md"),
     ),
     "decompose_query_v2": PromptDefinition(
         name="decompose_query_v2",
         version=2,
-        system_template=load_prompt("system/decompose_query_v2.txt"),
+        system_template=load_prompt("system/decompose_query_v2.md"),
+    ),
+    "decompose_query_v3": PromptDefinition(
+        name="decompose_query_v3",
+        version=3,
+        system_template=load_prompt("system/decompose_query_v3.md"),
     ),
     "conversation_summarization": PromptDefinition(
         name="conversation_summarization",
         version=1,
-        system_template=load_prompt("system/summarize_conversation.txt"),
+        system_template=load_prompt("system/summarize_conversation.md"),
     ),
 }
 

@@ -22,14 +22,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import get_llm_service
 from app.core.container import ServiceContainer
-from app.domain.papers import LoadOptions
+from app.domain.papers import LoadOptions, SearchFilterOptions
 from app.domain.chunks.schemas import ChunkRetrieved
 from app.core.singletons import get_ranking_service
 from app.models.papers import DBPaper
 from app.processor.schemas import RankedPaper
 from app.llm.schemas import QueryIntent
 
-from app.processor.services.embeddings import get_embedding_service
 from app.rag_pipeline.schemas import (
     RAGPipelineContext,
     RAGPipelineEvent,
@@ -80,6 +79,7 @@ class DatabasePipeline:
 
         # Core services from container
         self.repository = self.container.paper_repository
+        self.paper_service = self.container.paper_service
         self.chunk_service = self.container.chunk_service
         self.ranking_service = self.container.ranking_service
 
@@ -116,8 +116,7 @@ class DatabasePipeline:
 
         ctx = RAGPipelineContext(
             query=config.query,
-            search_queries=([config.bm25_query] if config.bm25_query else [])
-            + (config.semantic_queries or []),
+            search_queries=config.search_queries or [config.query],
         )
 
         intent = QueryIntent.COMPREHENSIVE_SEARCH
@@ -154,16 +153,17 @@ class DatabasePipeline:
         # IMPORTANT: run sequentially because all repository calls share one AsyncSession.
         # Concurrent DB operations on the same session can leave the transaction in
         # a failed state and cascade errors across subsequent queries.
-        if config.bm25_query:
-            bm25_results = await self._run_bm25_search(config.bm25_query, config.filters)
+        for search_query in (ctx.search_queries or [config.query]):
+            bm25_results = await self._run_bm25_search(search_query, config.filters)
             if bm25_results:
                 paper_rankings.append(bm25_results)
 
-        if config.semantic_queries:
-            for sem_query in config.semantic_queries:
-                semantic_results = await self._run_semantic_search(sem_query, config.filters)
-                if semantic_results:
-                    paper_rankings.append(semantic_results)
+            semantic_results = await self._run_semantic_search(
+                search_query,
+                config.filters,
+            )
+            if semantic_results:
+                paper_rankings.append(semantic_results)
 
         db_papers_with_scores = self._fuse_rankings_with_rrf(
             paper_rankings=paper_rankings,
@@ -280,7 +280,6 @@ class DatabasePipeline:
                     papers=enriched_papers,
                     chunks=ctx.chunks,
                     paper_hybrid_scores=paper_hybrid_scores,
-                    intent=intent,
                 )
 
                 ctx.result_papers = ranked_papers[:config.top_papers]
@@ -330,22 +329,37 @@ class DatabasePipeline:
     ) -> List[tuple[DBPaper, float]]:
         """Run BM25 search in database with optional filters."""
         try:
-            author_name = _get_filter_value(filters, "author")
+            author_name = _get_filter_value(filters, "author_name") or _get_filter_value(filters, "author")
             year_min = _get_filter_value(filters, "year_min")
             year_max = _get_filter_value(filters, "year_max")
             venue = _get_filter_value(filters, "venue")
-            min_citations = _get_filter_value(filters, "min_citations")
-            max_citations = _get_filter_value(filters, "max_citations")
+            min_citations = _get_filter_value(filters, "min_citation_count") or _get_filter_value(filters, "min_citations")
+            max_citations = _get_filter_value(filters, "max_citation_count") or _get_filter_value(filters, "max_citations")
+            journal_quartile = _get_filter_value(filters, "journal_quartile") or _get_filter_value(filters, "journal_rank")
+            field_of_study = _get_filter_value(filters, "field_of_study")
+            fields_of_study: Optional[List[str]] = None
+            if isinstance(field_of_study, str) and field_of_study.strip():
+                fields_of_study = [field_of_study.strip()]
+            else:
+                fields = _get_filter_value(filters, "fields_of_study")
+                if isinstance(fields, list):
+                    fields_of_study = [str(f).strip() for f in fields if str(f).strip()]
 
-            results = await self.repository.bm25_search_papers_with_filters(
-                query=query,
-                limit=100,
+            filter_options = SearchFilterOptions(
                 author_name=author_name,
                 year_min=year_min,
                 year_max=year_max,
                 venue=venue,
                 min_citation_count=min_citations,
                 max_citation_count=max_citations,
+                journal_quartile=journal_quartile,
+                field_of_study=fields_of_study,
+            )
+
+            results = await self.paper_service.bm25_search(
+                query=query,
+                limit=100,
+                filter_options=filter_options,
             )
             logger.debug(
                 f"BM25 search for query '{query[:50]}...' returned {len(results)} papers"
@@ -361,32 +375,38 @@ class DatabasePipeline:
     ) -> List[tuple[DBPaper, float]]:
         """Run semantic search in database with optional filters."""
         try:
-            embedding_service = get_embedding_service()
-            query_embedding = await embedding_service.create_embedding(
-                query, task="search_query"
-            )
-            if not query_embedding:
-                logger.warning("Embedding generation failed for semantic search")
-                return []
-
-            author_name = _get_filter_value(filters, "author")
+            author_name = _get_filter_value(filters, "author_name") or _get_filter_value(filters, "author")
             year_min = _get_filter_value(filters, "year_min")
             year_max = _get_filter_value(filters, "year_max")
             venue = _get_filter_value(filters, "venue")
-            min_citations = _get_filter_value(filters, "min_citations")
-            max_citations = _get_filter_value(filters, "max_citations")
+            min_citations = _get_filter_value(filters, "min_citation_count") or _get_filter_value(filters, "min_citations")
+            max_citations = _get_filter_value(filters, "max_citation_count") or _get_filter_value(filters, "max_citations")
+            journal_quartile = _get_filter_value(filters, "journal_quartile") or _get_filter_value(filters, "journal_rank")
+            field_of_study = _get_filter_value(filters, "field_of_study")
+            fields_of_study: Optional[List[str]] = None
+            if isinstance(field_of_study, str) and field_of_study.strip():
+                fields_of_study = [field_of_study.strip()]
+            else:
+                fields = _get_filter_value(filters, "fields_of_study")
+                if isinstance(fields, list):
+                    fields_of_study = [str(f).strip() for f in fields if str(f).strip()]
 
-            results = await self.repository.semantic_search_papers_with_filters(
-                query_embedding=query_embedding,
-                limit=100,
+            filter_options = SearchFilterOptions(
                 author_name=author_name,
                 year_min=year_min,
                 year_max=year_max,
                 venue=venue,
                 min_citation_count=min_citations,
                 max_citation_count=max_citations,
+                journal_quartile=journal_quartile,
+                field_of_study=fields_of_study,
             )
-            del query_embedding
+
+            results = await self.paper_service.semantic_search(
+                query=query,
+                limit=100,
+                filter_options=filter_options,
+            )
             logger.debug(
                 f"Semantic search for query '{query[:50]}...' returned {len(results)} papers"
             )
@@ -454,7 +474,6 @@ class DatabasePipeline:
         papers: List[DBPaper],
         chunks: List[ChunkRetrieved],
         paper_hybrid_scores: Dict[str, float],
-        intent: Optional[QueryIntent] = None,
     ) -> List[RankedPaper]:
         """Rank papers using comprehensive scoring."""
         try:

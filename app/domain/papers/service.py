@@ -1,6 +1,8 @@
 """Paper service for business logic"""
 
 from typing import List, Optional, Dict, Union, TYPE_CHECKING, Any, Tuple
+
+from app.retriever.service import RetrievalService
 from .schemas import (
     PaperUpdateRequest,
     PaperDetailResponse,
@@ -8,19 +10,22 @@ from .schemas import (
 from app.models.papers import DBPaper
 from app.core.dtos.paper import PaperDTO, PaperEnrichedDTO
 from app.extensions.logger import create_logger
+from app.utils.identifier_normalization import (
+    normalize_external_ids,
+    normalize_fields_of_study,
+    normalize_s2_fields_of_study,
+)
 from app.extensions.bibliography import bibtex_to_multiple_styles
 from sqlalchemy import select
 from app.core.exceptions import NotFoundException
-from app.retriever.provider.semantic_scholar_provider import SemanticScholarProvider
 from datetime import datetime, date
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.models.authors import DBAuthor
 
 if TYPE_CHECKING:
-    from .repository import PaperRepository, LoadOptions
+    from .repository import PaperRepository, LoadOptions, SearchFilterOptions
 
 logger = create_logger(__name__)
-
 
 class PaperService:
     """Service for paper operations"""
@@ -28,7 +33,7 @@ class PaperService:
     def __init__(
         self,
         repository: "PaperRepository",
-        retriever_service,
+        retriever_service: RetrievalService,
         author_service=None,
         institution_service=None,
         journal_service=None,
@@ -91,65 +96,30 @@ class PaperService:
 
     async def link_authors_and_institutions(self, db_paper: DBPaper, authors: List[Dict]):
         """
-        Enrich paper with author and institution data.
-        Orchestrates author and institution services to link them to the paper.
+        Delegate author/institution linking to `PaperLinkingService`.
 
-        Args:
-            db_paper: Database paper entity
-            authors: List of merged author objects with S2 stats and OA institutions
+        The actual linking logic has been moved to `PaperLinkingService.link_authors_and_institutions_for_dbpaper`.
+        This keeps `PaperService` thin and avoids duplicated linking logic.
         """
         if not authors:
             logger.debug(f"No authors data for paper {db_paper.paper_id}")
             return
 
-        # Extract publication year for author-institution tracking
-        pub_year = None
-        if db_paper.publication_date:
-            if isinstance(db_paper.publication_date, (datetime, date)):
-                pub_year = db_paper.publication_date.year
-            elif isinstance(db_paper.publication_date, int):
-                pub_year = db_paper.publication_date
+        try:
+            from app.domain.papers.linking_service import PaperLinkingService
 
-        for position, author_data in enumerate(authors, start=1):
-            # Directly upsert from merged author data
-            db_author = await self.author_service.ingest_author_profile(author_data)
-            if not db_author:
-                continue
-
-            # Process institutions for this author
-            institutions = author_data.get("institutions", [])
-            institution_id = None
-
-            if institutions:
-                # Process first institution (primary affiliation)
-                primary_institution = institutions[0]
-                db_institution = await self.institution_service.upsert_from_openalex(
-                    primary_institution
-                )
-
-                if db_institution:
-                    institution_id = db_institution.id
-
-                    # Link author to institution
-                    await self.author_service.link_author_to_institution(
-                        author=db_author,
-                        institution_id=db_institution.id,
-                        year=pub_year,
-                        is_current=False,
-                    )
-
-            # Link author to paper with position
-            await self.author_service.link_author_to_paper(
-                author=db_author,
-                paper_id=db_paper.id,
-                author_data=author_data,
-                institution_id=institution_id,
-                author_position=position,
+            linking_service = PaperLinkingService(
+                db=self.repository.db,
+                paper_repository=self.repository,
+                author_service=self.author_service,
+                institution_service=self.institution_service,
             )
 
-        logger.info(
-            f"Enriched paper {db_paper.paper_id} with {len(authors)} authors and their institutions"
-        )
+            await linking_service.link_authors_and_institutions_for_dbpaper(
+                db_paper=db_paper, authors=authors
+            )
+        except Exception as e:
+            logger.error(f"Error linking authors/institutions for {db_paper.paper_id}: {e}")
 
     async def link_journal_to_paper(self, db_paper: DBPaper) -> None:
         """
@@ -230,7 +200,7 @@ class PaperService:
 
         Args:
             external_ids: Dictionary of external identifiers (DOI, ArXiv, etc.)
-            source: Source name (e.g., 'SemanticScholar', 'OpenAlex')
+            source: Source name (e.g., 'semantic_scholar', 'open_alex')
 
         Returns:
             DBPaper if exists, None otherwise
@@ -503,7 +473,8 @@ class PaperService:
                                     {
                                         "author_id": db_author.id,
                                         "institution_id": institution_db_id,
-                                        "year": pub_year,
+                                        "start_year": pub_year,
+                                        "end_year": pub_year,
                                         "is_current": False,
                                     }
                                 )
@@ -549,9 +520,7 @@ class PaperService:
                 stmt = (
                     pg_insert(DBAuthorInstitution)
                     .values(author_institution_links)
-                    .on_conflict_do_nothing(
-                        index_elements=["author_id", "institution_id", "year"]
-                    )
+                    .on_conflict_do_nothing()
                 )
                 await self.repository.db.execute(stmt)
                 logger.info(
@@ -622,6 +591,16 @@ class PaperService:
         if create_schema.get("reference_count") is None:
             create_schema["reference_count"] = 0
 
+        create_schema["external_ids"] = normalize_external_ids(
+            create_schema.get("external_ids")
+        )
+        # create_schema["fields_of_study"] = normalize_fields_of_study(
+        #     create_schema.get("fields_of_study")
+        # )
+        # create_schema["s2_fields_of_study"] = normalize_s2_fields_of_study(
+        #     create_schema.get("s2_fields_of_study")
+        # )
+
         return create_schema
 
     async def update_processing_status(
@@ -644,202 +623,131 @@ class PaperService:
             List of similar papers ordered by similarity
         """
         return await self.repository.search_similar_papers(query_embedding, limit)
-    
-    async def hybrid_search_papers(
+
+    async def hybrid_search(
         self,
         query: str,
         limit: int = 100,
         bm25_weight: float = 0.3,
         semantic_weight: float = 0.7,
+        rrf_only: bool = False,
+        filter_options: Optional["SearchFilterOptions"] = None,
     ) -> List[tuple[DBPaper, float]]:
         """
-        Hybrid BM25 + semantic search on papers.
-        
-        Handles:
-        - Query embedding generation
-        - Weight normalization
-        - Calls repository for data access
-        
+        Hybrid search over papers using BM25 + semantic retrieval.
+
         Args:
             query: Search query text
             limit: Maximum number of results
             bm25_weight: Weight for BM25 score (0-1)
             semantic_weight: Weight for semantic score (0-1)
-            
+            rrf_only: If True, use RRF-only fusion (no point-score addition)
+            filter_options: Optional repository-level search filters
+
         Returns:
             List of tuples (paper, combined_score) sorted by relevance
         """
         from app.processor.services.embeddings import get_embedding_service
-        
+
         # Generate query embedding
         embedding_service = get_embedding_service()
-        query_embedding = await embedding_service.create_embedding(query, task="search_query")
-        
+        query_embedding = await embedding_service.create_embedding(
+            query, task="search_query"
+        )
+
         if not query_embedding:
             logger.error("Failed to generate query embedding for papers")
             return []
-        
+
         # Normalize weights
         total_weight = bm25_weight + semantic_weight
+        if total_weight <= 0:
+            logger.warning(
+                "Invalid search weights provided (sum <= 0). Falling back to defaults."
+            )
+            bm25_weight, semantic_weight = 0.3, 0.7
+            total_weight = 1.0
+
         normalized_bm25 = bm25_weight / total_weight
         normalized_semantic = semantic_weight / total_weight
-        
+
         # Call repository for data access
-        papers_with_scores = await self.repository.hybrid_search_papers(
+        papers_with_scores = await self.repository.hybrid_search(
             query=query,
             query_embedding=query_embedding,
             limit=limit,
             bm25_weight=normalized_bm25,
             semantic_weight=normalized_semantic,
+            rrf_only=rrf_only,
+            filter_options=filter_options,
         )
-        
-        logger.info(f"Hybrid paper search returned {len(papers_with_scores)} papers")
+
+        logger.info(f"Hybrid search returned {len(papers_with_scores)} papers")
         return papers_with_scores
-    
-    async def hybrid_search_papers_with_filters(
+
+    async def bm25_search(
         self,
         query: str,
         limit: int = 100,
-        bm25_weight: float = 0.3,
-        semantic_weight: float = 0.7,
-        author_name: Optional[str] = None,
-        year_min: Optional[int] = None,
-        year_max: Optional[int] = None,
-        venue: Optional[str] = None,
-        min_citation_count: Optional[int] = None,
-        max_citation_count: Optional[int] = None,
+        filter_options: Optional["SearchFilterOptions"] = None,
     ) -> List[tuple[DBPaper, float]]:
         """
-        Hybrid BM25 + semantic search with filters.
-        
-        Handles:
-        - Query embedding generation
-        - Weight normalization
-        - Calls repository with filters
-        
+        BM25 lexical search over papers.
+        Uses ParadeDB index if available (repository fallback is built in).
+
         Args:
             query: Search query text
             limit: Maximum number of results
-            bm25_weight: Weight for BM25 score (0-1)
-            semantic_weight: Weight for semantic score (0-1)
-            author_name: Filter by author name
-            year_min: Minimum publication year
-            year_max: Maximum publication year
-            venue: Filter by venue
-            min_citation_count: Minimum citation count
-            max_citation_count: Maximum citation count
-            
+            filter_options: Optional repository-level search filters
+
         Returns:
-            List of tuples (paper, combined_score) sorted by relevance
+            List of tuples (paper, bm25_score) sorted by relevance
         """
-        from app.processor.services.embeddings import get_embedding_service
-        
-        # Generate query embedding
-        embedding_service = get_embedding_service()
-        query_embedding = await embedding_service.create_embedding(query, task="search_query")
-        
-        if not query_embedding:
-            logger.error("Failed to generate query embedding for filtered search")
-            return []
-        
-        # Normalize weights
-        total_weight = bm25_weight + semantic_weight
-        normalized_bm25 = bm25_weight / total_weight
-        normalized_semantic = semantic_weight / total_weight
-        
-        # Call repository with filters
-        papers_with_scores = await self.repository.hybrid_search_papers_with_filters(
+        papers_with_scores = await self.repository.bm25_search(
             query=query,
-            query_embedding=query_embedding,
             limit=limit,
-            bm25_weight=normalized_bm25,
-            semantic_weight=normalized_semantic,
-            author_name=author_name,
-            year_min=year_min,
-            year_max=year_max,
-            venue=venue,
-            min_citation_count=min_citation_count,
-            max_citation_count=max_citation_count,
+            filter_options=filter_options,
         )
-        
-        logger.info(f"Hybrid filtered search returned {len(papers_with_scores)} papers")
+
+        logger.info(f"BM25 search returned {len(papers_with_scores)} papers")
         return papers_with_scores
 
-    async def split_search_papers_with_filters_rrf(
+    async def semantic_search(
         self,
         query: str,
         limit: int = 100,
-        author_name: Optional[str] = None,
-        year_min: Optional[int] = None,
-        year_max: Optional[int] = None,
-        venue: Optional[str] = None,
-        min_citation_count: Optional[int] = None,
-        max_citation_count: Optional[int] = None,
-        rrf_k: int = 60,
+        filter_options: Optional["SearchFilterOptions"] = None,
     ) -> List[tuple[DBPaper, float]]:
         """
-        Split retrieval strategy: BM25 and semantic are run independently,
-        then fused with Reciprocal Rank Fusion (RRF).
+        Pure semantic (vector) search over papers.
 
-        This avoids score-space mixing and is more stable across queries.
+        Args:
+            query: Search query text
+            limit: Maximum number of results
+            filter_options: Optional repository-level search filters
+
+        Returns:
+            List of tuples (paper, semantic_score) sorted by relevance
         """
         from app.processor.services.embeddings import get_embedding_service
 
         embedding_service = get_embedding_service()
-        query_embedding = await embedding_service.create_embedding(query, task="search_query")
-
-        candidate_limit = max(limit * 2, 50)
-
-        bm25_results = await self.repository.bm25_search_papers_with_filters(
-            query=query,
-            limit=candidate_limit,
-            author_name=author_name,
-            year_min=year_min,
-            year_max=year_max,
-            venue=venue,
-            min_citation_count=min_citation_count,
-            max_citation_count=max_citation_count,
+        query_embedding = await embedding_service.create_embedding(
+            query, task="search_query"
         )
 
-        semantic_results: List[tuple[DBPaper, float]] = []
-        if query_embedding:
-            semantic_results = await self.repository.semantic_search_papers_with_filters(
-                query_embedding=query_embedding,
-                limit=candidate_limit,
-                author_name=author_name,
-                year_min=year_min,
-                year_max=year_max,
-                venue=venue,
-                min_citation_count=min_citation_count,
-                max_citation_count=max_citation_count,
-            )
-        else:
-            logger.warning("Embedding generation failed, returning BM25-only results")
-
-        if not bm25_results and not semantic_results:
+        if not query_embedding:
+            logger.error("Failed to generate query embedding for semantic search")
             return []
 
-        rrf_scores: Dict[str, float] = {}
-        paper_map: Dict[str, DBPaper] = {}
-
-        for rank, (paper, _) in enumerate(bm25_results, start=1):
-            rrf_scores[paper.paper_id] = rrf_scores.get(paper.paper_id, 0.0) + (1.0 / (rrf_k + rank))
-            if paper.paper_id not in paper_map:
-                paper_map[paper.paper_id] = paper
-
-        for rank, (paper, _) in enumerate(semantic_results, start=1):
-            rrf_scores[paper.paper_id] = rrf_scores.get(paper.paper_id, 0.0) + (1.0 / (rrf_k + rank))
-            if paper.paper_id not in paper_map:
-                paper_map[paper.paper_id] = paper
-
-        ranked_ids = sorted(rrf_scores.keys(), key=lambda pid: rrf_scores[pid], reverse=True)[:limit]
-        fused_results = [(paper_map[pid], rrf_scores[pid]) for pid in ranked_ids]
-
-        logger.info(
-            f"Split retrieval + RRF returned {len(fused_results)} papers "
-            f"(bm25={len(bm25_results)}, semantic={len(semantic_results)})"
+        papers_with_scores = await self.repository.semantic_search(
+            query_embedding=query_embedding,
+            limit=limit,
+            filter_options=filter_options,
         )
-        return fused_results
+
+        logger.info(f"Semantic search returned {len(papers_with_scores)} papers")
+        return papers_with_scores
 
     async def batch_create_papers_from_schema(
         self, papers: List[Union[PaperDTO, PaperEnrichedDTO]], enrich: bool = True
@@ -959,8 +867,6 @@ class PaperService:
             paper_id, limit=limit, offset=offset
         )
 
-        logger.debug(f"Fetched {len(references_data.get('data', []))} references for paper {paper_id} before filtering")
-        logger.debug(f"References data: {references_data}")
         if "data" in references_data:
             references_data["data"] = [
                 ref
@@ -969,3 +875,31 @@ class PaperService:
             ]        
 
         return references_data
+
+    async def get_paper_citations_from_db(
+        self, paper_id: str, offset: int = 0, limit: int = 100
+    ) -> Dict[str, Any]:
+        """Get papers that cite the given paper from local database."""
+        paper = await self.get_paper(paper_id)
+        if not paper:
+            raise NotFoundException(f"Paper {paper_id} not found")
+
+        return await self.repository.get_paper_citations_from_db(
+            paper_id=paper_id,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def get_paper_references_from_db(
+        self, paper_id: str, offset: int = 0, limit: int = 100
+    ) -> Dict[str, Any]:
+        """Get papers referenced by the given paper from local database."""
+        paper = await self.get_paper(paper_id)
+        if not paper:
+            raise NotFoundException(f"Paper {paper_id} not found")
+
+        return await self.repository.get_paper_references_from_db(
+            paper_id=paper_id,
+            offset=offset,
+            limit=limit,
+        )

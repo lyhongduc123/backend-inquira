@@ -48,7 +48,8 @@ class ChatBackgroundTaskService:
         """
         try:
             # Import here to avoid circular dependency
-            from app.validation.service import validate_answer, save_validation_result
+            from app.validation.service import validate_answer
+            from app.validation.repository import save_validation_result
             
             # Perform validation
             validation_result = await validate_answer(validation_request)

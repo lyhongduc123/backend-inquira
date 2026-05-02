@@ -1,5 +1,7 @@
 import asyncio
-from typing import List, Optional, Union
+from typing import Any, List, Optional
+
+import httpx
 from openai import AsyncOpenAI
 import ollama
 from app.core.config import settings
@@ -10,7 +12,7 @@ logger = create_logger(__name__)
 
 
 class EmbeddingService:
-    """Service for generating embeddings using OpenAI or Ollama (Singleton)"""
+    """Service for generating embeddings using OpenAI, Ollama, or Nomic (Singleton)."""
     
     _instance: Optional['EmbeddingService'] = None
     _initialized: bool = False
@@ -26,27 +28,87 @@ class EmbeddingService:
         Initialize embedding service (only once due to singleton)
         
         Args:
-            provider: "openai" or "ollama". If None, uses settings.EMBEDDING_PROVIDER
+            provider: "openai", "ollama", or "nomic". If None, uses settings.EMBEDDING_PROVIDER
         """
         if self.__class__._initialized:
             return
             
         self.provider = provider or getattr(settings, 'EMBEDDING_PROVIDER', 'openai').lower()
-        
+        self.ollama_client = None
+        self.openai_client = None
+        self.nomic_base_url = "https://api-atlas.nomic.ai"
+
         if self.provider == "ollama":
             self.ollama_client = ollama.Client(host=settings.OLLAMA_BASE_URL)
-            self.openai_client = None
             self.model = settings.OLLAMA_EMBEDDING_MODEL
             self.dimension = 768 
             logger.info(f"Initialized Ollama embedding service with model: {self.model}")
-        else:
-            self.ollama_client = None
+        elif self.provider == "openai":
             self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
             self.model = "text-embedding-ada-002"
             self.dimension = 1536
             logger.info(f"Initialized OpenAI embedding service with model: {self.model}")
+        elif self.provider == "nomic":
+            self.model = settings.EMBEDDING_MODEL_NAME or "nomic-embed-text-v1.5"
+            self.dimension = 768
+            logger.info(f"Initialized Nomic embedding service with model: {self.model}")
+        else:
+            raise ServiceUnavailableException(f"Unsupported embedding provider: {self.provider}")
         
         self.__class__._initialized = True
+
+    def _build_task_texts(self, texts: List[str], task: str) -> List[str]:
+        if self.provider == "ollama" and "nomic" in self.model.lower():
+            return [f"{task}: {text}" for text in texts]
+        return texts
+
+    async def __embed(self, texts: List[str], task: str) -> List[List[float]]:
+        prefixed_texts = self._build_task_texts(texts, task)
+
+        if self.provider == "ollama" and self.ollama_client:
+            ollama_client = self.ollama_client
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: ollama_client.embed(model=self.model, input=prefixed_texts),
+            )
+            embeddings = response.get("embeddings", [])
+            if not isinstance(embeddings, list):
+                raise ServiceUnavailableException("Invalid Ollama embeddings response format")
+            return embeddings
+
+        if self.provider == "openai" and self.openai_client:
+            response = await self.openai_client.embeddings.create(
+                model=self.model,
+                input=prefixed_texts,
+            )
+            return [item.embedding for item in response.data]
+
+        if self.provider == "nomic":
+            headers = {
+                "Authorization": f"Bearer {settings.NOMIC_API_KEY}",
+                "Content-Type": "application/json",
+            }
+            payload: dict[str, Any] = {
+                "texts": prefixed_texts,
+                "model": self.model,
+                "task_type": task,
+            }
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{self.nomic_base_url}/v1/embedding/text",
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+            embeddings = data.get("embeddings", [])
+            if not isinstance(embeddings, list):
+                raise ServiceUnavailableException("Invalid Nomic embeddings response format")
+            return embeddings
+
+        raise ServiceUnavailableException(f"No valid client initialized for provider: {self.provider}")
     
     async def create_embedding(self, text: str, task: str = "search_document") -> List[float]:
         """
@@ -69,33 +131,10 @@ class EmbeddingService:
             ServiceUnavailableException: If embedding service fails
         """
         try:
-            # Add task prefix for nomic-embed-text (improves retrieval quality)
-            if self.provider == "ollama" and "nomic" in self.model.lower():
-                prefixed_text = f"{task}: {text}"
-            else:
-                prefixed_text = text
-            
-            if self.provider == "ollama" and self.ollama_client:
-                # Ollama embeddings are synchronous, run in executor
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: self.ollama_client.embeddings(model=self.model, prompt=prefixed_text) # type: ignore
-                )
-                embedding = response['embedding']
-                return embedding
-            elif self.openai_client:
-                # OpenAI async (no prefix needed)
-                response = await self.openai_client.embeddings.create(
-                    model=self.model,
-                    input=prefixed_text
-                )
-                embedding = response.data[0].embedding
-                return embedding
-            else:
-                error_msg = f"No valid client initialized for provider: {self.provider}"
-                logger.error(error_msg)
-                raise ServiceUnavailableException(error_msg)
+            batch_embeddings = await self.__embed([text], task=task)
+            if not batch_embeddings:
+                raise ServiceUnavailableException("Empty embedding response")
+            return batch_embeddings[0]
             
         except ServiceUnavailableException:
             raise
@@ -107,8 +146,8 @@ class EmbeddingService:
     async def create_embeddings_batch(
         self,
         texts: List[str],
-        batch_size: int = 5,  # Reduced from 10 for better memory management
-        task: str = "search_document"  # Task type for prefix
+        batch_size: int = 5,
+        task: str = "search_document"
     ) -> List[List[float]]:
         """
         Create embeddings for multiple texts in batches with task-aware prefix.
@@ -124,62 +163,17 @@ class EmbeddingService:
         Raises:
             ServiceUnavailableException: If embedding service fails
         """
-        # Add task prefix for nomic-embed-text
-        if self.provider == "ollama" and "nomic" in self.model.lower():
-            prefixed_texts = [f"{task}: {text}" for text in texts]
-        else:
-            prefixed_texts = texts
-        
-        if self.provider == "ollama":
-            # Ollama supports batch embeddings via embed endpoint
-            # Use smaller batches to avoid memory allocation errors
-            embeddings = []
-            
-            for i in range(0, len(prefixed_texts), batch_size):
-                batch = prefixed_texts[i:i + batch_size]
-                
-                try:
-                    # Use embed endpoint with multiple inputs
-                    loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: self.ollama_client.embed(model=self.model, input=batch)  # type: ignore
-                    )
-                    
-                    # Response contains 'embeddings' (list of embeddings)   
-                    batch_embeddings = response.get('embeddings', [])
-                    embeddings.extend(batch_embeddings)
-                    
-                    logger.info(f"Created {len(embeddings)}/{len(texts)} embeddings with Ollama")
-                    
-                except Exception as e:
-                    error_msg = f"Error creating Ollama embeddings for batch {i // batch_size + 1}: {str(e)}"
-                    logger.error(error_msg)
-                    raise ServiceUnavailableException(error_msg)
-            
-            return embeddings
-        
-        # OpenAI batch processing
-        if not self.openai_client:
-            error_msg = "OpenAI client not initialized"
-            logger.error(error_msg)
-            raise ServiceUnavailableException(error_msg)
-        
         embeddings = []
-        
-        for i in range(0, len(prefixed_texts), batch_size):
-            batch = prefixed_texts[i:i + batch_size]
+
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
             
             try:
-                response = await self.openai_client.embeddings.create(
-                    model=self.model,
-                    input=batch
-                )
-                
-                batch_embeddings = [item.embedding for item in response.data]
+                batch_embeddings = await self.__embed(batch, task=task)
                 embeddings.extend(batch_embeddings)
-                
-                logger.info(f"Created embeddings for batch {i // batch_size + 1} ({len(batch)} texts)")
+                logger.info(
+                    f"Created embeddings for batch {i // batch_size + 1} ({len(batch)} texts)"
+                )
                 
             except Exception as e:
                 error_msg = f"Error creating embeddings for batch {i // batch_size + 1}: {str(e)}"
@@ -210,7 +204,7 @@ class EmbeddingService:
         
         async def create_with_semaphore(text: str) -> List[float]:
             async with semaphore:
-                return await self.create_embedding(text)  # Will raise if fails
+                return await self.create_embedding(text)
         
         tasks = [create_with_semaphore(text) for text in texts]
         

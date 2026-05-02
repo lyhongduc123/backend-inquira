@@ -27,6 +27,7 @@ from app.processor.services.embeddings import EmbeddingService, get_embedding_se
 from app.domain.chunks import ChunkService, ChunkRepository
 from app.core.dtos.paper import PaperEnrichedDTO
 from app.utils.transformers import batch_normalized_to_papers
+from app.utils.identifier_normalization import normalize_external_ids
 from app.utils.string import surname
 
 from .retriever import PaperRetriever
@@ -153,7 +154,6 @@ class RetrievalService:
         self,
         query: str,
         semantic_limit: int = 50,
-        final_limit: int = 100,
         filters: Optional[Dict[str, Any]] = None,
         enable_enrichment: bool = True,
     ) -> Tuple[List[PaperEnrichedDTO], Dict[str, Any]]:
@@ -181,8 +181,9 @@ class RetrievalService:
             - papers: List of Paper objects with enriched metadata
             - metadata: Search metadata (counts, sources, etc.)
         """
-        logger.info(f"[HybridSearch] Starting hybrid search for: {query[:50]}...")
-        semantic_provider = self.providers.get(RetrievalServiceType.SEMANTIC)
+        logger.info(f"[HybridSearch] Starting hybrid search for: {query}...")
+        semantic_provider = self.get_provider_as(
+            RetrievalServiceType.SEMANTIC, SemanticScholarProvider)
         semantic_results = []
 
         if semantic_provider:
@@ -231,7 +232,7 @@ class RetrievalService:
             result = await semantic_provider.get_multiple_papers_details(paper_ids)
             if result:
                 normalized_results = [
-                    semantic_provider.normalize_result(r) for r in result
+                    semantic_provider.normalize_result(r) for r in result if r not in (None, {})
                 ]
         except Exception as e:
             logger.error(f"Error fetching papers: {e}")
@@ -243,26 +244,40 @@ class RetrievalService:
         return papers
 
     async def get_paper_citations(
-        self, paper_id: str, limit: int= 100, offset: int = 0
+        self,
+        paper_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        fields: Optional[str] = None,
     ) -> Dict[str, Any]:
         semantic_provider = self.get_provider_as(
             RetrievalServiceType.SEMANTIC, SemanticScholarProvider
         )
        
         result = await semantic_provider.get_citations(
-            paper_id, limit=limit, offset=offset
+            paper_id,
+            limit=limit,
+            offset=offset,
+            fields=fields,
         )
         return result.model_dump() if result else {}
     
     async def get_paper_references(
-        self, paper_id: str, limit: int= 100, offset: int = 0
+        self,
+        paper_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        fields: Optional[str] = None,
     ) -> Dict[str, Any]:
         semantic_provider = self.get_provider_as(
             RetrievalServiceType.SEMANTIC, SemanticScholarProvider
         )
        
         result = await semantic_provider.get_references(
-            paper_id, limit=limit, offset=offset
+            paper_id,
+            limit=limit,
+            offset=offset,
+            fields=fields,
         )
         logger.debug(f"Fetched {len(result.data) if result else 0} references for paper {paper_id}")
         return result.model_dump() if result else {}
@@ -321,17 +336,18 @@ class RetrievalService:
         Returns:
             Enriched results with OpenAlex metadata merged
         """
-        openalex_provider: OpenAlexProvider = self.providers[RetrievalServiceType.OPENALEX]  
+        openalex_provider = self.get_provider_as(
+            RetrievalServiceType.OPENALEX, OpenAlexProvider)
 
         dois = []
         doi_to_semantic = {}
 
         for result in normalized_semantic_results:
-            external_ids = result.external_ids or {}
+            external_ids = normalize_external_ids(result.external_ids or {})
             if not external_ids:
                 continue
-            elif "DOI" in external_ids:
-                doi = external_ids["DOI"].strip().lower() # type: ignore
+            elif "doi" in external_ids:
+                doi = external_ids["doi"].strip().lower() # type: ignore
                 dois.append(doi)
                 doi_to_semantic[doi] = result
         openalex_data = {}
@@ -426,9 +442,10 @@ class RetrievalService:
         if not merged_model.external_ids:
             merged_model.external_ids = {}
 
-        merged_model.external_ids["OpenAlex"] = (
+        merged_model.external_ids["openalex"] = (
             openalex_result.paper_id.removeprefix("https://openalex.org/")
         )
+        merged_model.external_ids = normalize_external_ids(merged_model.external_ids)
 
         return merged_model
 
@@ -471,9 +488,8 @@ class RetrievalService:
             # Extract OpenAlex ID from external_ids (case-insensitive)
             openalex_id = None
             if paper.external_ids:
-                openalex_id = paper.external_ids.get(
-                    "OpenAlex"
-                ) or paper.external_ids.get("openalex")
+                normalized_external_ids = normalize_external_ids(paper.external_ids)
+                openalex_id = normalized_external_ids.get("openalex")
 
             if not openalex_id:
                 logger.info(
@@ -511,7 +527,19 @@ class RetrievalService:
             PDF content as bytes, or None if not available
         """
         try:
-            # S2 API-provided PDF URL
+            normalized_external_ids = normalize_external_ids(paper.external_ids or {})
+            arxiv_id = normalized_external_ids.get("arxiv")
+            if arxiv_id:
+                logger.info(f"Attempting dedicated arXiv PDF download for arXiv ID: {arxiv_id}")
+                arxiv_pdf_url = self.paper_retriever.get_pdf_url_from_arxiv_id(str(arxiv_id))
+                pdf_bytes = await self.paper_retriever.download_pdf(
+                    arxiv_pdf_url,
+                    check_open_access=False,
+                )
+                if pdf_bytes:
+                    return pdf_bytes
+                logger.warning(f"Failed dedicated arXiv download for arXiv ID: {arxiv_id}")
+
             if paper.pdf_url:
                 logger.info(
                     f"Attempting to download PDF from API-provided URL: {paper.pdf_url}"
@@ -521,31 +549,36 @@ class RetrievalService:
                 )
                 if pdfBytes:
                     return pdfBytes
-                else:
-                    logger.warning(f"Failed to download from API URL: {paper.pdf_url}")
-            else:
-                logger.info("Paper has no API-provided PDF URL, checking OpenAlex...")
-                openalex_id = None
-                if paper.external_ids:
-                    openalex_id = paper.external_ids.get(
-                        "OpenAlex"
-                    ) or paper.external_ids.get("openalex")
+                logger.warning(f"Failed to download from API URL: {paper.pdf_url}")
 
-                if not openalex_id:
-                    logger.info(
-                        f"Paper {paper.paper_id} has no OpenAlex ID, skipping TEI XML retrieval"
-                    )
-                    return None
+            logger.info(f"Falling back to OpenAlex content")
+            openalex_id = None
+            if normalized_external_ids:
+                openalex_id = normalized_external_ids.get("openalex")
 
-                pdfBytes = await self.paper_retriever.download_pdf_from_openalex(
-                    openalex_id=openalex_id
+            if not openalex_id:
+                logger.info(
+                    f"Paper {paper.paper_id} has no OpenAlex ID, skipping TEI XML retrieval"
+                )
+                return None
+
+            pdfBytes = await self.paper_retriever.download_pdf_from_openalex(
+                openalex_id=openalex_id
+            )
+            if pdfBytes:
+                return pdfBytes
+            
+            logger.info(f"Trying from DOI...")
+            doi = normalized_external_ids.get("doi")
+            if doi:
+                doi_url = f"https://doi.org/{str(doi).strip()}"
+                pdfBytes = await self.paper_retriever.download_pdf(
+                    doi_url, check_open_access=False
                 )
                 if pdfBytes:
                     return pdfBytes
-
-            logger.info(
-                "Paper is not open-access and has no PDF URL, cannot retrieve full-text"
-            )
+            logger.warning(f"Failed to retrieve PDF for paper {paper.paper_id} from all sources")
+            
             return None
         except Exception as e:
             logger.error(f"Error retrieving PDF for paper {paper.paper_id}: {e}")

@@ -22,6 +22,7 @@ logger = create_logger(__name__)
 class CompletionParams(TypedDict, total=False):
     model: str
     timeout: Optional[Union[float, str, "httpx.Timeout"]]
+    response_format: Optional[Union[dict, Type[BaseModel]]]
     temperature: Optional[float]
     top_p: Optional[float]
     n: Optional[int]
