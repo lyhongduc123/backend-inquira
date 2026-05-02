@@ -11,6 +11,11 @@ from typing import List, Dict, Any, Optional
 from app.core.config import settings
 from app.extensions.logger import create_logger
 from app.retriever.schemas import NormalizedPaperResult, AuthorSchema
+from app.utils.identifier_normalization import (
+    normalize_external_ids,
+    normalize_fields_of_study,
+    normalize_s2_fields_of_study,
+)
 from .base import BaseRetrievalProvider, RetrievalConfig
 from ..schemas import (
     S2AuthorPapersResponse,
@@ -398,7 +403,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
                 "data": [...citing papers...]
             }
         """
-        default_fields = "paperId,corpusId,title,abstract,authors,year,citationCount,venue,isInfluential,contexts,intents"
+        default_fields = "paperId,corpusId,title,abstract,authors,year,citationCount,influentialCitationCount,venue,isInfluential,contexts,intents"
         field_param = fields or default_fields
 
         params = {"offset": offset, "limit": limit, "fields": field_param}
@@ -449,7 +454,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
                 "data": [...referenced papers...]
             }
         """
-        default_fields = "paperId,corpusId,title,abstract,authors,year,citationCount,venue,isInfluential,contexts,intents"
+        default_fields = "paperId,corpusId,title,abstract,authors,year,citationCount,influentialCitationCount,venue,isInfluential,contexts,intents"
         field_param = fields or default_fields
 
         params = {"offset": offset, "limit": limit, "fields": field_param}
@@ -585,6 +590,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "venue",
             "publicationDate",
             "citationCount",
+            "references",
             "url",
             "openAccessPdf",
             "isOpenAccess",
@@ -635,7 +641,7 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             Normalized paper dictionary
         """
         # Extract external IDs
-        external_ids = raw_result.get("externalIds", {}) or {}
+        external_ids = normalize_external_ids(raw_result.get("externalIds", {}) or {})
 
         # Extract open access PDF
         open_access_pdf = raw_result.get("openAccessPdf") or {}
@@ -678,9 +684,11 @@ class SemanticScholarProvider(BaseRetrievalProvider):
 
 
         year = raw_result.get("year")
+        # fields_of_study = normalize_fields_of_study(raw_result.get("fieldsOfStudy", []))
         fields_of_study = raw_result.get("fieldsOfStudy", [])
         publication_types = raw_result.get("publicationTypes", [])
         s2_fields_of_study = raw_result.get("s2FieldsOfStudy", [])
+        # s2_fields_of_study = normalize_s2_fields_of_study(raw_result.get("s2FieldsOfStudy", []))
         references = raw_result.get("references", [])
 
         return NormalizedPaperResult(

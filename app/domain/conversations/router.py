@@ -6,10 +6,12 @@ from typing import Optional, TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from app.db.database import get_db_session
+from app.extensions.logger import create_logger
 from .service import ConversationService
 from .schemas import (
     ConversationCreate,
     ConversationUpdate,
+    ConversationUpdateInternal,
     ConversationDetail,
     ConversationSummary,
     DeleteResponse
@@ -19,6 +21,8 @@ from app.models.users import DBUser
 from app.core.responses import PaginatedData
 from app.core.exceptions import NotFoundException
 from app.core.dependencies import get_container
+
+logger = create_logger(__name__)
 
 if TYPE_CHECKING:
     from app.core.container import ServiceContainer
@@ -32,6 +36,8 @@ async def list_conversations(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     archived: Optional[bool] = Query(None, description="Filter by archive status"),
+    query: Optional[str] = Query(None, description="Search in conversation title/messages"),
+    search_messages: bool = Query(True, description="Include message-level content search"),
     current_user: DBUser = Depends(get_current_user),
     container: "ServiceContainer" = Depends(get_container)
 ) -> PaginatedData[ConversationSummary]:
@@ -42,12 +48,17 @@ async def list_conversations(
     - **page_size**: Number of items per page
     - **archived**: Filter archived/active conversations
     """
+    logger.info(f"Listing conversations for user {current_user.id} with query='{query}', archived={archived}, search_messages={search_messages}, page={page}, page_size={page_size}")
     conversations, total = await container.conversation_service.list_conversations(
         user_id=current_user.id,
         page=page,
         page_size=page_size,
-        archived=archived
+        archived=archived,
+        query=query,
+        search_messages=search_messages,
     )
+    
+    logger.info(f"Retrieved conversations: {len(conversations)}/{total}")
     
     from math import ceil
     total_pages = ceil(total / page_size) if page_size > 0 else 0
@@ -120,16 +131,28 @@ async def update_conversation(
     - **is_archived**: Archive status
     """
     service = ConversationService(db)
-    
-    conversation = await service.update_conversation(
+
+    update_internal = ConversationUpdateInternal(
+        title=request.title,
+        is_archived=request.is_archived,
+        conversation_metadata=request.conversation_metadata,
+    )
+
+    updated = await service.update_conversation(
+        conversation_id=conversation_id,
+        update_data=update_internal,
+    )
+
+    if not updated:
+        raise NotFoundException(f"Conversation {conversation_id} not found")
+
+    conversation = await service.get_conversation(
         conversation_id=conversation_id,
         user_id=current_user.id,
-        update_data=request
     )
-    
     if not conversation:
         raise NotFoundException(f"Conversation {conversation_id} not found")
-    
+
     return conversation
 
 
@@ -151,4 +174,4 @@ async def delete_conversation(
     if not success:
         raise NotFoundException(f"Conversation {conversation_id} not found")
     
-    return DeleteResponse(message="Conversation deleted successfully")
+    return DeleteResponse.model_validate({"message": "Conversation deleted successfully"})

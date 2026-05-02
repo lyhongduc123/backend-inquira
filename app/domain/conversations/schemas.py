@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict, field_serializer
+from pydantic import BaseModel, Field, ConfigDict, field_serializer, field_validator
 from typing import Any, Dict, Optional, List
 from datetime import datetime
 from app.core.model import CamelModel
@@ -45,6 +45,13 @@ class ConversationUpdateInternal(BaseModel):
     conversation_metadata: Optional[Dict[str, Any]] = Field(
         default=None, description="Additional metadata for the conversation"
     )
+    
+    @field_validator("title", mode="before")
+    @classmethod
+    def truncate_title(cls, v):
+        if isinstance(v, str):
+            return v[:200]
+        return v
 
 
 # ------------------ Request and Response Models ------------------
@@ -83,8 +90,8 @@ class Message(CamelModel):
     id: int
     role: str  # "user" or "assistant"
     content: str
-    sources: Optional[List[Dict[str, Any]]] = None  # Deprecated: use paper_snapshots
-    paper_snapshots: Optional[List[Dict[str, Any]]] = None  # Paper metadata snapshots
+    pipeline_type: Optional[str] = None
+    paper_snapshots: Optional[List[Dict[str, Any]]] = None
     progress_events: Optional[List[Dict[str, Any]]] = (
         None  # RAG pipeline progress events
     )

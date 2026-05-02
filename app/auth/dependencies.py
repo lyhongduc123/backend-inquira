@@ -4,10 +4,9 @@ Authentication dependencies for FastAPI route protection
 from typing import Optional
 from fastapi import Depends, Cookie
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.service import decode_access_token, get_user_by_id
 from app.models.users import DBUser
-from app.db.database import get_db_session
+from app.db.database import db_session_context
 from app.core.exceptions import UnauthorizedException, ForbiddenException
 from app.extensions.logger import create_logger
 
@@ -18,12 +17,12 @@ security = HTTPBearer(auto_error=False)
 
 # Cookie name for access token
 ACCESS_TOKEN_COOKIE_NAME = "access_token"
+ANONYMOUS_USER_ID = 1999
 
 
 async def get_current_user(
     access_token_cookie: Optional[str] = Cookie(None, alias=ACCESS_TOKEN_COOKIE_NAME),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    db: AsyncSession = Depends(get_db_session)
 ) -> DBUser:
     """
     Dependency to get the current authenticated user from JWT token
@@ -50,8 +49,6 @@ async def get_current_user(
         token = credentials.credentials
     
     logger.debug(f"Access token cookie: {access_token_cookie[:20] if access_token_cookie else 'None'}...")
-    logger.debug(f"Authorization header: {credentials.credentials[:20] if credentials else 'None'}...")
-    logger.debug(f"Using token from: {'cookie' if access_token_cookie else 'header' if credentials else 'none'}")
     
     if not token:
         raise UnauthorizedException("No authentication token provided")
@@ -63,7 +60,8 @@ async def get_current_user(
     if token_data is None or token_data.user_id is None:
         raise UnauthorizedException("Could not validate credentials")
     
-    user = await get_user_by_id(db, user_id=token_data.user_id)
+    async with db_session_context() as db:
+        user = await get_user_by_id(db, user_id=token_data.user_id)
     
     if user is None:
         raise UnauthorizedException("User not found")
@@ -77,7 +75,6 @@ async def get_current_user(
 async def get_current_user_optional(
     access_token_cookie: Optional[str] = Cookie(None, alias=ACCESS_TOKEN_COOKIE_NAME),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    db: AsyncSession = Depends(get_db_session),
 ) -> Optional[DBUser]:
     """Best-effort auth dependency that returns None when unauthenticated."""
     token = access_token_cookie
@@ -91,11 +88,39 @@ async def get_current_user_optional(
     if token_data is None or token_data.user_id is None:
         return None
 
-    user = await get_user_by_id(db, user_id=token_data.user_id)
+    async with db_session_context() as db:
+        user = await get_user_by_id(db, user_id=token_data.user_id)
     if user is None or not user.is_active:
         return None
 
     return user
+
+
+async def get_current_user_or_anonymous(
+    access_token_cookie: Optional[str] = Cookie(None, alias=ACCESS_TOKEN_COOKIE_NAME),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> DBUser:
+    """Return authenticated user when available, otherwise fallback to seeded anonymous user."""
+    token = access_token_cookie
+    if not token and credentials:
+        token = credentials.credentials
+
+    if token:
+        token_data = decode_access_token(token)
+        if token_data is not None and token_data.user_id is not None:
+            async with db_session_context() as db:
+                user = await get_user_by_id(db, user_id=token_data.user_id)
+            if user is not None and user.is_active:
+                return user
+
+    return DBUser(
+        id=ANONYMOUS_USER_ID,
+        name="Anonymous User",
+        email="anonymous@example.com",
+        provider="email",
+        provider_id="anonymous",
+        is_active=True,
+    )
 
 
 async def get_current_active_user(

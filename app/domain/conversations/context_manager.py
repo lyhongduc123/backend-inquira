@@ -22,11 +22,9 @@ class ConversationContextManager:
     - Smart truncation strategies (sliding window, summarization)
     - Configurable context limits
     """
-    
-    # Token limits (approximate, works for GPT-4, Claude, etc.)
-    DEFAULT_MAX_CONTEXT_TOKENS = 8000  # Leave room for system prompt + response
-    TOKENS_PER_MESSAGE_OVERHEAD = 4  # Role formatting overhead
-    CHARS_PER_TOKEN = 4  # Rough estimate: 1 token ≈ 4 characters
+    DEFAULT_MAX_CONTEXT_TOKENS = 8000 
+    TOKENS_PER_MESSAGE_OVERHEAD = 4  
+    CHARS_PER_TOKEN = 4  
     
     def __init__(
         self,
@@ -150,7 +148,8 @@ class ConversationContextManager:
         self,
         conversation_id: str,
         db_session: AsyncSession,
-        include_current_query: bool = True
+        include_current_query: bool = True,
+        exclude_message_id: Optional[int] = None,
     ) -> Tuple[List[Dict[str, str]], int]:
         """
         Get conversation context from database.
@@ -159,6 +158,7 @@ class ConversationContextManager:
             conversation_id: Conversation ID
             db_session: Database session
             include_current_query: Whether to include the latest message
+            exclude_message_id: Explicit message ID to exclude from history
             
         Returns:
             Tuple of (formatted_messages, total_tokens)
@@ -174,6 +174,9 @@ class ConversationContextManager:
         
         if not messages:
             return [], 0
+
+        if exclude_message_id is not None:
+            messages = [msg for msg in messages if msg.id != exclude_message_id]
         
         if not include_current_query and len(messages) > 0:
             messages = messages[:-1]

@@ -3,6 +3,7 @@ Service layer for conversation management
 """
 
 from typing import Literal, Optional, List, Dict, Any
+from copy import deepcopy
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from .repository import ConversationRepository
@@ -68,20 +69,92 @@ class ConversationService:
         # Create new conversation
         return await self.create_conversation(user_id, title)
 
+    async def get_or_clone_conversation_for_user(
+        self,
+        conversation_id: str,
+        user_id: int,
+    ) -> tuple[Optional[DBConversation], bool]:
+        """
+        Get a conversation for the requesting user.
+
+        If the conversation belongs to another user, deep-clone the conversation
+        and all of its messages into a new conversation owned by `user_id`.
+
+        Returns:
+            (conversation, was_cloned)
+        """
+        source = await self.repo.get(conversation_id)
+        if not source:
+            return None, False
+
+        if source.user_id == user_id:
+            return source, False
+
+        cloned = await self.repo.create(
+            user_id=user_id,
+            title=source.title,
+            conversation_type=source.conversation_type,
+            primary_paper_id=source.primary_paper_id,
+        )
+
+        source_messages = await self.message_service.repo.list_by_conversation(
+            conversation_id=source.conversation_id,
+            skip=0,
+            limit=10000,
+            include_inactive=True,
+        )
+
+        for src_msg in source_messages:
+            await self.message_service.repo.create(
+                conversation_id=cloned.conversation_id,
+                user_id=user_id,
+                content=src_msg.content,
+                role=src_msg.role,
+                message_metadata=deepcopy(src_msg.message_metadata or {}),
+                is_active=src_msg.is_active,
+                status=src_msg.status,
+                pipeline_type=src_msg.pipeline_type,
+                completion_time_ms=src_msg.completion_time_ms,
+            )
+
+        await self.repo.update(
+            conversation_id=cloned.conversation_id,
+            update_data={
+                "message_count": len(source_messages),
+                "conversation_metadata": deepcopy(source.conversation_metadata or {}),
+            },
+        )
+
+        refreshed = await self.repo.get_by_id(cloned.conversation_id, user_id)
+        return refreshed, True
+
     async def list_conversations(
         self,
         user_id: int,
         page: int = 1,
         page_size: int = 20,
         archived: Optional[bool] = None,
+        query: Optional[str] = None,
+        search_messages: bool = True,
     ) -> tuple[List[ConversationSummary], int]:
         """List conversations for user with pagination"""
         skip = (page - 1) * page_size
+        
+        import time
+        start = time.perf_counter()
+        logger.debug("before repo")
         conversations, total = await self.repo.list_by_user(
-            user_id=user_id, archived=archived, skip=skip, limit=page_size
+            user_id=user_id,
+            archived=archived,
+            query=query,
+            search_messages=search_messages,
+            skip=skip,
+            limit=page_size,
         )
-
+        logger.debug(f"repo took {time.perf_counter() - start:.3f}s")
+        start = time.perf_counter()
         summaries = [self._to_summary(conv) for conv in conversations]
+        logger.debug(f"mapping took {time.perf_counter() - start:.3f}s")
         return summaries, total
     
     async def get_a_conversation(
@@ -162,7 +235,6 @@ class ConversationService:
     ) -> int:
         """Save message to conversation and update metadata, optionally linking papers with snapshots and progress events"""
         
-        # Delegate message creation to MessageService
         message = await self.message_service.create_message(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -177,7 +249,6 @@ class ConversationService:
             completion_time_ms=completion_time_ms,
         )
 
-        # Update conversation metadata
         await self.repo.increment_message_count(conversation_id)
 
         if auto_title:
@@ -224,6 +295,7 @@ class ConversationService:
                     "id": msg_resp.id,
                     "role": msg_resp.role,
                     "content": msg_resp.content,
+                    "pipeline_type": msg_resp.pipeline_type,
                     "sources": None,  # Deprecated
                     "paper_snapshots": msg_resp.paper_snapshots,
                     "progress_events": msg_resp.progress_events,
@@ -293,6 +365,7 @@ class ConversationService:
                     "id": msg.id,
                     "role": msg.role,
                     "content": msg.content,
+                    "pipeline_type": msg.pipeline_type,
                     "sources": sources,  # Deprecated, kept for backward compatibility
                     "paper_snapshots": paper_snapshots,  # New unified format
                     "progress_events": progress_events,  # RAG pipeline progress

@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     DATABASE_SYNC_URL: str
     BEIR_TEST_DATABASE_URL: str | None = None 
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 40
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_RECYCLE: int = 1800
+    DB_POOL_PRE_PING: bool = True
     REDIS_URL: str = "redis://localhost:6379/0"
     EMBEDDING_MODEL_NAME: str | None = None
     VECTOR_STORE_PATH: str | None = None
@@ -24,21 +29,26 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str
     OPENROUTER_API_KEY: str
     MISTRALAI_API_KEY: str
-
+    NOMIC_API_KEY: str
+    
     # Ollama settings
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.2"
     OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"
+
     LLM_PROVIDER: str = "ollama"
-    EMBEDDING_PROVIDER: str = "ollama"
+    EMBEDDING_PROVIDER: str = "nomic"
 
     LLM_MAX_TOKENS: int = 4000
     LLM_TOP_P: float = 0.95
 
     # LLM Model Configuration
     LLM_MODEL: list[str] = [
+        "gemini/gemma-4-31b-it",
         "gemini/gemini-2.5-flash",
         "gemini/gemini-2.5-flash-lite",
+        "openrouter/google/gemma-4-31b-it:free",
+        "openrouter/minimax/minimax-m2.5:free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "openrouter/nousresearch/hermes-3-llama-3.1-405b:free",

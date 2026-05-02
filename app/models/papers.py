@@ -179,16 +179,6 @@ class DBPaper(Base):
     author_trust_score: Mapped[float] = mapped_column(
         Float, nullable=True, index=True, comment="Average trust score of all authors"
     )
-    institutional_trust_score: Mapped[float] = mapped_column(
-        Float,
-        nullable=True,
-        comment="Average reputation score of affiliated institutions",
-    )
-    network_diversity_score: Mapped[float] = mapped_column(
-        Float,
-        nullable=True,
-        comment="Cross-institutional collaboration diversity score",
-    )
 
     journal_id: Mapped[int] = mapped_column(
         Integer,

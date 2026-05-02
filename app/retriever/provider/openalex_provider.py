@@ -13,6 +13,7 @@ from app.retriever.schemas import (
     AuthorSchema,
     NormalizedAuthorResult,
 )
+from app.utils.identifier_normalization import normalize_external_ids
 from .base import BaseRetrievalProvider, RetrievalConfig
 
 logger = create_logger(__name__)
@@ -272,6 +273,7 @@ class OpenAlexProvider(BaseRetrievalProvider):
         best_oa_location = raw_result.get("best_oa_location", {})
 
         url = raw_result.get("doi") or raw_result.get("id")
+        external_ids = normalize_external_ids(external_ids)
 
         return NormalizedPaperResult(
             paper_id=raw_result.get("id", ""),

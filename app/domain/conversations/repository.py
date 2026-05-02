@@ -2,7 +2,7 @@
 Repository for conversation database operations
 """
 from typing import Optional, List, Dict, Any
-from sqlalchemy import desc, select, update
+from sqlalchemy import desc, exists, func, or_, select, update
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.conversations import DBConversation
@@ -70,32 +70,57 @@ class ConversationRepository:
         self,
         user_id: int,
         archived: Optional[bool] = None,
+        query: Optional[str] = None,
+        search_messages: bool = True,
         skip: int = 0,
         limit: int = 20
     ) -> tuple[List[DBConversation], int]:
         """List conversations for a user with pagination"""
-        query = select(DBConversation).where(
+        conversation_query = select(DBConversation).where(
             DBConversation.user_id == user_id
         ).where(DBConversation.conversation_type != "single_paper_detail")
+
+        count_query = (
+            select(func.count())
+            .select_from(DBConversation)
+            .where(DBConversation.user_id == user_id)
+            .where(DBConversation.conversation_type != "single_paper_detail")
+        )
         
         if archived is not None:
-            query = query.where(DBConversation.is_archived == archived)
-        
-        # Get total count
-        count_query = select(DBConversation).where(
-            DBConversation.user_id == user_id
-        ).where(DBConversation.conversation_type != "single_paper_detail")
-        if archived is not None:
+            conversation_query = conversation_query.where(
+                DBConversation.is_archived == archived
+            )
             count_query = count_query.where(DBConversation.is_archived == archived)
-        
+
+        normalized_query = (query or "").strip()
+        if normalized_query:
+            query_pattern = f"%{normalized_query}%"
+            title_filter = DBConversation.title.ilike(query_pattern)
+
+            if search_messages:
+                message_filter = exists(
+                    select(DBMessage.id).where(
+                        DBMessage.conversation_id == DBConversation.conversation_id,
+                        DBMessage.is_active == True,
+                        DBMessage.content.ilike(query_pattern),
+                    )
+                )
+                combined_filter = or_(title_filter, message_filter)
+            else:
+                combined_filter = title_filter
+
+            conversation_query = conversation_query.where(combined_filter)
+            count_query = count_query.where(combined_filter)
+
         total_result = await self.db.execute(count_query)
-        total = len(total_result.all())
+        total = total_result.scalar_one() or 0
         
         # Get paginated results
-        query = query.order_by(desc(DBConversation.updated_at))
-        query = query.offset(skip).limit(limit)
+        conversation_query = conversation_query.order_by(desc(DBConversation.updated_at))
+        conversation_query = conversation_query.offset(skip).limit(limit)
         
-        result = await self.db.execute(query)
+        result = await self.db.execute(conversation_query)
         conversations = result.scalars().all()
         
         return list(conversations), total

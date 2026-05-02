@@ -29,7 +29,7 @@ class PaperDTO(BaseModel):
     pdf_url: Optional[str] = None
     is_open_access: bool = False
     open_access_pdf: Optional[Dict[str, Any]] = None
-    source: str = "SemanticScholar"
+    source: str = "semantic_scholar"
     external_ids: Optional[Dict[str, Any]] = None
     tldr: Optional[str] = None  # Renamed from summary
     tldr_embedding: Optional[List[float]] = None  # Renamed from summary_embedding
@@ -44,8 +44,6 @@ class PaperDTO(BaseModel):
     citation_percentile: Optional[Dict[str, Any]] = None
     fwci: Optional[float] = None
     author_trust_score: Optional[float] = None
-    institutional_trust_score: Optional[float] = None
-    network_diversity_score: Optional[float] = None
     journal_id: Optional[int] = None
     is_retracted: bool = False
     language: Optional[str] = None
@@ -176,16 +174,6 @@ class PaperDTO(BaseModel):
             author_trust_score=(
                 db_paper.author_trust_score
                 if hasattr(db_paper, "author_trust_score")
-                else None
-            ),
-            institutional_trust_score=(
-                db_paper.institutional_trust_score
-                if hasattr(db_paper, "institutional_trust_score")
-                else None
-            ),
-            network_diversity_score=(
-                db_paper.network_diversity_score
-                if hasattr(db_paper, "network_diversity_score")
                 else None
             ),
             journal_id=db_paper.journal_id if hasattr(db_paper, "journal_id") else None,

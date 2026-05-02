@@ -144,12 +144,11 @@ class AuthorPaperSummary(CamelModel):
     reference_count: Optional[int]
     citation_styles: Optional[Dict[str, str]] = None
     author_trust_score: Optional[float]
-    institutional_trust_score: Optional[float]
-    fwci: Optional[float]
+    fwci: Optional[float] = None
     is_open_access: bool
     is_retracted: bool
-    topics: Optional[List[Dict[str, Any]]]
-    keywords: Optional[List[Dict[str, Any]]]
+    topics: Optional[List[Dict[str, Any]]] = None
+    keywords: Optional[List[Dict[str, Any]]] = None
     
     class Config:
         from_attributes = True
@@ -232,6 +231,29 @@ class AuthorPublicationsListResponse(CamelModel):
     items: List[AuthorPaperSummary]
 
 
+class AffiliatedInstitutionSummary(CamelModel):
+    """Lightweight institution summary for author affiliations."""
+    id: int
+    institution_id: str
+    name: str
+    display_name: Optional[str] = None
+    country_code: Optional[str] = None
+    country: Optional[str] = None
+
+
+class AuthorInstitutionAffiliation(CamelModel):
+    """Author affiliation record with optional linked institution details."""
+    id: int
+    institution_id: int
+    start_year: Optional[int] = None
+    end_year: Optional[int] = None
+    is_current: bool = False
+    paper_count: int = 0
+    institution: Optional[AffiliatedInstitutionSummary] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
 class AuthorDetailResponse(CamelModel):
     """
     Comprehensive author profile with career metrics and papers.
@@ -263,7 +285,7 @@ class AuthorDetailResponse(CamelModel):
     field_weighted_citation_impact: Optional[float] = None
     retracted_papers_count: Optional[int] = None
     has_retracted_papers: Optional[bool] = None
-    author_institutions: Optional[List[Dict[str, Any]]] = None
+    author_institutions: Optional[List[AuthorInstitutionAffiliation]] = None
     
     is_corresponding_author_frequently: Optional[bool] = None
     average_author_position: Optional[float] = None
@@ -300,7 +322,11 @@ class AuthorDetailWithPapersResponse(AuthorDetailResponse):
     co_authors: List[CoAuthor] = []
     counts_by_year: Optional[Dict[int, Dict[str, int]]] = Field(
         default=None,
-        description="Yearly counts of papers and citations"
+        description="Citation graph yearly counts derived from citation edges"
+    )
+    openalex_counts_by_year: Optional[Dict[int, Dict[str, int]]] = Field(
+        default=None,
+        description="OpenAlex yearly citation counts with prefixed metric keys"
     )
     topics: Optional[List[Dict[str, Any]]] = Field(
         default=None,
@@ -309,12 +335,6 @@ class AuthorDetailWithPapersResponse(AuthorDetailResponse):
     enrichment_status: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Current enrichment status (needs_enrichment/enriching/completed/failed)"
-    )
-    
-    # Computed stats
-    papers_by_year: Optional[Dict[int, int]] = Field(
-        default=None,
-        description="Paper count grouped by year"
     )
 
 

@@ -75,11 +75,8 @@ class InstitutionService:
         country = institution.get("country")  # Full country name
         city = institution.get("city")  # City name
         region = institution.get("region")  # Some institutions have region/state
-        
-        # Extract institution type
         institution_type = institution.get("type")
-        
-        # Build external_ids dictionary
+
         external_ids = {}
         if institution_id_url:
             external_ids["openalex"] = institution_id_url
