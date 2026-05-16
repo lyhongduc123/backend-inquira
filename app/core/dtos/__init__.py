@@ -1,4 +1,7 @@
-"""Core DTOs package - Single source of truth for data transfer objects"""
+"""Compatibility exports for legacy DTO imports.
+
+New code should import paper and author transfer types from their domain modules.
+"""
 from .paper import PaperDTO, PaperEnrichedDTO
 from .author import AuthorDTO
 

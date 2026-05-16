@@ -113,7 +113,6 @@ class PreprocessingRepository:
             select(DBPaper)
             .where(
                 DBPaper.embedding.is_(None),
-                DBPaper.abstract.isnot(None),
             )
             .limit(limit)
         )

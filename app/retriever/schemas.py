@@ -6,8 +6,8 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
 
-from app.core.dtos.author import AuthorDTO as Author
-from app.core.dtos.paper import PaperDTO as Paper
+from app.domain.authors.types import AuthorDTO as Author
+from app.domain.papers.types import PaperDTO as Paper
 
 class PaperSearchRequest(BaseModel):
     """Request for paper search"""

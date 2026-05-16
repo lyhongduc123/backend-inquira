@@ -181,6 +181,20 @@ class PipelineTaskService:
                 .values(**values)
             )
             await self.db.commit()
+
+    async def update_conversation_id(
+        self,
+        task_id: str,
+        conversation_id: str,
+    ) -> None:
+        """Relink task to a resolved conversation id (e.g. cloned conversation)."""
+
+        await self.db.execute(
+            update(DBPipelineTask)
+            .where(DBPipelineTask.task_id == task_id)
+            .values(conversation_id=conversation_id)
+        )
+        await self.db.commit()
     
     async def complete_task(
         self,

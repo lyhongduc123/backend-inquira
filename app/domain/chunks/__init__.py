@@ -1,7 +1,6 @@
-"""
-Chunks module for paper chunk operations
-"""
-from .repository import ChunkRepository
-from .service import ChunkService
+"""Chunks domain package.
 
-__all__ = ["ChunkRepository", "ChunkService"]
+Import services, repositories and types from their concrete modules.
+"""
+
+__all__: list[str] = []

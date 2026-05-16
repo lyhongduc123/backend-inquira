@@ -3,8 +3,8 @@ Utility functions for data transformation between different formats.
 Moved from TransformerService to promote functional programming.
 """
 from typing import Optional, List
-from app.core.dtos.paper import PaperEnrichedDTO, PaperDTO
-from app.core.dtos.author import AuthorDTO
+from app.domain.papers.types import PaperEnrichedDTO, PaperDTO
+from app.domain.authors.types import AuthorDTO
 from app.retriever.schemas import NormalizedPaperResult
 from app.extensions.logger import create_logger
 

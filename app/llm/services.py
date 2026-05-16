@@ -8,7 +8,7 @@ from app.extensions.stream import (
     get_simple_response_reasoning,
 )
 from app.llm import LiteLLMProvider
-from app.llm.prompts import PromptPresets, PromptBuilder
+from app.llm.prompts import PromptPresets, PromptBuilder, PromptKey
 from app.llm.prompts.prompt_configs import PromptConfig
 from app.llm.schemas import (
     QuestionBreakdownResponse,
@@ -28,6 +28,48 @@ class LLMService:
 
     def __init__(self):
         self.llm_provider = LiteLLMProvider()
+        
+    async def stream_response(
+        self,
+        history_messages: List[Dict[str, str]],
+        messages: List[Dict[str, str]],
+    ):
+        """
+        Stream a response with thought process
+
+        Args:
+            history_messages: List of previous messages in the conversation
+            messages: List of messages to send to the LLM
+
+        Yields:
+            Formatted chunks including thought steps and citations
+        """
+        # prompt = context
+
+        print(f"[DEBUG] Starting to stream completion...")
+        chunk_count = 0
+        # messages = PromptBuilder.build(
+        #     prompt_name=prompt_name,
+        #     user_input=prompt,
+        #     additional_content=None,
+        #     dynamic_instruction=None,
+        # )[0]
+        config = PromptPresets.merge_with_overrides(
+            PromptPresets.DEFAULT,
+        )
+
+        final_messages = history_messages + messages if history_messages else messages
+
+        for chunk in self.llm_provider.stream_completion(messages=final_messages, **config):
+            chunk_count += 1
+            if chunk_count % 10 == 0:
+                print(f"[DEBUG] Streamed {chunk_count} chunks so far...")
+            yield chunk
+            
+        print(f"[DEBUG] Completed streaming response with total {chunk_count} chunks.")
+            
+        
+        
 
     async def decompose_user_query(
         self,
@@ -90,11 +132,10 @@ class LLMService:
         Required Search Queries: {num_subtopics or "1-2"}
         """
 
-        messages, version = PromptBuilder.build(
-            prompt_name="decompose_query",
+        messages = PromptBuilder.build(
+            PromptKey.DECOMPOSE_QUERY,
             user_input=prompt,
-            additional_content=None,
-            dynamic_instruction=None,
+            history=conversation_history,
         )
 
         config = PromptPresets.merge_with_overrides(
@@ -258,31 +299,19 @@ class LLMService:
         Returns:
             QuestionBreakdownResponse with structured query decomposition
         """
-        import json
 
-        if conversation_history:
-            history_text = "\n".join(
-                [
-                    f"{msg['role'].upper()}: {msg['content']}"
-                    for msg in conversation_history[-5:]
-                ]
-            )
-            prompt = f"""
-<conversation_context>
-{history_text}
-</conversation_context>
+        prompt = (
+            f'Current user question: "{user_question}"\n'
+            "NOTE: Use the conversation history to resolve pronouns "
+            '(e.g., "it", "they", "this method") in the current question. '
+            "Do not generate searches for previous questions."
+        )
 
-NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "it", "they", "this method") in the user's current question. Do not generate searches for old questions.
-"""
-            prompt += f'Current user Question: "{user_question}"'
-        else:
-            prompt = f'User Question: "{user_question}"'
 
-        messages, version = PromptBuilder.build(
-            prompt_name="decompose_query_v2",
+        messages = PromptBuilder.build(
+            PromptKey.DECOMPOSE_QUERY_V2,
             user_input=prompt,
-            additional_content=None,
-            dynamic_instruction=None,
+            history=conversation_history,
         )
 
         config = PromptPresets.merge_with_overrides(
@@ -392,28 +421,14 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
         import json
 
         if conversation_history:
-            history_text = "\n".join(
-                [
-                    f"{msg['role'].upper()}: {msg['content']}"
-                    for msg in conversation_history[-5:]
-                ]
-            )
-            prompt = f"""
-<conversation_context>
-{history_text}
-</conversation_context>
-
-NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "it", "they", "this method") in the user's current question. Do not generate searches for old questions.
-"""
-            prompt += f'Current user Question: "{user_question}"'
+            prompt = f'Current user Question: "{user_question}"'
         else:
             prompt = f'User Question: "{user_question}"'
 
-        messages, version = PromptBuilder.build(
-            prompt_name="decompose_query_v3",
+        messages = PromptBuilder.build(
+            key=PromptKey.DECOMPOSE_QUERY_V3,
             user_input=prompt,
-            additional_content=None,
-            dynamic_instruction=None,
+            history=conversation_history
         )
 
         config = PromptPresets.merge_with_overrides(
@@ -442,28 +457,6 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
                 str(q).strip() for q in hybrid_queries_raw if str(q).strip()
             ]
 
-        # Backward compatibility: accept older v2-style fields when hybrid_queries
-        # is not present, then normalize to the unified hybrid list.
-        if not hybrid_queries:
-            bm25_query_raw = raw.get("bm25_query")
-            bm25_query = str(bm25_query_raw).strip() if bm25_query_raw else None
-
-            semantic_queries_raw = raw.get("semantic_queries") or []
-            semantic_queries = (
-                [str(q).strip() for q in semantic_queries_raw if str(q).strip()]
-                if isinstance(semantic_queries_raw, list)
-                else []
-            )
-
-            hybrid_queries = []
-            if bm25_query:
-                hybrid_queries.append(bm25_query)
-            hybrid_queries.extend(semantic_queries)
-
-        hybrid_queries = list(dict.fromkeys([q for q in hybrid_queries if q]))
-        if not hybrid_queries:
-            hybrid_queries = [clarified_question]
-
         specific_papers_raw = raw.get("specific_papers") or []
         specific_papers = [
             str(p).strip() for p in specific_papers_raw if str(p).strip()
@@ -482,6 +475,8 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
             skip = [value.strip().lower() for value in skip_raw.split(",") if value.strip()]
         else:
             skip = []
+            
+        has_doi = raw.get("has_doi", False) in [True, "true", "True", "TRUE"]
 
         filters_raw = raw.get("filters")
         filters = filters_raw if isinstance(filters_raw, dict) else {}
@@ -491,6 +486,7 @@ NOTE: Use the <conversation_context> above strictly to resolve pronouns (e.g., "
             clarified_question=clarified_question,
             hybrid_queries=hybrid_queries,
             specific_papers=specific_papers,
+            has_doi=has_doi,
             intent=intent,
             skip=skip,
             filters=filters,
@@ -613,11 +609,9 @@ Summary:"""
             **llm_params,
         )
 
-        messages, version = PromptBuilder.build(
-            prompt_name="conversation_summarization",
+        messages = PromptBuilder.build(
+            key=PromptKey.CONVERSATION_SUMMARIZATION,
             user_input=prompt,
-            additional_content=None,
-            dynamic_instruction=None,
         )
 
         response = self.llm_provider.simple_prompt(
@@ -634,6 +628,7 @@ Summary:"""
 
     async def stream_citation_based_response(
         self,
+        history_messages: List[Dict[str, str]],
         context: str,
         prompt_name: str = "generate_answer",
         temperature: Optional[float] = None,
@@ -644,7 +639,7 @@ Summary:"""
         Stream a citation-based response with thought process
 
         Args:
-            query: User's question
+            history_messages: List of previous messages in the conversation
             context: Retrieved papers/documents (pre-formatted string or list of dicts for backwards compatibility)
 
         Yields:
@@ -655,18 +650,18 @@ Summary:"""
         print(f"[DEBUG] Starting to stream completion...")
         chunk_count = 0
         messages = PromptBuilder.build(
-            prompt_name=prompt_name,
+            key=PromptKey.GENERATE_ANSWER,
             user_input=prompt,
-            additional_content=None,
-            dynamic_instruction=None,
-        )[0]
+        )
 
         config = PromptPresets.merge_with_overrides(
             PromptPresets.FACTUAL,
             **llm_params,
         )
+        
+        final_messages = history_messages + messages
 
-        for chunk in self.llm_provider.stream_completion(messages=messages, **config):
+        for chunk in self.llm_provider.stream_completion(messages=final_messages, **config):
             chunk_count += 1
             if chunk_count % 10 == 0:
                 print(f"[DEBUG] Streamed {chunk_count} chunks so far...")

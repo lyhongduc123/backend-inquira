@@ -6,7 +6,7 @@ These run in background without blocking API responses.
 from typing import Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.extensions.logger import create_logger
-from app.db.database import async_session
+from app.core.db.database import async_session
 
 logger = create_logger(__name__)
 

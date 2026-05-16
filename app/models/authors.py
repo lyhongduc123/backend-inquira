@@ -216,6 +216,6 @@ class DBAuthorInstitution(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("author_id", "institution_id", name="uq_author_institution"),
+        UniqueConstraint("author_id", "institution_id", name="uq_author_institutions"),
         Index("idx_author_institution_temporal", "author_id", "is_current"),
     )

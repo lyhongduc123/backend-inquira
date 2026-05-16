@@ -8,12 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 # Import from domain modules
-from app.domain.papers import PaperRepository, PaperService
-from app.domain.authors import AuthorRepository, AuthorService
+from app.domain.papers.repository import PaperRepository
+from app.domain.papers.service import PaperService
+from app.domain.authors.repository import AuthorRepository
+from app.domain.authors.service import AuthorService
 from app.domain.institutions import InstitutionRepository, InstitutionService
 from app.domain.conversations import ConversationRepository, ConversationService
 
-from app.domain.chunks import ChunkRepository, ChunkService
+from app.domain.chunks.repository import ChunkRepository
+from app.domain.chunks.service import ChunkService
 from app.core.singletons import (
     get_ranking_service,
     get_extractor_service,
@@ -43,8 +46,7 @@ class ServiceContainer:
 
     def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
-        logger.debug("ServiceContainer initialized")
-
+        
     # ==================== REPOSITORIES (Request-scoped) ====================
 
     @cached_property
@@ -82,6 +84,7 @@ class ServiceContainer:
             retriever_service=self.retrieval_service,
             author_service=self.author_service,
             institution_service=self.institution_service,
+            search_service=self.paper_search_service,
         )
         return service
 
@@ -94,7 +97,10 @@ class ServiceContainer:
     @cached_property
     def chunk_service(self) -> ChunkService:
         """Chunk service for business logic"""
-        return ChunkService(repository=self.chunk_repository)
+        return ChunkService(
+            repository=self.chunk_repository,
+            search_service=self.chunk_search_service,
+        )
 
     @cached_property
     def institution_service(self) -> InstitutionService:
@@ -127,7 +133,7 @@ class ServiceContainer:
     @cached_property
     def user_settings_service(self):
         """User settings service for business logic"""
-        from app.user_settings.service import UserSettingsService
+        from app.domain.user_settings.service import UserSettingsService
         return UserSettingsService(db=self.db_session)
     
     @cached_property
@@ -228,6 +234,36 @@ class ServiceContainer:
         """Singleton LLM service for language model interactions"""
         return get_llm_service()
 
+    @cached_property
+    def paper_search_service(self):
+        """Local database paper search service."""
+        from app.search import PaperSearchService
+
+        return PaperSearchService(
+            repository=self.paper_repository,
+            embedding_service=self.embedding_service,
+        )
+
+    @cached_property
+    def chunk_search_service(self):
+        """Local database chunk search service."""
+        from app.search import ChunkSearchService
+
+        return ChunkSearchService(
+            repository=self.chunk_repository,
+            embedding_service=self.embedding_service,
+        )
+
+    @cached_property
+    def local_search_service(self):
+        """Facade for local database search services."""
+        from app.search import LocalSearchService
+
+        return LocalSearchService(
+            paper_search=self.paper_search_service,
+            chunk_search=self.chunk_search_service,
+        )
+
     # ==================== COMPLEX SERVICES (Request-scoped with dependencies) ====================
 
     @cached_property
@@ -291,58 +327,50 @@ class ServiceContainer:
             zeroshot_tagger_service=self.zeroshot_tagger_service,
         )
 
+    @cached_property
+    def preprocessing_single_phase_service(self):
+        """Single phase preprocessing service for conditional phase execution."""
+        from app.processor.preprocessing_single_phase import PreprocessingSinglePhaseService
+
+        return PreprocessingSinglePhaseService(
+            db_session=self.db_session,
+            preprocessing_service=self.preprocessing_service,
+        )
+
     # ==================== ORCHESTRATORS (Request-scoped workflows) ====================
 
     @cached_property
     def pipeline(self):
-        """Pipeline for multi-step orchestration workflows"""
+        """Unified RAG Pipeline with database and scoped search modes"""
         from app.rag_pipeline.pipeline import Pipeline
 
         return Pipeline(
             db_session=self.db_session,
-            repository=self.paper_repository,
-            retriever=self.retrieval_service,
-            processor=self.paper_processor,
-            llm_service=self.llm_service,
-            ranking_service=self.ranking_service,
-        )
-
-    @cached_property
-    def hybrid_pipeline(self):
-        """Hybrid BM25 + Semantic RAG Pipeline"""
-        from app.rag_pipeline.hybrid_pipeline import HybridPipeline
-
-        return HybridPipeline(
-            db_session=self.db_session,
-            repository=self.paper_repository,
-            retriever=self.retrieval_service,
-            processor=self.paper_processor,
-            paper_service=self.paper_service,
-            ranking_service=self.ranking_service,
-            llm_service=self.llm_service,
+            
         )
 
     @cached_property
     def database_pipeline(self):
-        """Database-only search pipeline (no external API calls)"""
-        from app.rag_pipeline.database_pipeline import DatabasePipeline
-
-        return DatabasePipeline(
-            db_session=self.db_session,
-            container=self,
-            llm_service=self.llm_service,
-        )
+        """Database-only search pipeline (routes to unified Pipeline.SEARCH_DATABASE)"""
+        # Return the unified pipeline instance; callers use run_database_search_workflow()
+        return self.pipeline
 
     @cached_property
     def scoped_pipeline(self):
-        """Scoped paper pipeline (search within provided paper IDs only)"""
-        from app.rag_pipeline.scoped_pipeline import ScopedPipeline
+        """Scoped paper pipeline (routes to unified Pipeline.SEARCH_SCOPED)"""
+        # Return the unified pipeline instance; callers use run_scoped_search_workflow()
+        return self.pipeline
+        
+    @cached_property
+    def doi_title_pipeline(self):
+        """DOI/Title-only lookup pipeline for precision retrieval"""
+        from app.rag_pipeline.doi_title_pipeline import DoiTitlePipeline
 
-        return ScopedPipeline(
+        return DoiTitlePipeline(
             db_session=self.db_session,
             container=self,
-            llm_service=self.llm_service,
         )
+        
 
     @cached_property
     def chat_service(self):
@@ -352,9 +380,6 @@ class ServiceContainer:
         return ChatService(
             db_session=self.db_session,
             rag_pipeline=self.pipeline,
-            hybrid_pipeline=self.hybrid_pipeline,
-            database_pipeline=self.database_pipeline,
-            scoped_pipeline=self.scoped_pipeline,
             llm_service=self.llm_service,
             message_service=self.message_service,
             context_manager=self.conversation_context_manager,
@@ -362,19 +387,9 @@ class ServiceContainer:
             background_tasks=self.chat_background_tasks,
         )
 
-    @cached_property
-    def agent_pipeline(self):
-        """Agentic explicit search pipeline"""
-        from app.rag_pipeline.agent_pipeline import AgentPipeline
-
-        return AgentPipeline(
-            db_session=self.db_session,
-            container=self,
-        )
-
     @property
     def chat_agent_service(self):
         """Chat Agent service for Agent Mode"""
-        from app.domain.chat.agent_service import ChatAgentService
+        from app.domain.chat.agent.agent_service import ChatAgentService
 
         return ChatAgentService()

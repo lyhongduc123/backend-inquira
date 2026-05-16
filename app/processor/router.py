@@ -8,159 +8,21 @@ Provides admin-only endpoints to:
 
 **Authentication Required:** All endpoints require admin privileges.
 """
-from fastapi import APIRouter, Depends, BackgroundTasks, Query
-from typing import List, Optional
+from fastapi import APIRouter, Depends, BackgroundTasks
+from typing import Dict, List, Optional, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.db.database import get_db_session, async_session
+from app.core.db.database import get_db_session
 from app.processor.preprocessing_service import PreprocessingService
-from app.auth.dependencies import get_admin_user
-from app.models.users import DBUser
 from app.models.preprocessing_state import DBPreprocessingState
 from app.core.responses import ApiResponse, success_response
-from app.core.dependencies import get_container
-from app.core.container import ServiceContainer
+from app.processor.jobs import preprocessing_jobs
 from pydantic import BaseModel, Field
 from app.extensions.logger import create_logger
 from app.workers.task_queue import get_task_queue
 
 router = APIRouter()
 logger = create_logger(__name__)
-
-
-async def run_bulk_search_task(
-    job_id: str,
-    search_query: str,
-    target_count: int,
-    year_min: Optional[int] = None,
-    year_max: Optional[int] = None,
-    fields_of_study: Optional[List[str]] = None,
-    resume: bool = True
-):
-    """
-    Wrapper to run bulk search preprocessing in background with its own database session.
-    """
-    db = async_session()
-    try:
-        from app.core.container import ServiceContainer
-        container = ServiceContainer(db)
-        await container.preprocessing_service.process_bulk_search(
-            job_id=job_id,
-            search_query=search_query,
-            target_count=target_count,
-            year_min=year_min,
-            year_max=year_max,
-            fields_of_study=fields_of_study,
-            resume=resume
-        )
-    except Exception as e:
-        logger.error(f"Background bulk search task failed: {e}", exc_info=True)
-    finally:
-        await db.close()
-
-
-async def run_repository_task(
-    job_id: str,
-    paper_ids: List[str],
-    resume: bool = True
-):
-    """
-    Wrapper to run repository preprocessing in background with its own database session.
-    """
-    db = async_session()
-    try:
-        from app.core.container import ServiceContainer
-        container = ServiceContainer(db)
-        service = container.preprocessing_service
-        # TODO: Implement process_repository method in PreprocessingService
-        # For now, process papers one by one
-        from app.core.dtos.paper import PaperEnrichedDTO
-        
-        for paper_id in paper_ids:
-            try:
-                # Fetch and enrich paper
-                enriched_papers = await service.retriever.get_multiple_papers([paper_id])
-                if enriched_papers:
-                    paper = enriched_papers[0]
-                    # Create paper if not exists
-                    existing = await service.repository.get_paper_by_id(paper_id)
-                    if not existing:
-                        await service.paper_service.ingest_paper_metadata(paper)
-                    # Process through RAG pipeline
-                    await service.processor.process_single_paper(paper)
-                    logger.info(f"[Repository] Processed paper {paper_id}")
-            except Exception as e:
-                logger.error(f"[Repository] Error processing {paper_id}: {e}")
-                
-    except Exception as e:
-        logger.error(f"Background repository task failed: {e}", exc_info=True)
-    finally:
-        await db.close()
-
-
-async def run_embedding_backfill_task() -> dict:
-    """Queue task wrapper for embedding backfill phase."""
-    db = async_session()
-    try:
-        container = ServiceContainer(db)
-        return await container.preprocessing_phase_service.run_embedding_backfill()
-    finally:
-        await db.close()
-
-
-async def run_citation_linking_task(limit: int, references_limit: int) -> dict:
-    """Queue task wrapper for citation linking phase."""
-    db = async_session()
-    try:
-        container = ServiceContainer(db)
-        return await container.preprocessing_phase_service.run_citation_linking(
-            limit=limit,
-            references_limit=references_limit,
-        )
-    finally:
-        await db.close()
-
-
-async def run_author_metrics_task(
-    only_unprocessed: bool,
-    conflict_threshold_percent: float,
-    batch_size: int,
-) -> dict:
-    """Queue task wrapper for author metric computation phase."""
-    db = async_session()
-    try:
-        container = ServiceContainer(db)
-        return await container.preprocessing_phase_service.run_author_metrics(
-            only_unprocessed=only_unprocessed,
-            conflict_threshold_percent=conflict_threshold_percent,
-            batch_size=batch_size,
-        )
-    finally:
-        await db.close()
-
-
-async def run_paper_tagging_task(
-    limit: int,
-    only_missing_tags: bool,
-    candidate_labels: Optional[List[str]],
-    category: str,
-    min_confidence: float,
-    max_tags_per_paper: int,
-) -> dict:
-    """Queue task wrapper for paper tag computation phase."""
-    db = async_session()
-    try:
-        container = ServiceContainer(db)
-        return await container.preprocessing_phase_service.run_paper_tagging(
-            limit=limit,
-            only_missing_tags=only_missing_tags,
-            candidate_labels=candidate_labels,
-            category=category,
-            min_confidence=min_confidence,
-            max_tags_per_paper=max_tags_per_paper,
-        )
-    finally:
-        await db.close()
 
 
 class StartBulkSearchRequest(BaseModel):
@@ -215,7 +77,8 @@ class CitationLinkingRequest(BaseModel):
     """Request to trigger citation linking phase."""
 
     limit: int = Field(default=200, ge=1, le=2000)
-    references_limit: int = Field(default=200, ge=1, le=1000)
+    references_limit: int = Field(default=50, ge=1, le=1000)
+    citations_limit: int = Field(default=50, ge=1, le=1000)
 
 
 class AuthorMetricsRequest(BaseModel):
@@ -269,7 +132,7 @@ async def start_bulk_search_preprocessing(
     
     # Add to background tasks with its own session
     background_tasks.add_task(
-        run_bulk_search_task,
+        preprocessing_jobs.run_bulk_search_task,
         job_id=request.job_id,
         search_query=request.search_query,
         target_count=request.target_count,
@@ -341,7 +204,7 @@ async def start_repository_preprocessing(
     """
     # Add to background tasks with its own session
     background_tasks.add_task(
-        run_repository_task,
+        preprocessing_jobs.run_repository_task,
         job_id=request.job_id,
         paper_ids=request.paper_ids,
         resume=request.resume
@@ -507,7 +370,7 @@ async def start_embedding_backfill_phase() -> ApiResponse[PreprocessingTaskRespo
     task_queue = get_task_queue()
     task_id = await task_queue.submit(
         "preprocess_embeddings",
-        run_embedding_backfill_task,
+        preprocessing_jobs.run_embedding_backfill_task,
     )
     return success_response(
         data=PreprocessingTaskResponse(
@@ -527,9 +390,10 @@ async def start_citation_linking_phase(
     task_queue = get_task_queue()
     task_id = await task_queue.submit(
         "preprocess_citations",
-        run_citation_linking_task,
+        preprocessing_jobs.run_citation_linking_task,
         limit=request.limit,
         references_limit=request.references_limit,
+        citations_limit=request.citations_limit,
     )
     return success_response(
         data=PreprocessingTaskResponse(
@@ -549,7 +413,7 @@ async def start_author_metrics_phase(
     task_queue = get_task_queue()
     task_id = await task_queue.submit(
         "preprocess_author_metrics",
-        run_author_metrics_task,
+        preprocessing_jobs.run_author_metrics_task,
         only_unprocessed=request.only_unprocessed,
         conflict_threshold_percent=request.conflict_threshold_percent,
         batch_size=request.batch_size,
@@ -572,7 +436,7 @@ async def start_paper_tagging_phase(
     task_queue = get_task_queue()
     task_id = await task_queue.submit(
         "preprocess_paper_tags",
-        run_paper_tagging_task,
+        preprocessing_jobs.run_paper_tagging_task,
         limit=request.limit,
         only_missing_tags=request.only_missing_tags,
         candidate_labels=request.candidate_labels,
@@ -596,16 +460,6 @@ async def get_preprocessing_phase_task_status(task_id: str) -> ApiResponse[dict]
     task_queue = get_task_queue()
     status = await task_queue.get_status(task_id)
     return success_response(data=status or {"task_id": task_id, "status": "not_found"})
-
-
-async def run_content_processing_task(limit: int) -> dict:
-    """Queue task wrapper for Phase 4 content processing."""
-    db = async_session()
-    try:
-        container = ServiceContainer(db)
-        return await container.preprocessing_service.run_content_processing(limit=limit)
-    finally:
-        await db.close()
 
 
 class ContentProcessingRequest(BaseModel):
@@ -632,7 +486,7 @@ async def start_content_processing_phase(
     task_queue = get_task_queue()
     task_id = await task_queue.submit(
         "preprocess_content",
-        run_content_processing_task,
+        preprocessing_jobs.run_content_processing_task,
         limit=request.limit,
     )
     return success_response(
@@ -641,6 +495,114 @@ async def start_content_processing_phase(
             task_type="preprocess_content",
             status="queued",
             message=f"Content processing phase queued (limit={request.limit} papers/batch)",
+        )
+    )
+
+
+class RunPreprocessingPhaseRequest(BaseModel):
+    """Request to run a specific preprocessing phase with conditional execution."""
+
+    run_embed: bool = Field(default=False, description="Run embedding generation phase")
+    run_process_content: bool = Field(default=False, description="Run content processing phase")
+    paper_ids: Optional[List[str]] = Field(default=None, description="Optional list of paper IDs")
+    limit: int = Field(default=50, ge=1, le=500, description="Max papers per iteration")
+
+
+class PreprocessingPhaseResponse(BaseModel):
+    """Response for single phase preprocessing execution."""
+
+    success: bool
+    phase: str
+    message: str
+    details: Optional[Dict[str, Any]] = None
+
+
+@router.post("/preprocess/phase/run", response_model=ApiResponse[PreprocessingPhaseResponse])
+async def run_preprocessing_phase(
+    request: RunPreprocessingPhaseRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db_session),
+) -> ApiResponse[PreprocessingPhaseResponse]:
+    """
+    Run a specific preprocessing phase with conditional execution.
+
+    This endpoint uses if-else logic to execute only the requested preprocessing stage:
+    - run_embed=True: Run only embedding generation
+    - run_process_content=True: Run only PDF content processing
+    - Both True: Run both phases sequentially
+
+    Args:
+        run_embed: If True, execute only embedding generation phase
+        run_process_content: If True, execute only content processing phase
+        paper_ids: Optional list of specific paper IDs to process
+        limit: Maximum papers per batch
+
+    Returns:
+        Execution results for the requested phase(s)
+    """
+    from app.processor.preprocessing_single_phase import PreprocessingSinglePhaseService
+
+    service = PreprocessingSinglePhaseService(db)
+    result = await service.run_preprocessing(
+        run_embed=request.run_embed,
+        run_process_content=request.run_process_content,
+        paper_ids=request.paper_ids,
+        limit=request.limit,
+    )
+
+    if "error" in result:
+        return success_response(
+            data=PreprocessingPhaseResponse(
+                success=False,
+                phase="none",
+                message=result.get("message", "Invalid request"),
+                details=result,
+            )
+        )
+
+    phase_desc = "embedding" if request.run_embed else "content_processing"
+    return success_response(
+        data=PreprocessingPhaseResponse(
+            success=True,
+            phase=phase_desc,
+            message=f"Preprocessing phase '{phase_desc}' completed successfully",
+            details=result,
+        )
+    )
+
+
+@router.post("/preprocess/phase/queue", response_model=ApiResponse[PreprocessingTaskResponse])
+async def queue_preprocessing_phase(
+    request: RunPreprocessingPhaseRequest,
+    background_tasks: BackgroundTasks,
+) -> ApiResponse[PreprocessingTaskResponse]:
+    """
+    Queue a preprocessing phase for background execution.
+
+    Args:
+        run_embed: If True, queue embedding generation phase
+        run_process_content: If True, queue content processing phase
+        paper_ids: Optional list of specific paper IDs to process
+        limit: Maximum papers per batch
+
+    Returns:
+        Task ID for the queued job
+    """
+    task_queue = get_task_queue()
+    task_id = await task_queue.submit(
+        "preprocess_phase",
+        preprocessing_jobs.run_single_preprocessing_phase_task,
+        run_embed=request.run_embed,
+        run_process_content=request.run_process_content,
+        paper_ids=request.paper_ids,
+        limit=request.limit,
+    )
+    return success_response(
+        data=PreprocessingTaskResponse(
+            task_id=task_id,
+            task_type="preprocess_phase",
+            status="queued",
+            message=f"Preprocessing phase queued",
         )
     )
 

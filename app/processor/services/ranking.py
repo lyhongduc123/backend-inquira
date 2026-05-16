@@ -1,4 +1,5 @@
 import math
+from pickle import FALSE
 from typing import List, Dict, Any, Optional, Union
 import gc
 import os
@@ -6,10 +7,10 @@ import os
 import requests
 
 from app.models.papers import DBPaper, DBPaperChunk
-from app.domain.chunks.schemas import ChunkRetrieved
-from app.core.dtos import PaperDTO
+from app.domain.chunks.types import ChunkRetrieved
+from app.domain.papers.types import PaperDTO
 from app.core.config import settings
-from app.processor.schemas import RankedPaper
+from app.search.types import RankedPaper
 from collections import defaultdict
 from sentence_transformers import CrossEncoder
 
@@ -59,7 +60,8 @@ class RankingService:
         
         self._cf_api_token = settings.CF_API_TOKEN
         self._cf_rerank_url = self._build_cf_rerank_url()
-        self._use_cloudflare_reranker = bool(self._cf_api_token and self._cf_rerank_url)
+        self._use_cf = True
+        self._use_cloudflare_reranker = bool(self._cf_api_token and self._cf_rerank_url and self._use_cf) 
 
     def _build_cf_rerank_url(self) -> Optional[str]:
         """Build Cloudflare reranker HTTP route from env/config (cf_breakdown style)."""
@@ -159,7 +161,7 @@ class RankingService:
                 return self._rerank_chunks_cloudflare(query=query, chunks=chunks)
             except Exception as e:
                 logger.error(f"Cloudflare reranker failed: {e}")
-                # Fall back to local reranking if Cloudflare fails
+                self._use_cloudflare_reranker = False  
 
         pairs = [[query, chunk.text] for chunk in chunks]
 
@@ -196,6 +198,7 @@ class RankingService:
         reranked_chunks = sorted(chunks, key=lambda c: c.relevance_score, reverse=True)
 
         return reranked_chunks
+    
 
     def _predict_with_batching(
         self, pairs: List[List[str]], batch_size: int

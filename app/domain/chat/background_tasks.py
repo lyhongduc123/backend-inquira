@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.messages import DBMessage
-from app.validation.schemas import ValidationRequest
+from app.domain.validation.schemas import ValidationRequest
 from app.domain.conversations.summarization_service import ConversationSummarizationService
 from app.domain.conversations.context_manager import ConversationContextManager
 from app.extensions.logger import create_logger
@@ -48,8 +48,8 @@ class ChatBackgroundTaskService:
         """
         try:
             # Import here to avoid circular dependency
-            from app.validation.service import validate_answer
-            from app.validation.repository import save_validation_result
+            from app.domain.validation.service import validate_answer
+            from app.domain.validation.repository import save_validation_result
             
             # Perform validation
             validation_result = await validate_answer(validation_request)
@@ -92,8 +92,7 @@ class ChatBackgroundTaskService:
             if not db_conversation:
                 logger.warning(f"Conversation {conversation_id} not found for summarization")
                 return
-            
-            # Load messages as a list
+
             result = await db_session.execute(
                 select(DBMessage)
                 .where(DBMessage.conversation_id == conversation_id)
@@ -104,14 +103,12 @@ class ChatBackgroundTaskService:
             if not messages:
                 return
             
-            # Get existing summary
             existing_summary = (
                 await self.summarization_service.get_conversation_summary(
                     db_conversation
                 )
             )
             
-            # Check if summarization is needed
             if self.context_manager.should_summarize_conversation(
                 messages, existing_summary
             ):
@@ -135,7 +132,7 @@ class ChatBackgroundTaskService:
         Args:
             validation_request: Validation request
         """
-        from app.db.database import get_db_session
+        from app.core.db.database import get_db_session
         
         try:
             async for session in get_db_session():
@@ -158,7 +155,7 @@ class ChatBackgroundTaskService:
         Args:
             conversation_id: Conversation ID
         """
-        from app.db.database import get_db_session
+        from app.core.db.database import get_db_session
         
         try:
             async for session in get_db_session():

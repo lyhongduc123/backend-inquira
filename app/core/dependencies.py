@@ -6,7 +6,7 @@ from fastapi import Depends
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.database import get_db_session
+from app.core.db.database import get_db_session
 from app.core.container import ServiceContainer
 
 

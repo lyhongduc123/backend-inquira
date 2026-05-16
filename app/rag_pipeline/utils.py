@@ -1,7 +1,7 @@
 from typing import List, Any, Dict, Tuple
 from collections import Counter, defaultdict
 from app.models.papers import DBPaper
-from app.core.dtos import PaperDTO
+from app.domain.papers.types import PaperDTO
 from app.retriever.schemas import NormalizedPaperResult
 
 def deduplicate_papers(papers: List[PaperDTO]) -> List[PaperDTO]:

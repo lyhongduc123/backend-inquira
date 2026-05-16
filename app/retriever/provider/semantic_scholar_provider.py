@@ -143,19 +143,21 @@ class SemanticScholarProvider(BaseRetrievalProvider):
     async def get_bulk_paper(
         self,
         query: str,
+        limit: Optional[int] = None,
         token: Optional[str] = None,
         fields_of_study: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Get bulk paper details for a search query.
 
         Args:
             query: Search query
+            limit: Maximum number of papers to return
             token: Continuation token for pagination
             fields_of_study: Optional list of fields of study to filter
 
         Returns:
-            List of paper details dictionaries
+            Raw bulk-search response with data and optional continuation token.
         """
 
         fields = [
@@ -186,6 +188,8 @@ class SemanticScholarProvider(BaseRetrievalProvider):
             "fields": ",".join(fields),
             "sort": "citationCount:desc",
         }
+        if limit:
+            params["limit"] = str(max(1, min(limit, 1000)))
 
         if token:
             params["token"] = token
@@ -210,7 +214,11 @@ class SemanticScholarProvider(BaseRetrievalProvider):
                 data = response.json()
 
                 results = data.get("data", [])
-                return results
+                return {
+                    "data": results,
+                    "token": data.get("token"),
+                    "total": data.get("total", len(results)),
+                }
 
         except httpx.HTTPError as e:
             logger.error(f"[{self.name}] API error: {e}")

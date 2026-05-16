@@ -16,7 +16,7 @@ from .schemas import (
     ChatSubmitResponse,
     PipelineTaskResponse
 )
-from app.db.database import get_db_session
+from app.core.db.database import get_db_session
 from app.extensions.stream import stream_event
 from app.extensions.logger import create_logger
 from app.auth.dependencies import get_current_user, get_current_user_or_anonymous
@@ -25,6 +25,7 @@ from app.core.responses import ApiResponse, success_response
 from app.core.exceptions import InternalServerException, NotFoundException, ForbiddenException
 from app.core.dependencies import get_container
 from app.domain.chat.live_stream import get_live_task_stream_broker
+from app.domain.chat.conversation_setup import resolve_conversation_for_user
 
 if TYPE_CHECKING:
     from app.core.container import ServiceContainer
@@ -87,88 +88,6 @@ async def stream_message(
         logger.error(f"Stream endpoint error: {e}", exc_info=True)
         raise InternalServerException(f"Failed to stream message: {str(e)}")
 
-@router.post("/stream/paper/{paper_id}")
-async def stream_paper_detail(
-    http_request: Request,
-    paper_id: str,
-    request: PaperDetailChatRequest,
-    db: AsyncSession = Depends(get_db_session),
-    current_user: DBUser = Depends(get_current_user),
-    container: "ServiceContainer" = Depends(get_container)
-) -> StreamingResponse:
-    """
-    Chat about a specific paper with full-text context.
-    
-    This endpoint enables deep-dive conversations about a single paper:
-    - Retrieves full PDF/TEI content if available
-    - Uses paper's chunks for precise context
-    - Maintains conversation history specific to this paper
-    - Auto-creates conversation on first message
-    
-    Returns Server-Sent Events (SSE) stream with:
-    1. event: conversation - Conversation metadata (with conversation_type and primary_paper_id)
-    2. event: paper - Full paper metadata
-    3. event: chunk - Response text chunks
-    4. event: done - Completion signal
-    
-    - **paper_id**: The paper's unique identifier
-    - **query**: User's question about the paper
-    - **conversation_id**: Optional ID of existing conversation (null = create new)
-    """
-    from app.domain.chat.paper_detail_service import PaperDetailChatService
-    
-    paper_chat_service = PaperDetailChatService(db_session=db)
-    
-    try:
-        request_id = getattr(http_request.state, 'request_id', None)
-        logger.info(
-            f"Paper detail chat called by user {current_user.id} for paper {paper_id}",
-            extra={"user_id": current_user.id, "paper_id": paper_id, "request_id": request_id}
-        )
-        
-        # Verify paper exists
-        paper = await container.paper_service.get_paper(paper_id)
-        if not paper:
-            raise NotFoundException(f"Paper {paper_id} not found")
-        
-        # Get or create conversation for this paper
-        if request.conversation_id:
-            conversation = await container.conversation_service.get_conversation(
-                conversation_id=request.conversation_id,
-                user_id=current_user.id
-            )
-            if not conversation:
-                raise NotFoundException(f"Conversation {request.conversation_id} not found")
-        else:
-            # Auto-create conversation
-            conversation = await container.conversation_service.get_or_create_paper_conversation(
-                user_id=current_user.id,
-                paper_id=paper_id,
-                paper_title=paper.title
-            )
-        
-        # Stream paper detail chat
-        return StreamingResponse(
-            paper_chat_service.stream_chat(
-                paper_id=paper_id,
-                query=request.query,
-                conversation_id=conversation.conversation_id,
-                user_id=current_user.id,
-                model=request.model
-            ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache, no-transform",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    except NotFoundException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Paper detail chat error: {e}", exc_info=True)
-        raise InternalServerException(f"Failed to stream paper chat: {str(e)}")
-
 
 @router.post("/agent", response_model=ApiResponse[ChatSubmitResponse])
 async def submit_agent_chat_message(
@@ -182,21 +101,16 @@ async def submit_agent_chat_message(
     Identical interface to /submit. Returns a task_id to connect to /stream/{task_id}.
     """
     try:
-        # Get or create conversation
-        if request.conversation_id:
-            source_or_clone, _ = await container.conversation_service.get_or_clone_conversation_for_user(
-                conversation_id=request.conversation_id,
-                user_id=current_user.id,
-            )
-            if not source_or_clone:
-                raise NotFoundException(f"Conversation {request.conversation_id} not found")
-            conversation_id = source_or_clone.conversation_id
-        else:
-            conversation = await container.conversation_service.create_conversation(
-                user_id=current_user.id,
-                title=request.query[:100]
-            )
-            conversation_id = conversation.conversation_id
+        setup_result = await resolve_conversation_for_user(
+            conversation_service=container.conversation_service,
+            user_id=current_user.id,
+            conversation_id=request.conversation_id,
+            new_conversation_title=request.query[:100],
+        )
+        if not setup_result:
+            raise NotFoundException(f"Conversation {request.conversation_id} not found")
+
+        conversation_id = setup_result.conversation_id
 
         request_filters = (
             request.filters.model_dump(exclude_none=True)
@@ -214,8 +128,6 @@ async def submit_agent_chat_message(
             client_message_id=request.client_message_id
         )
         
-        # Submit task to background worker directly for the isolated agent service
-        # (This avoids modifying the existing worker queues directly to keep it 100% parallel/isolated)
         import asyncio
         asyncio.create_task(
             container.chat_agent_service.stream_agent_workflow(

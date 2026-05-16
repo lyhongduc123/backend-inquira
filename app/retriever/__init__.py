@@ -13,7 +13,7 @@ from .provider import (
     BaseRetrievalProvider,
 )
 from .schemas import NormalizedPaperResult, NormalizedAuthorResult, AuthorSchema
-from .retriever import PaperRetriever
+from .external_retriever import ExternalPaperRetriever
 from .service import RetrievalService, RetrievalServiceType
 
 # Export all components
@@ -36,5 +36,5 @@ __all__ = [
     'AuthorSchema',
     
     # Utilities
-    'PaperRetriever',
+    'ExternalPaperRetriever',
 ]

@@ -1,14 +1,6 @@
-"""
-Authors module for managing author entities and relationships.
-"""
-from .service import AuthorService
-from .repository import AuthorRepository
-from .schemas import AuthorMetadata, AuthorDetailResponse, AuthorDetailWithPapersResponse
+"""Authors domain package.
 
-__all__ = [
-    "AuthorService",
-    "AuthorRepository",
-    "AuthorMetadata",
-    "AuthorDetailResponse",
-    "AuthorDetailWithPapersResponse",
-]
+Import services, repositories, schemas and types from their concrete modules.
+"""
+
+__all__: list[str] = []

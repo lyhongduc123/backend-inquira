@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
-from app.db.database import get_db_session
+from app.core.db.database import get_db_session
 from app.core.dependencies import get_container
 from app.core.container import ServiceContainer
 from .schemas import (
@@ -338,13 +338,17 @@ async def get_author_publications(
         sort_order=sort_order,
         refresh_live_metrics=refresh_live_metrics,
     )
+    # for paper in papers:
+    #     logger.debug(f"publication: {paper.title}, journal: {paper.journal}")
 
     items = [
         AuthorPaperSummary.model_validate(
-            PaperMetadata.from_db_model(paper).model_dump()
+            PaperMetadata.from_db_model(paper).model_dump(by_alias=True)
         )
         for paper in papers
     ]
+    # for item in items:
+    #     logger.debug(f"publication summary: {item.title}, journal: {item.journal}")
     return AuthorPublicationsListResponse(
         total=total,
         offset=offset,

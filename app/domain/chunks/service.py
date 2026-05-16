@@ -14,8 +14,18 @@ logger = create_logger(__name__)
 class ChunkService:
     """Service for chunk operations"""
     
-    def __init__(self, repository: ChunkRepository):
+    def __init__(self, repository: ChunkRepository, search_service=None):
         self.repository = repository
+        self._search_service = search_service
+
+    @property
+    def search_service(self):
+        """Lazy load local chunk search service."""
+        if self._search_service is None:
+            from app.search import ChunkSearchService
+
+            self._search_service = ChunkSearchService(self.repository)
+        return self._search_service
     
     async def create_chunk(
         self,
@@ -108,8 +118,8 @@ class ChunkService:
         query: str,
         limit: int = 40,
         paper_ids: Optional[List[str]] = None,
-        bm25_weight: float = 0.4,
-        semantic_weight: float = 0.6,
+        bm25_weight: float = 0.3,
+        semantic_weight: float = 0.7,
     ) -> List[ChunkRetrieved]:
         """
         Hybrid BM25 + semantic search on chunks.
@@ -130,36 +140,10 @@ class ChunkService:
         Returns:
             List of ChunkRetrieved with relevance scores
         """
-        from app.processor.services.embeddings import get_embedding_service
-
-        embedding_service = get_embedding_service()
-        query_embedding = await embedding_service.create_embedding(query, task="search_query")
-        
-        if not query_embedding:
-            logger.error("Failed to generate query embedding for chunks")
-            return []
-        
-        total_weight = bm25_weight + semantic_weight
-        normalized_bm25 = bm25_weight / total_weight
-        normalized_semantic = semantic_weight / total_weight
-        
-        chunks_with_scores = await self.repository.hybrid_search_chunks(
+        return await self.search_service.hybrid_search(
             query=query,
-            query_embedding=query_embedding,
             limit=limit,
             paper_ids=paper_ids,
-            bm25_weight=normalized_bm25,
-            semantic_weight=normalized_semantic,
+            bm25_weight=bm25_weight,
+            semantic_weight=semantic_weight,
         )
-        
-        # Convert to ChunkRetrieved
-        results = []
-        for chunk, score in chunks_with_scores:
-            chunk_dict = Chunk.model_validate(chunk, from_attributes=True).model_dump()
-            chunk_dict['relevance_score'] = score
-            chunk_dict['embedding'] = None
-            chunk_retrieved = ChunkRetrieved.model_validate(chunk_dict)
-            results.append(chunk_retrieved)
-        
-        logger.info(f"Hybrid chunk search returned {len(results)} chunks")
-        return results

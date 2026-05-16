@@ -60,16 +60,16 @@ def generate_otp_code() -> str:
 
 async def send_otp_email(email: str, otp_code: str, mode: OtpMode, expires_minutes: int) -> None:
     """Send OTP email using Resend API; fallback to logging when not configured."""
-    subject = "Your Exegent verification code"
+    subject = f"Your {settings.APP_NAME} verification code"
     action = "sign in" if mode == "login" else "create your account"
     text_body = (
         f"Your verification code is: {otp_code}\n\n"
-        f"Use this code to {action} on Exegent.\n"
+        f"Use this code to {action} on {settings.APP_NAME}.\n"
         f"The code expires in {expires_minutes} minutes."
     )
     html_body = (
         "<div style='font-family:Arial,sans-serif;line-height:1.5'>"
-        "<h2>Your Exegent verification code</h2>"
+        f"<h2>Your {settings.APP_NAME} verification code</h2>"
         f"<p>Use this code to {action}:</p>"
         f"<p style='font-size:24px;font-weight:700;letter-spacing:2px'>{otp_code}</p>"
         f"<p>This code expires in {expires_minutes} minutes.</p>"

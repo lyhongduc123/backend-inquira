@@ -8,7 +8,7 @@ from .schemas import (
     PaperDetailResponse,
 )
 from app.models.papers import DBPaper
-from app.core.dtos.paper import PaperDTO, PaperEnrichedDTO
+from app.domain.papers.types import PaperDTO, PaperEnrichedDTO
 from app.extensions.logger import create_logger
 from app.utils.identifier_normalization import (
     normalize_external_ids,
@@ -21,9 +21,10 @@ from app.core.exceptions import NotFoundException
 from datetime import datetime, date
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.models.authors import DBAuthor
+from .repository import LoadOptions
 
 if TYPE_CHECKING:
-    from .repository import PaperRepository, LoadOptions, SearchFilterOptions
+    from .repository import PaperRepository,  SearchFilterOptions
 
 logger = create_logger(__name__)
 
@@ -37,6 +38,7 @@ class PaperService:
         author_service=None,
         institution_service=None,
         journal_service=None,
+        search_service=None,
     ):
         self.repository = repository
         self.retriever_service = retriever_service
@@ -44,6 +46,7 @@ class PaperService:
         self._author_service = author_service
         self._institution_service = institution_service
         self._journal_service = journal_service
+        self._search_service = search_service
 
     @property
     def author_service(self):
@@ -71,6 +74,15 @@ class PaperService:
 
             self._journal_service = JournalService(self.repository.db)
         return self._journal_service
+
+    @property
+    def search_service(self):
+        """Lazy load local paper search service."""
+        if self._search_service is None:
+            from app.search import PaperSearchService
+
+            self._search_service = PaperSearchService(self.repository)
+        return self._search_service
 
     async def batch_check_existing_papers(
         self, paper_ids: List[str]
@@ -180,10 +192,9 @@ class PaperService:
     ) -> Optional[PaperDetailResponse]:
         """Get a single paper by paper_id"""
         if load_options is None:
-            from .repository import LoadOptions
-
             load_options = LoadOptions.with_journal()
 
+        logger.debug(f"Fetching paper {paper_id} with load options: {load_options}")
         paper = await self.repository.get_single_paper(
             paper_id, load_options=load_options
         )
@@ -192,7 +203,7 @@ class PaperService:
         return PaperDetailResponse.model_validate(paper)
 
     async def get_paper_by_external_ids(
-        self, external_ids: dict, source: str
+        self, external_ids: dict
     ) -> Optional[DBPaper]:
         """
         Check if paper exists in database by external IDs and source.
@@ -205,7 +216,18 @@ class PaperService:
         Returns:
             DBPaper if exists, None otherwise
         """
-        return await self.repository.get_paper_by_external_ids(external_ids, source)
+        return await self.repository.get_paper_by_external_ids(external_ids)
+
+    async def get_papers_by_dois(
+        self,
+        dois: List[str],
+        load_options: Optional["LoadOptions"] = None,
+    ) -> List[DBPaper]:
+        """Batch load papers by DOI with optional eager-loaded relationships."""
+        return await self.repository.get_papers_by_dois(
+            dois,
+            load_options=load_options,
+        )
 
     async def get_paper_by_db_id(self, id: int) -> Optional[PaperDetailResponse]:
         """Get a single paper by database ID"""
@@ -647,43 +669,14 @@ class PaperService:
         Returns:
             List of tuples (paper, combined_score) sorted by relevance
         """
-        from app.processor.services.embeddings import get_embedding_service
-
-        # Generate query embedding
-        embedding_service = get_embedding_service()
-        query_embedding = await embedding_service.create_embedding(
-            query, task="search_query"
-        )
-
-        if not query_embedding:
-            logger.error("Failed to generate query embedding for papers")
-            return []
-
-        # Normalize weights
-        total_weight = bm25_weight + semantic_weight
-        if total_weight <= 0:
-            logger.warning(
-                "Invalid search weights provided (sum <= 0). Falling back to defaults."
-            )
-            bm25_weight, semantic_weight = 0.3, 0.7
-            total_weight = 1.0
-
-        normalized_bm25 = bm25_weight / total_weight
-        normalized_semantic = semantic_weight / total_weight
-
-        # Call repository for data access
-        papers_with_scores = await self.repository.hybrid_search(
+        return await self.search_service.hybrid_search(
             query=query,
-            query_embedding=query_embedding,
             limit=limit,
-            bm25_weight=normalized_bm25,
-            semantic_weight=normalized_semantic,
+            bm25_weight=bm25_weight,
+            semantic_weight=semantic_weight,
             rrf_only=rrf_only,
             filter_options=filter_options,
         )
-
-        logger.info(f"Hybrid search returned {len(papers_with_scores)} papers")
-        return papers_with_scores
 
     async def bm25_search(
         self,
@@ -703,14 +696,11 @@ class PaperService:
         Returns:
             List of tuples (paper, bm25_score) sorted by relevance
         """
-        papers_with_scores = await self.repository.bm25_search(
+        return await self.search_service.bm25_search(
             query=query,
             limit=limit,
             filter_options=filter_options,
         )
-
-        logger.info(f"BM25 search returned {len(papers_with_scores)} papers")
-        return papers_with_scores
 
     async def semantic_search(
         self,
@@ -729,25 +719,11 @@ class PaperService:
         Returns:
             List of tuples (paper, semantic_score) sorted by relevance
         """
-        from app.processor.services.embeddings import get_embedding_service
-
-        embedding_service = get_embedding_service()
-        query_embedding = await embedding_service.create_embedding(
-            query, task="search_query"
-        )
-
-        if not query_embedding:
-            logger.error("Failed to generate query embedding for semantic search")
-            return []
-
-        papers_with_scores = await self.repository.semantic_search(
-            query_embedding=query_embedding,
+        return await self.search_service.semantic_search(
+            query=query,
             limit=limit,
             filter_options=filter_options,
         )
-
-        logger.info(f"Semantic search returned {len(papers_with_scores)} papers")
-        return papers_with_scores
 
     async def batch_create_papers_from_schema(
         self, papers: List[Union[PaperDTO, PaperEnrichedDTO]], enrich: bool = True

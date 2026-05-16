@@ -90,7 +90,7 @@ __all__ = [
     "UsageStatistics",
 ]
 
-# Lazy initialization to avoid slow startup
+
 _llm_service: Optional["LLMService"] = None
 
 def get_llm_service() -> "LLMService":

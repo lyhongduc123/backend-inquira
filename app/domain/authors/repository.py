@@ -317,7 +317,8 @@ class AuthorRepository:
             .join(DBAuthorPaper, DBPaper.id == DBAuthorPaper.paper_id)
             .where(DBAuthorPaper.author_id == author.id)
             .options(
-                joinedload(DBPaper.journal), 
+                joinedload(DBPaper.journal),
+                joinedload(DBPaper.conference),
                 selectinload(DBPaper.authors).selectinload(DBAuthorPaper.author)
             )
             .order_by(DBPaper.publication_date.desc().nulls_last())
@@ -360,6 +361,7 @@ class AuthorRepository:
             .where(DBAuthorPaper.author_id == author.id)
             .options(
                 joinedload(DBPaper.journal),
+                joinedload(DBPaper.conference),
                 selectinload(DBPaper.authors).selectinload(DBAuthorPaper.author),
             )
         )
@@ -382,7 +384,7 @@ class AuthorRepository:
         )
 
         result = await self.db.execute(ordered_query.offset(offset).limit(limit))
-        papers = list(result.unique().scalars().all())
+        papers = list(result.scalars().unique().all())
         return papers, total
 
     async def get_author_paper_links(self, author_id: str) -> List[DBAuthorPaper]:

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Query, Depends, Request
 from typing import Optional, TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
-from app.db.database import get_db_session
+from app.core.db.database import get_db_session
 from app.extensions.logger import create_logger
 from .service import ConversationService
 from .schemas import (

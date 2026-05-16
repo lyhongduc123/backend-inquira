@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any, TYPE_CHECKING
 from datetime import datetime
 from pydantic import BaseModel, Field
 from app.core.model import CamelModel
-from app.domain.common.schemas import SJRMetadata
+from app.domain.common.schemas import ConferenceMetadata, JournalMetadata
 
 
 class AuthorBase(CamelModel):
@@ -137,6 +137,7 @@ class AuthorPaperSummary(CamelModel):
     publication_date: Optional[datetime]
     venue: Optional[str]
     journal: Optional[Any] = None
+    conference: Optional[ConferenceMetadata] = None
     url: Optional[str]
     pdf_url: Optional[str]
     citation_count: int

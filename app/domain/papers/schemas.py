@@ -6,9 +6,8 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, model_validator
 from app.core.model import CamelModel
-from app.core.dtos import AuthorDTO
 from app.domain.authors.schemas import AuthorMetadata
-from app.domain.common.schemas import SJRMetadata
+from app.domain.common.schemas import ConferenceMetadata, JournalMetadata
 
 from app.extensions.logger import create_logger
 
@@ -55,7 +54,8 @@ class PaperMetadata(CamelModel):
     year: Optional[int] = None
     publication_date: Optional[datetime]
     venue: Optional[str]
-    journal: Optional[SJRMetadata] = None
+    journal: Optional[JournalMetadata] = None
+    conference: Optional[ConferenceMetadata] = None
     conference_id: Optional[int] = None
     url: Optional[str]
     pdf_url: Optional[str]
@@ -83,7 +83,7 @@ class PaperMetadata(CamelModel):
         ignore_extra = True
 
     @staticmethod
-    def _safe_db_paper_payload(db_paper: Any) -> Dict[str, Any]:
+    def  _safe_db_paper_payload(db_paper: Any) -> Dict[str, Any]:
         """Extract only DB column attributes to avoid relationship validation issues."""
         if isinstance(db_paper, dict):
             return db_paper
@@ -106,9 +106,12 @@ class PaperMetadata(CamelModel):
     def from_db_model(cls, db_paper) -> "PaperMetadata":
         """Convert a DBPaper to PaperMetadata"""
         from app.domain.authors.schemas import AuthorMetadata
+        from sqlalchemy import inspect as sa_inspect
         
         if not db_paper:
             raise ValueError("DBPaper is None")
+        
+        # Extract authors
         authors = [
             AuthorMetadata.model_validate(author_paper.author, from_attributes=True)
             for author_paper in (db_paper.authors or [])
@@ -119,7 +122,24 @@ class PaperMetadata(CamelModel):
         paper_metadata = cls.model_validate(cls._safe_db_paper_payload(db_paper))
         paper_metadata.authors = authors
         paper_metadata.year = year
-            
+        
+        # Extract and convert journal relationship if loaded
+        state = sa_inspect(db_paper)
+        unloaded = set(getattr(state, "unloaded", set()))
+        if "journal" not in unloaded and db_paper.journal:
+            try:
+                paper_metadata.journal = JournalMetadata.model_validate(db_paper.journal, from_attributes=True)
+            except Exception:
+                paper_metadata.journal = None
+
+        if "conference" not in unloaded and db_paper.conference:
+            try:
+                paper_metadata.conference = ConferenceMetadata.model_validate(
+                    db_paper.conference, from_attributes=True
+                )
+            except Exception:
+                paper_metadata.conference = None
+        
         return paper_metadata
     
     @classmethod
@@ -169,7 +189,26 @@ class PaperMetadata(CamelModel):
         paper_payload["is_retracted"] = bool(paper_payload.get("is_retracted") or False)
 
         paper_metadata = cls.model_validate(paper_payload)
-        paper_metadata.journal = None  # Clear ORM object
+        
+        # Extract and convert journal relationship if loaded
+        if "journal" not in unloaded and paper.journal:
+            try:
+                paper_metadata.journal = JournalMetadata.model_validate(paper.journal, from_attributes=True)
+            except Exception:
+                paper_metadata.journal = None
+        else:
+            paper_metadata.journal = None
+
+        if "conference" not in unloaded and paper.conference:
+            try:
+                paper_metadata.conference = ConferenceMetadata.model_validate(
+                    paper.conference, from_attributes=True
+                )
+            except Exception:
+                paper_metadata.conference = None
+        else:
+            paper_metadata.conference = None
+        
         paper_metadata.authors = authors
         paper_metadata.year = year
         paper_metadata.relevance_score = ranked_paper.relevance_score
@@ -190,21 +229,16 @@ class PaperDetailResponse(CamelModel):
     Full paper details for frontend users.
     Includes enriched data (authors, institutions, journal, citations) without computed fields.
     """
-    # Database ID
-    id: int
-    
-    # Core identifiers
     paper_id: str
     title: str
     abstract: str
-    authors: List[AuthorDTO] = []
-    journal: Optional[SJRMetadata] = None
+    authors: List[AuthorMetadata] = []
+    journal: Optional[JournalMetadata] = None
+    conference: Optional[ConferenceMetadata] = None
     publication_date: Optional[datetime] = None
     venue: Optional[str] = None
     issn: Optional[List[str]] = None
     issn_l: Optional[str] = None
-    
-    # URLs and access
     url: Optional[str] = None
     pdf_url: Optional[str] = None
     is_open_access: bool = False
@@ -213,14 +247,12 @@ class PaperDetailResponse(CamelModel):
     # Source tracking
     source: str
     external_ids: Optional[Dict[str, Any]] = None
-    tldr: Optional[str] = None  # Renamed from summary - Semantic Scholar TLDR
-    year: Optional[int] = None  # Publication year from Semantic Scholar
-    fields_of_study: Optional[List[str]] = None  # S2 fields for filtering
-    publication_types: Optional[List[str]] = None  # S2 publication types
-    s2_fields_of_study: Optional[List[Dict[str, str]]] = None  # Detailed S2 field metadata
+    tldr: Optional[str] = None  
+    year: Optional[int] = None
+    fields_of_study: Optional[List[str]] = None 
+    publication_types: Optional[List[str]] = None 
+    s2_fields_of_study: Optional[List[Dict[str, str]]] = None 
     paper_tags: Optional[List[Dict[str, Any]]] = None
-    
-    # Citation metrics
     citation_count: int = 0
     influential_citation_count: int = 0
     reference_count: int = 0
@@ -231,19 +263,11 @@ class PaperDetailResponse(CamelModel):
     keywords: Optional[List[Dict[str, Any]]] = None
     concepts: Optional[List[Dict[str, Any]]] = None
     mesh_terms: Optional[List[Dict[str, Any]]] = None
-    
-    # Citation quality metrics
     citation_percentile: Optional[Dict[str, Any]] = None
     fwci: Optional[float] = None
-    
-    # Trust scores
     author_trust_score: Optional[float] = None
-    
-    # Quality indicators
     is_retracted: bool = False
     language: Optional[str] = None
-    
-    # Collaboration metadata
     corresponding_author_ids: Optional[List[str]] = None
     institutions_distinct_count: Optional[int] = None
     countries_distinct_count: Optional[int] = None
@@ -252,8 +276,6 @@ class PaperDetailResponse(CamelModel):
     is_processed: bool
     processing_status: str
     processing_error: Optional[str] = None
-    
-    # Timestamps
     created_at: datetime
     updated_at: datetime
     last_accessed_at: Optional[datetime] = None
@@ -264,13 +286,6 @@ class PaperDetailResponse(CamelModel):
     @model_validator(mode="before")
     @classmethod
     def _normalize_db_paper_input(cls, value: Any) -> Any:
-        """
-        Normalize ORM input safely to avoid async lazy-load access during validation.
-
-        Pydantic `from_attributes` can trigger SQLAlchemy relationship loading when
-        accessing `journal` on `DBPaper`. In async contexts this can raise
-        MissingGreenlet if the relationship is not eagerly loaded.
-        """
         if value is None or isinstance(value, dict):
             return value
 
@@ -286,19 +301,42 @@ class PaperDetailResponse(CamelModel):
 
         state = sa_inspect(value)
 
+        # Columns
         data: Dict[str, Any] = {
             attr.key: getattr(value, attr.key)
             for attr in state.mapper.column_attrs
         }
 
-        journal_loaded_value = state.attrs.journal.loaded_value
-        data["journal"] = None if journal_loaded_value is NO_VALUE else journal_loaded_value
+        # Relationships
+        for rel in state.mapper.relationships:
+            loaded_value = state.attrs[rel.key].loaded_value
+
+            if loaded_value is NO_VALUE:
+                data[rel.key] = None if not rel.uselist else []
+            else:
+                if rel.key == "authors" and rel.uselist and isinstance(loaded_value, (list, tuple)):
+                    authors_list = []
+                    for ap in loaded_value:
+                        author_obj = getattr(ap, "author", ap)
+                        author_dict = {
+                            "name": getattr(author_obj, "name", None),
+                            "author_id": getattr(author_obj, "author_id", None),
+                            "openalex_id": getattr(author_obj, "openalex_id", None),
+                            "citation_count": getattr(author_obj, "citation_count", None),
+                            "h_index": getattr(author_obj, "h_index", None),
+                            "paper_count": getattr(author_obj, "paper_count", None),
+                            "orcid": getattr(author_obj, "orcid", None),
+                            "url": getattr(author_obj, "url", None),
+                            "homepage_url": getattr(author_obj, "homepage_url", None),
+                        }
+                        authors_list.append(author_dict)
+                    data[rel.key] = authors_list
+                else:
+                    data[rel.key] = loaded_value
 
         return data
 
     
-
-# ============= Citation & Reference Schemas =============
 
 class CitingPaperData(CamelModel):
     """Nested paper data from Semantic Scholar citations API"""
@@ -380,8 +418,3 @@ class ComputeTagsRequest(CamelModel):
     )
     category: str = Field(default="general")
 
-
-# ============= Backward Compatibility Aliases =============
-# To minimize disruption during refactoring
-PaperUpdate = PaperUpdateRequest
-PaperDetail = PaperDetailResponse  

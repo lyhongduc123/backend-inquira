@@ -4,7 +4,6 @@ from typing import AsyncGenerator, List, Sequence, Dict, Any, Optional
 from app.domain.papers.schemas import PaperMetadata
 from app.extensions.stream import StreamEventType, stream_event
 
-
 class EventType:
     SEARCHING = "searching"
     RANKING = "ranking"

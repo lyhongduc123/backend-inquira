@@ -1,9 +1,8 @@
-from .pipeline import RAGResult, Pipeline
-from .hybrid_pipeline import HybridPipeline
-from .database_pipeline import DatabasePipeline
-from .scoped_pipeline import ScopedPipeline
+from .pipeline import Pipeline
+from .types import RAGResult
 
-# Backwards compatibility alias
 RAGPipeline = Pipeline
+DatabasePipeline = Pipeline 
+ScopedPipeline = Pipeline  
 
-__all__ = ["RAGResult", "Pipeline", "RAGPipeline", "HybridPipeline", "DatabasePipeline", "ScopedPipeline"]
+__all__ = ["Pipeline", "RAGPipeline", "RAGResult", "DatabasePipeline", "ScopedPipeline"]

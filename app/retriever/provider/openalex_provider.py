@@ -78,7 +78,42 @@ class OpenAlexProvider(BaseRetrievalProvider):
         except Exception as e:
             logger.error(f"[{self.name}] Search error: {e}")
             raise e
+        
+    # async def search_semantic_papers(
+    #     self,
+    #     query: str,
+    #     limit: Optional[int] = None,
+    #     offset: int = 0,
+    #     filters: Optional[Dict[str, Any]] = None,
+    # ) -> List[Dict[str, Any]]:
+    #     limit = limit or self.config.max_results
 
+    #     params = {
+    #         "search": query,
+    #         "per-page": min(limit, 200),
+    #         "page": (offset // limit) + 1 if limit > 0 else 1,
+    #     }
+
+    #     try:
+    #         async with httpx.AsyncClient(timeout=self.timeout) as client:
+    #             response = await client.get(f"{self.api_url}/works?sort=", params=params)
+    #             response.raise_for_status()
+    #             data = response.json()
+
+    #             results = data.get("results", [])
+    #             logger.info(
+    #                 f"[{self.name}] Retrieved {len(results)} papers for: {query[:50]}..."
+    #             )
+    #             return results
+
+    #     except httpx.HTTPError as e:
+    #         logger.error(f"[{self.name}] API error: {e}")
+    #         raise e
+    #     except Exception as e:
+    #         logger.error(f"[{self.name}] Search error: {e}")
+    #         raise e
+        
+        
     async def get_papers_by_dois(self, dois: List[str], limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Get multiple papers by their DOIs.

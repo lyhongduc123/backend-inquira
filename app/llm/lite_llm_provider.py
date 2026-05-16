@@ -7,6 +7,7 @@ from litellm.exceptions import (
     APIError,
     Timeout,
     ServiceUnavailableError,
+    InternalServerError,
 )
 from app.core.config import settings
 
@@ -100,7 +101,7 @@ class LiteLLMProvider:
 
                 return response
 
-            except (RateLimitError, APIError, Timeout, ServiceUnavailableError) as e:
+            except (RateLimitError, APIError, Timeout, ServiceUnavailableError, InternalServerError, NotFoundError) as e:
                 logger.error(
                     f"Error with provider {provider['model']}: {e}. Switching..."
                 )
@@ -146,9 +147,9 @@ class LiteLLMProvider:
                 ):
                     yield chunk
 
-                return  # ✅ success → stop here
+                return 
 
-            except (RateLimitError, APIError, Timeout, ServiceUnavailableError) as e:
+            except (RateLimitError, APIError, Timeout, ServiceUnavailableError, InternalServerError, NotFoundError) as e:
                 logger.error(
                     f"Error with provider {provider['model']}: {e}. Switching..."
                 )

@@ -42,8 +42,10 @@ class GeneratedQueryPlanResponse(BaseModel):
 
     original_question: str = Field(..., description="Original user question")
     clarified_question: str = Field(..., description="Single clarified question used for reranking")
-    hybrid_queries: List[str] = Field(..., description="Combined BM25 and semantic queries for retrieval")
+    hybrid_queries: List[str] = Field(..., description="Hybrid queries for retrieval")
     specific_papers: List[str] = Field(default_factory=list, description="Exact target paper titles")
+    has_doi: bool = Field(default=False, description="Whether the question contains DOIs for direct retrieval")
+    dois: List[str] = Field(default_factory=list, description="Extracted DOIs from the question, if any")
     intent: QueryIntent = Field(default=QueryIntent.COMPREHENSIVE_SEARCH)
     skip: List[str] = Field(default_factory=list)
     filters: Dict[str, Any] = Field(default_factory=dict)

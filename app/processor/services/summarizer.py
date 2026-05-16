@@ -2,7 +2,7 @@ from typing import Dict, Any, Optional, List
 import re
 import json
 from app.models.papers import DBPaper
-from app.core.dtos import PaperDTO
+from app.domain.papers.types import PaperDTO
 from app.extensions.logger import create_logger
 from app.extensions.stream import get_simple_response_content
 from app.llm.prompts import PromptPresets

@@ -1,5 +1,5 @@
 """
-Database models for the Exegent application.
+Database models for the application.
 
 All models inherit from DatabaseBase which itself inherits from SQLAlchemy's Base.
 Import all models here to ensure they're registered with SQLAlchemy metadata.

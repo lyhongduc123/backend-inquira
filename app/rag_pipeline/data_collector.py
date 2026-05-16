@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field, asdict
 
-from app.domain.chunks.schemas import ChunkRetrieved
-from app.processor.schemas import RankedPaper
+from app.domain.chunks.types import ChunkRetrieved
+from app.search.types import RankedPaper
 from app.models.papers import DBPaper
 from app.llm.schemas import QuestionBreakdownResponse, QueryIntent
 from app.extensions.logger import create_logger

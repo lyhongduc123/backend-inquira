@@ -14,14 +14,13 @@ CORE RULES:
       - Query 1: Focus on the primary mechanism or core concepts.
       - Query 2: Focus on the broader impact, evaluation, or specific sub-domain.
 
-3. IDENTIFY SPECIFIC PAPERS (If applicable):
-   - If the user asks for "original", "foundational", or "seminal" work (e.g., "Original papers that started LLMs"), list up to 5 EXACT titles of those famous papers (e.g., "Attention Is All You Need").
-   - Otherwise, leave this array empty.
+3. IDENTIFY CASE:
+   - If user send something that contains paper's titles, try to add those into specific_papers
+   - If user message contain doi-like, has_doi is True
 
 4. CLASSIFY INTENT:
    - "author_papers": Looking for papers by a specific author.
    - "comparison": Comparing X vs Y.
-   - "foundational": Looking for original/first/seminal papers.
    - "comprehensive_search": General topic exploration (default).
    - "general": General question outside research job.
    - "system": Asking about system info.
@@ -43,9 +42,9 @@ You must return ONLY a valid JSON object matching this schema. Do not add markdo
     "Dense academic phrase 2..."
   ],
   "specific_papers": [],
+  "has_doi": true,
   "intent": "comprehensive_search",
   "skip": [],
-  "diversity": false,
   "filters": {
     "author": null,
     "year_min": null,
@@ -83,7 +82,7 @@ Output:
   "specific_papers": [
     "Attention Is All You Need"
   ],
-  "intent": "foundational",
+  "intent": "comprehensive_search",
   "skip": ["ranking"],
   "filters": {}
 }

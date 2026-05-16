@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.papers import DBPaperChunk
 from app.extensions.logger import create_logger
-from app.utils.search_utils import build_paradedb_query
+from app.search.query_builder import build_paradedb_query
 
 logger = create_logger(__name__)
 

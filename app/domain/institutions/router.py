@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
-from app.db.database import get_db_session
+from app.core.db.database import get_db_session
 from .repository import InstitutionRepository
 from .schemas import (
     InstitutionResponse,

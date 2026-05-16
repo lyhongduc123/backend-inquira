@@ -1,621 +1,406 @@
-# app/rag/pipeline.py
+"""
+Unified RAG Pipeline - Database and Scoped Search
 
-import asyncio
-import gc
-from datetime import datetime, timezone
-import json
-from dataclasses import dataclass
-from pathlib import Path
-from typing import AsyncGenerator, List, Optional, Dict, Any, TYPE_CHECKING
+Consolidates database-only and scoped paper retrieval with configurable routing.
+Routes between SEARCH_DATABASE (all papers) and SEARCH_SCOPED (explicit paper IDs).
+"""
+
+from enum import Enum
+from typing import AsyncGenerator, List, Optional, Dict, Any, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.llm import get_llm_service
-from app.processor.paper_processor import PaperProcessor
-from app.retriever.service import RetrievalService, RetrievalServiceType
-from app.domain.papers.repository import PaperRepository, LoadOptions
-from app.domain.chunks.repository import ChunkRepository
-from app.domain.chunks.schemas import ChunkRetrieved
-from app.core.singletons import get_ranking_service
-from app.models.papers import DBPaper
-from app.processor.schemas import RankedPaper
-
+from app.core.container import ServiceContainer
+from app.domain.papers.repository import LoadOptions
+from app.domain.chunks.types import ChunkRetrieved
+from app.llm.schemas.chat import QueryIntent
+from app.search.types import RankedPaper
 from app.rag_pipeline.schemas import (
-    PipelineResult,
-    RAGPipelineContext,
     RAGPipelineEvent,
     RAGResult,
     RAGEventType,
+    SearchWorkflowConfig,
 )
 from app.extensions.logger import create_logger
-
-from app.rag_pipeline.utils import deduplicate_papers, deduplicate_papers_with_rrf
-
-if TYPE_CHECKING:
-    from app.processor.paper_processor import PaperProcessor
-    from app.processor.services.ranking import RankingService
-
+from app.search import (
+    append_missing_abstract_chunks,
+    parse_search_filter_options,
+    reciprocal_rank_fusion,
+)
 
 logger = create_logger(__name__)
 
 
+class PipelineType(str, Enum):
+    """Pipeline execution mode."""
+    SEARCH_DATABASE = "database"
+    SEARCH_SCOPED = "scoped"
+
+
 class Pipeline:
-    """
-    General multi-step orchestration service for various workflows.
-
-    Workflows:
-    - Paper RAG: Retrieve papers → process → extract chunks → answer questions
-    - Author Enrichment: Fetch author papers → process → compute metrics
-    - Future: Institution enrichment, citation graph building, bulk ingestion
-
-    Responsibilities:
-    - Orchestrate multi-step processes
-    - Track progress with event streaming
-    - Reuse processors (PaperProcessor, services)
-    - Handle cross-cutting concerns (logging, caching, error handling)
-
-    Uses dependency injection for better testability and shared instances.
-
-    Note: Previously named RAGPipeline. Renamed to Pipeline to reflect general orchestration role.
-    
-    DEPRECATED: This class is being phased out in favor of more change in direction of orchestrating RAG workflows.
-    """
+    """Unified RAG Pipeline: database-only and scoped search modes."""
 
     def __init__(
         self,
         db_session: AsyncSession,
-        repository: Optional[PaperRepository] = None,
-        retriever: Optional[RetrievalService] = None,
-        processor: Optional[PaperProcessor] = None,
-        llm_service=None,
-        ranking_service: Optional["RankingService"] = None,
+        container: Optional[ServiceContainer] = None,
     ):
-        """Initialize Pipeline with dependency injection.
-
-        Args:
-            db_session: Required database session
-            repository: Optional shared repository (created if not provided)
-            retriever: Optional retrieval service (created if not provided)
-            processor: Optional paper processor (created if not provided)
-            llm_service: Optional LLM service (singleton if not provided)
-            ranking_service: Optional ranking service (singleton if not provided)
-        """
         self.db_session = db_session
-        self.repository = repository or PaperRepository(db_session)
-        self.chunk_repository = ChunkRepository(db_session)
-        self.retriever = retriever or RetrievalService(db=db_session)
-        self.processor = processor or PaperProcessor(
-            repository=self.repository,
-            chunk_repository=self.chunk_repository,
-            retrieval_service=self.retriever,
-        )
-        self.llm = llm_service or get_llm_service()
-        self.ranking_service = ranking_service or get_ranking_service()  # Use singleton
+        self.container = container or ServiceContainer(db_session)
+        self.repository = self.container.paper_repository
+        self.search = self.container.local_search_service
+        self.ranking_service = self.container.ranking_service
+        self.llm = self.container.llm_service
 
-    async def run_paper_rag_workflow(
+    async def run_search_workflow(
+        self,
+        pipeline_type: PipelineType,
+        config: SearchWorkflowConfig,
+        paper_ids: Optional[List[str]] = None,
+    ) -> AsyncGenerator[RAGPipelineEvent, None]:
+        """Route to appropriate search mode."""
+        if pipeline_type == PipelineType.SEARCH_DATABASE:
+            async for event in self._run_database_workflow(config):
+                yield event
+        elif pipeline_type == PipelineType.SEARCH_SCOPED:
+            async for event in self._run_scoped_workflow(config, paper_ids or []):
+                yield event
+
+    async def run_database_search_workflow(
+        self, config: SearchWorkflowConfig
+    ) -> AsyncGenerator[RAGPipelineEvent, None]:
+        """Backward-compat wrapper: run database-only search."""
+        async for event in self.run_search_workflow(PipelineType.SEARCH_DATABASE, config):
+            yield event
+
+    async def run_scoped_search_workflow(
         self,
         query: str,
-        max_subtopics: int = 3,
-        per_subtopic_limit: int = 50,
+        paper_ids: List[str],
         top_chunks: int = 40,
-        filters: Optional[Dict[str, Any]] = None,
+        top_papers: int = 20,
         enable_reranking: bool = True,
-        enable_paper_ranking: bool = True,
-        relevance_threshold: float = 0.3,
-        similarity_top_k: Optional[int] = 20,
-        auto_optimize: bool = True,
-        conversation_id: Optional[str] = None,
-    ):
-        """
-        Paper RAG workflow: Retrieve papers, filter by embedding similarity, process content.
-
-        Args:
-            query: User question
-            max_subtopics: Max subtopics to generate
-            per_subtopic_limit: Max papers per subtopic (default: 50)
-            top_chunks: Max chunks to return
-            filters: Optional filters (yearRange, category, openAccessOnly, excludePreprints, topJournalsOnly)
-            enable_reranking: Whether to rerank chunks with cross-encoder
-            enable_paper_ranking: Whether to apply comprehensive paper ranking
-            relevance_threshold: Minimum semantic relevance score for papers (0-1)
-            similarity_top_k: Number of top papers to keep after similarity filtering (None = use threshold)
-            auto_optimize: Enable automatic pipeline optimization based on query intent (default: True)
-        """
-        ctx = RAGPipelineContext(query)
-
-        # Load conversation history if conversation_id provided
-        conversation_history = None
-        if conversation_id:
-            try:
-                from app.domain.conversations.context_manager import ConversationContextManager
-
-                context_mgr = ConversationContextManager()
-                conversation_history, _ = await context_mgr.get_conversation_context(
-                    conversation_id=conversation_id,
-                    db_session=self.db_session,
-                    include_current_query=False,
-                )
-                logger.info(
-                    f"Loaded {len(conversation_history)} messages for query decomposition context"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load conversation history for decomposition: {e}"
-                )
-
-        ctx = await self._break_down_query(ctx, max_subtopics, conversation_history)
-        breakdown_response = ctx.breakdown_response
-        if auto_optimize and breakdown_response and breakdown_response.intent:
-            logger.info(
-                f"Query intent: {breakdown_response.intent.value} (confidence: {breakdown_response.intent_confidence or 'N/A'})"
-            )
-
-            if breakdown_response.filters:
-                filters = {**(filters or {}), **breakdown_response.filters}
-
-            if breakdown_response.skip_ranking:
-                enable_paper_ranking = False
-
-        yield RAGPipelineEvent(
-            type=RAGEventType.SEARCHING,
-            data={"queries": ctx.search_queries, "original": query},
+    ) -> AsyncGenerator[RAGPipelineEvent, None]:
+        """Backward-compat wrapper: run scoped search with individual parameters."""
+        config = SearchWorkflowConfig(
+            query=query,
+            search_queries=[],
+            intent=None,
+            filters=None,
+            top_papers=top_papers,
+            top_chunks=top_chunks,
+            enable_reranking=enable_reranking,
+            enable_paper_ranking=True,
         )
-
-        ctx = await self._retrieve_papers(
-            ctx,
-            per_subtopic_limit,
-            filters,
-        )
-
-        should_filter = True
-        if (
-            auto_optimize
-            and breakdown_response
-            and breakdown_response.skip_title_abstract_filter
-        ):
-            logger.info("Skipping title/abstract filter based on query intent")
-            should_filter = False
-
-        if should_filter:
-            yield RAGPipelineEvent(
-                type=RAGEventType.PROCESSING,
-                data={
-                    "message": "Generating embeddings and filtering papers by relevance",
-                    "total_papers": len(ctx.papers),
-                },
-            )
-
-            ctx = await self._embed_and_filter_papers(
-                ctx, query, similarity_top_k, relevance_threshold
-            )
-
-            if not ctx.papers:
-                logger.warning("No papers passed similarity filtering")
-                yield RAGPipelineEvent(
-                    type=RAGEventType.RESULT, data=RAGResult(papers=[], chunks=[])
-                )
-                return
-
-        async for event in self._process_papers(ctx):
-            if isinstance(event, RAGPipelineEvent):
-                yield event
-            else:
-                ctx = event  # Update context
-
-        # Check if any papers were successfully processed
-        if not ctx.processed_paper_ids:
-            logger.warning(
-                "No papers were successfully processed (all failed PDF/content retrieval)"
-            )
-            if not ctx.papers:
-                yield RAGPipelineEvent(
-                    type=RAGEventType.RESULT, data=RAGResult(papers=[], chunks=[])
-                )
-                return
-            else:
-                logger.info(
-                    f"Continuing with {len(ctx.papers)} papers using abstracts only (no chunks available)"
-                )
-
-        if ctx.processed_paper_ids:
-            logger.info(
-                f"Successfully processed {len(ctx.processed_paper_ids)} papers with full content, {len(ctx.papers) - len(ctx.processed_paper_ids)} papers with abstracts only"
-            )
-            self._write_log(ctx)
-
-        # Only retrieve chunks if we have processed papers
-        if ctx.processed_paper_ids:
-            try:
-                ctx = await self._retrieve_chunks(ctx, top_chunks)
-                logger.info(
-                    f"Retrieved {len(ctx.chunks)} chunks from {len(ctx.processed_paper_ids)} processed papers"
-                )
-            except Exception as e:
-                logger.error(f"Error retrieving chunks: {e}", exc_info=True)
-                ctx.chunks = []
-        else:
-            logger.info("No chunks available, using paper abstracts only for context")
-            ctx.chunks = []
-
-        if enable_reranking and ctx.chunks:
-            try:
-                ctx.chunks = self.ranking_service.rerank_chunks(query, ctx.chunks)
-                logger.info(f"Reranked {len(ctx.chunks)} chunks")
-            except Exception as e:
-                logger.error(f"Error reranking chunks: {e}", exc_info=True)
-
-        if enable_paper_ranking and ctx.papers:
-            yield RAGPipelineEvent(
-                type=RAGEventType.RANKING,
-                data={"total_papers": len(ctx.papers), "total_chunks": len(ctx.chunks)},
-            )
-
-            try:
-                enriched_papers, total = await self.repository.get_papers(
-                    paper_ids=[p.paper_id for p in ctx.papers],
-                    load_options=LoadOptions(
-                        authors=True, journal=True, institutions=True
-                    ),
-                )
-
-                logger.info(
-                    f"Loaded {len(enriched_papers)} enriched papers from DB for ranking"
-                )
-                weights = {"authority": 0.4, "relevance": 0.6}
-                ranked_papers = self.ranking_service.rank_papers(
-                    query=query,
-                    papers=enriched_papers,
-                    chunks=ctx.chunks,
-                    weights=weights,
-                )
-                logger.info(f"Ranked to {len(ranked_papers)} papers")
-                ctx.result_papers = ranked_papers
-            except Exception as e:
-                logger.error(f"Error during paper ranking: {e}", exc_info=True)
-                # Fallback to unranked papers
-                ctx.result_papers = []
-        else:
-            try:
-                if should_filter:
-                    logger.info(
-                        f"Skipping paper ranking, loading {len(ctx.filtered_papers)} filtered papers with default scores"
-                    )
-                    ctx.papers = ctx.filtered_papers
-                enriched_papers, total = await self.repository.get_papers(
-                    paper_ids=[p.paper_id for p in ctx.papers],
-                    load_options=LoadOptions(
-                        authors=True, journal=True, institutions=True
-                    ),
-                )
-
-                # Create RankedPaper objects with default/neutral scores
-                ctx.result_papers = [
-                    RankedPaper(
-                        id=paper.id,
-                        paper_id=paper.paper_id,
-                        paper=paper,
-                        relevance_score=1.0,  # Default neutral score
-                        ranking_scores={
-                            "citation_quality": 0.0,
-                            "venue_prestige": 0.0,
-                            "author_reputation": 0.0,
-                            "recency": 0.0,
-                            "institution_trust": 0.0,
-                        },
-                    )
-                    for paper in enriched_papers
-                ]
-                logger.info(
-                    f"Created {len(ctx.result_papers)} papers with default scores"
-                )
-            except Exception as e:
-                logger.error(f"Error loading papers for result: {e}", exc_info=True)
-                ctx.result_papers = []
-
-        # Final validation before returning results
-        if not ctx.result_papers:
-            logger.warning(
-                "No papers available for final result (all processing/ranking failed)"
-            )
-
-        if not ctx.chunks:
-            logger.warning(
-                f"No chunks available (processed {len(ctx.processed_paper_ids)} papers but chunks may be empty)"
-            )
-
-        yield RAGPipelineEvent(
-            type=RAGEventType.RESULT,
-            data=RAGResult(papers=ctx.result_papers, chunks=ctx.chunks),
-        )
-
-    async def run(self, *args, **kwargs):
-        """Backwards compatibility: redirects to run_paper_rag_workflow()"""
-        async for event in self.run_paper_rag_workflow(*args, **kwargs):
+        async for event in self.run_search_workflow(PipelineType.SEARCH_SCOPED, config, paper_ids):
             yield event
 
 
-
-    async def _break_down_query(
-        self,
-        ctx: RAGPipelineContext,
-        max_subtopics: int = 3,
-        conversation_history: Optional[List[Dict[str, str]]] = None,
-    ) -> RAGPipelineContext:
-        """
-        Use LLM to break down user query into subtopics/search queries.
-        Now also includes intent classification for pipeline optimization.
-
-        Args:
-            ctx: Pipeline context
-            max_subtopics: Max subtopics to generate
-            conversation_history: Optional conversation history for context
-
-        Returns:
-            Updated context with search queries and breakdown response
-        """
-        breakdown = await self.llm.decompose_user_query(
-            user_question=ctx.query,
-            max_subtopics=max_subtopics,
-            conversation_history=conversation_history,
-        )
-        ctx.search_queries = breakdown.search_queries[:max_subtopics]
-        ctx.breakdown_response = breakdown  # Store full response for intent access
-        logger.info(f"Generated search queries: {ctx.search_queries}")
-        if breakdown.intent:
-            logger.info(f"Detected intent: {breakdown.intent.value}")
-        return ctx
-
-    async def _retrieve_papers(
-        self,
-        ctx: RAGPipelineContext,
-        per_subtopic_limit,
-        filters: Optional[Dict[str, Any]] = None,
-    ) -> RAGPipelineContext:
-        """
-        Retrieve papers for given search queries using Reciprocal Rank Fusion (RRF).
+    async def _run_database_workflow(
+        self, config: SearchWorkflowConfig
+    ) -> AsyncGenerator[RAGPipelineEvent, None]:
+        """Full database search: hybrid retrieval → ranking → chunks."""
+        intent = config.intent or QueryIntent.COMPREHENSIVE_SEARCH
+        search_queries = config.search_queries or [config.query]
         
-        Uses RRF to combine rankings from multiple search queries, which gives higher
-        scores to papers that appear in multiple result sets and/or rank highly.
-
-        Args:
-            ctx: RAGPipelineContext containing search queries
-            per_subtopic_limit: Max papers per subtopic
-            filters: Optional filters
-        Returns:
-            Updated RAGPipelineContext with retrieved papers ranked by RRF
-        """
-        paper_rankings = []
-
-        for idx, search_query in enumerate(ctx.search_queries, 1):
-            papers, metadata = await self.retriever.hybrid_search(
-                query=search_query,
-                semantic_limit=per_subtopic_limit,
-                filters=filters,
-            )
-            paper_rankings.append(papers)
-            logger.info(f"Query {idx}: {metadata}")
-            await asyncio.sleep(1)
-
-        # Use RRF to deduplicate and rank papers from multiple queries
-        papers = deduplicate_papers_with_rrf(paper_rankings)
-        logger.info(f"Total unique papers after RRF fusion: {len(papers)}")
-
-        ctx.papers = papers  # type: ignore
-        return ctx
-
-    async def _process_papers(
-        self,
-        ctx: RAGPipelineContext,
-    ) -> AsyncGenerator[RAGPipelineEvent | RAGPipelineContext, None]:
-        """
-        Process papers sequentially until we get 5 successful papers with content.
-        Processes in small batches, stops when target is reached or papers exhausted.
-
-        Args:
-            ctx: RAGPipelineContext containing papers
-        Returns:
-            Updated RAGPipelineContext with processed paper IDs
-        """
-        MAX_SUCCESSFUL_PAPERS = 5
-        BATCH_SIZE = 3  # Process 3 papers at a time for efficiency
-
-        successful_paper_ids = []
-        attempted_count = 0
-        batch_start_idx = 0
-
-        logger.info(
-            f"Starting sequential processing - target: {MAX_SUCCESSFUL_PAPERS} successful papers"
+        yield RAGPipelineEvent(
+            type=RAGEventType.SEARCHING,
+            data={
+                "queries": search_queries,
+                "original": config.query,
+                "intent": intent.value,
+                "filters": config.filters or {},
+            },
         )
 
-        # Process papers in batches until we reach target or run out of papers
-        while len(
-            successful_paper_ids
-        ) < MAX_SUCCESSFUL_PAPERS and batch_start_idx < len(ctx.papers):
-            batch_end_idx = min(batch_start_idx + BATCH_SIZE, len(ctx.papers))
-            batch_papers = ctx.papers[batch_start_idx:batch_end_idx]
+        paper_rankings: List[List[Tuple[Any, float]]] = []
+        for sq in search_queries:
+            results = await self._run_hybrid_search(sq, config.filters, intent)
+            if results:
+                paper_rankings.append(results)
 
-            logger.info(
-                f"Processing batch {batch_start_idx//BATCH_SIZE + 1}: papers {batch_start_idx+1}-{batch_end_idx} (need {MAX_SUCCESSFUL_PAPERS - len(successful_paper_ids)} more successes)"
-            )
+        papers_with_scores = self._fuse_rankings_rrf(paper_rankings, limit=config.top_papers * 2)
+        
+        if not papers_with_scores:
+            yield RAGPipelineEvent(type=RAGEventType.RESULT, data=RAGResult(papers=[], chunks=[]))
+            return
 
-            # Process this batch concurrently
-            processed_results = await self.processor.process_papers_concurrent(
-                batch_papers, ctx.filtered_papers, max_workers=2
-            )
+        logger.info(f"Database search: {len(papers_with_scores)} unique papers after RRF")
 
-            # Check results in order and collect successful papers
-            for paper in batch_papers:
-                paper_id_str = str(paper.paper_id)
-                success = processed_results.get(paper_id_str, False)
-                attempted_count += 1
+        paper_ids = [str(p.paper_id) for p, _ in papers_with_scores]
+        chunks = await self._chunk_search(config.query, paper_ids, config.top_chunks, intent)
 
-                yield RAGPipelineEvent(
-                    type="processing",
-                    data={
-                        "paper_id": paper_id_str,
-                        "success": success,
-                        "progress": len(successful_paper_ids),
-                        "total": MAX_SUCCESSFUL_PAPERS,
-                        "attempted": attempted_count,
-                        "message": f"Processed paper {attempted_count}/{len(ctx.papers)} - {len(successful_paper_ids)}/{MAX_SUCCESSFUL_PAPERS} successful",
-                    },
-                )
-
-                # Add to successful list if processed and we haven't reached limit
-                if success and len(successful_paper_ids) < MAX_SUCCESSFUL_PAPERS:
-                    successful_paper_ids.append(paper_id_str)
-                    logger.info(
-                        f"Paper {paper_id_str} successfully processed ({len(successful_paper_ids)}/{MAX_SUCCESSFUL_PAPERS})"
-                    )
-
-                # Stop if we've reached our target
-                if len(successful_paper_ids) >= MAX_SUCCESSFUL_PAPERS:
-                    logger.info(
-                        f"Reached target of {MAX_SUCCESSFUL_PAPERS} successful papers, stopping processing"
-                    )
-                    break
-
-            batch_start_idx = batch_end_idx
-
-        logger.info(
-            f"Processing complete: {len(successful_paper_ids)} papers with full content, "
-            f"{len(ctx.papers) - len(successful_paper_ids)} papers with abstracts only "
-            f"(attempted {attempted_count}/{len(ctx.papers)} papers)"
+        append_missing_abstract_chunks(
+            chunks,
+            papers_with_scores,
+            score_multiplier=0.0,
         )
 
-        ctx.processed_paper_ids = successful_paper_ids
-        yield ctx
-
-    async def _retrieve_chunks(
-        self,
-        ctx: RAGPipelineContext,
-        top_chunks: int = 40,
-    ) -> RAGPipelineContext:
-        """
-        Retrieve relevant chunks for given paper IDs.
-
-        Args:
-            ctx: RAGPipelineContext containing paper IDs
-            top_chunks: Max chunks to return
-        Returns:
-            Updated RAGPipelineContext with retrieved chunks
-        """
-        if not ctx.processed_paper_ids:
-            logger.warning("No processed paper IDs available for chunk retrieval")
-            ctx.chunks = []
-            return ctx
-
-        all_chunks = []
-        queries_for_chunks = [ctx.query] + ctx.search_queries
-
-        for chunk_query in queries_for_chunks:
+        if config.enable_reranking and chunks:
             try:
-                query_chunks = await self.retriever.get_relevant_chunks(
-                    query=chunk_query,
-                    paper_ids=ctx.processed_paper_ids,
-                    limit=top_chunks
-                    // len(queries_for_chunks),  # Distribute limit across queries
-                )
-                all_chunks.extend(query_chunks)
+                chunks = self.ranking_service.rerank_chunks(config.query, chunks)
             except Exception as e:
-                logger.error(
-                    f"Error retrieving chunks for query '{chunk_query[:50]}...': {e}"
-                )
-                continue
+                logger.warning(f"Reranking failed: {e}")
 
-        ctx.chunks = self._dedup_chunks(all_chunks)
-
-        if not ctx.chunks:
-            logger.warning(
-                f"No chunks retrieved from {len(ctx.processed_paper_ids)} processed papers"
+        if config.enable_paper_ranking and papers_with_scores:
+            yield RAGPipelineEvent(
+                type=RAGEventType.RANKING,
+                data={
+                    "total_papers": len(papers_with_scores),
+                    "total_chunks": len(chunks),
+                },
             )
 
-        return ctx
+            try:
+                enriched = await self.repository.get_papers(
+                    paper_ids=paper_ids[:config.top_papers],
+                    load_options=LoadOptions(authors=True, journal=True, institutions=True),
+                )
+                hybrid_scores = {str(p.paper_id): s for p, s in papers_with_scores}
+                ranked = await self._rank_papers(
+                    config.query, enriched[0], chunks, hybrid_scores, intent
+                )
+                result_papers = ranked[:config.top_papers]
+            except Exception as e:
+                logger.error(f"Paper ranking failed: {e}")
+                result_papers = [
+                    RankedPaper(
+                        id=int(p.id),
+                        paper_id=str(p.paper_id),
+                        paper=p,
+                        relevance_score=s,
+                        ranking_scores={"hybrid_score": s},
+                    )
+                    for p, s in papers_with_scores[:config.top_papers]
+                ]
+        else:
+            result_papers = [
+                RankedPaper(
+                    id=int(p.id),
+                    paper_id=str(p.paper_id),
+                    paper=p,
+                    relevance_score=s,
+                    ranking_scores={"hybrid_score": s},
+                )
+                for p, s in papers_with_scores[:config.top_papers]
+            ]
 
-    async def _rank_papers(self, ctx: RAGPipelineContext) -> RAGPipelineContext:
-        """Placeholder for paper ranking logic (currently integrated in main workflow)"""
-        return ctx
+        result_ids = {str(rp.paper_id) for rp in result_papers}
+        chunks = [c for c in chunks if str(c.paper_id) in result_ids]
 
-    async def _embed_and_filter_papers(
+        yield RAGPipelineEvent(
+            type=RAGEventType.RESULT,
+            data=RAGResult(papers=result_papers, chunks=chunks[:config.top_chunks]),
+        )
+
+    async def _run_scoped_workflow(
         self,
-        ctx: RAGPipelineContext,
+        config: SearchWorkflowConfig,
+        paper_ids: List[str],
+    ) -> AsyncGenerator[RAGPipelineEvent, None]:
+        """Lightweight search over explicit paper set."""
+        normalized_ids = [str(pid).strip() for pid in paper_ids if str(pid).strip()]
+        
+        if not normalized_ids:
+            yield RAGPipelineEvent(type=RAGEventType.RESULT, data=RAGResult(papers=[], chunks=[]))
+            return
+
+        yield RAGPipelineEvent(
+            type=RAGEventType.PROCESSING,
+            data={"message": "Rewriting query for scoped search"},
+        )
+
+        rewritten = await self._rewrite_query_lightweight(config.query)
+
+        yield RAGPipelineEvent(
+            type=RAGEventType.SEARCHING,
+            data={
+                "queries": [rewritten],
+                "original": config.query,
+                "paper_ids": normalized_ids,
+                "scope": "provided",
+            },
+        )
+
+        yield RAGPipelineEvent(
+            type=RAGEventType.PROCESSING,
+            data={"message": "Searching chunks in scoped papers"},
+        )
+
+        chunks = await self.search.chunks.hybrid_search(
+            query=rewritten,
+            paper_ids=normalized_ids,
+            limit=config.top_chunks,
+            bm25_weight=0.4,
+            semantic_weight=0.6,
+        )
+
+        papers, _ = await self.repository.get_papers(
+            skip=0,
+            limit=len(normalized_ids),
+            paper_ids=normalized_ids,
+            load_options=LoadOptions(),
+        )
+
+        append_missing_abstract_chunks(
+            chunks,
+            [(paper, 0.0) for paper in papers],
+            score_multiplier=0.0,
+        )
+
+        if config.enable_reranking and chunks:
+            try:
+                chunks = self.ranking_service.rerank_chunks(rewritten, chunks)
+            except Exception as e:
+                logger.warning(f"Scoped reranking failed: {e}")
+
+        yield RAGPipelineEvent(
+            type=RAGEventType.RANKING,
+            data={
+                "total_papers": len(normalized_ids),
+                "total_chunks": len(chunks),
+                "scope": "provided",
+            },
+        )
+
+        ranked = await self._rank_scoped_papers(normalized_ids, chunks, config.top_papers)
+
+        yield RAGPipelineEvent(
+            type=RAGEventType.RESULT,
+            data=RAGResult(papers=ranked, chunks=chunks[:config.top_chunks]),
+        )
+
+    async def _run_hybrid_search(
+        self,
         query: str,
-        top_k: Optional[int] = None,
-        min_score: Optional[float] = None,
-    ) -> RAGPipelineContext:
-        """
-        Generate embeddings for papers and filter by similarity to query.
-        Papers with existing embeddings (from DB cache) are reused.
+        filters: Optional[Dict[str, Any]] = None,
+        intent: Optional[QueryIntent] = None,
+    ) -> List[Tuple[Any, float]]:
+        """Hybrid BM25 + semantic search with filters."""
+        try:
+            results = await self.search.papers.hybrid_search(
+                query=query,
+                limit=100,
+                filter_options=parse_search_filter_options(filters),
+            )
+            logger.debug(f"Hybrid search '{query[:40]}': {len(results)} papers")
+            return results
+        except Exception as e:
+            logger.error(f"Hybrid search failed: {e}")
+            await self.db_session.rollback()
+            return []
 
-        Args:
-            ctx: RAGPipelineContext containing papers
-            query: User's clarified question
-            top_k: Number of top papers to keep (default: top papers with PDFs)
-            min_score: Minimum similarity score threshold
+    async def _chunk_search(
+        self,
+        query: str,
+        paper_ids: List[str],
+        top_chunks: int,
+        intent: Optional[QueryIntent] = None,
+    ) -> List[ChunkRetrieved]:
+        """Search chunks in specified papers."""
+        try:
+            chunks = await self.search.chunks.hybrid_search(
+                query=query,
+                paper_ids=paper_ids,
+                limit=top_chunks,
+                bm25_weight=0.4,
+                semantic_weight=0.6,
+            )
+            return chunks
+        except Exception as e:
+            logger.error(f"Chunk search failed: {e}")
+            return []
 
-        Returns:
-            Updated context with filtered papers and embeddings cached to DB
-        """
-        if not ctx.papers:
-            return ctx
+    async def _rank_papers(
+        self,
+        query: str,
+        papers: List[Any],
+        chunks: List[ChunkRetrieved],
+        hybrid_scores: Dict[str, float],
+        intent: Optional[QueryIntent] = None,
+    ) -> List[RankedPaper]:
+        """Rank papers using hybrid + authority scoring."""
+        try:
+            ranked = self.ranking_service.rank_papers(
+                query=query,
+                papers=papers,
+                chunks=chunks,
+                weights={"relevance": 0.7, "authority": 0.3},
+            )
+            return ranked
+        except Exception as e:
+            logger.error(f"Paper ranking failed: {e}")
+            return [
+                RankedPaper(
+                    id=int(p.id),
+                    paper_id=str(p.paper_id),
+                    paper=p,
+                    relevance_score=hybrid_scores.get(str(p.paper_id), 0.0),
+                    ranking_scores={"hybrid_score": hybrid_scores.get(str(p.paper_id), 0.0)},
+                )
+                for p in papers
+            ]
 
-        logger.info(f"Generating embeddings for {len(ctx.papers)} papers")
-        ctx.papers = await self.processor.generate_paper_embeddings(ctx.papers)
-
-        paper_embeddings = {
-            str(p.paper_id): p.embedding for p in ctx.papers if p.embedding is not None
-        }
-
-        if paper_embeddings:
-            await self.repository.bulk_update_paper_embeddings(paper_embeddings)
-            logger.info(f"Cached {len(paper_embeddings)} embeddings to database")
-
-        logger.info(f"Filtering papers by similarity to: {query}")
-        filtered_papers = await self.processor.filter_papers_by_similarity(
-            papers=ctx.papers,
-            query=query,
-            top_k=top_k,
-            min_score=min_score,
-            prefer_open_access=True,
+    async def _rank_scoped_papers(
+        self,
+        paper_ids: List[str],
+        chunks: List[ChunkRetrieved],
+        top_papers: int,
+    ) -> List[RankedPaper]:
+        """Rank papers in scoped set by chunk relevance aggregation."""
+        papers, _ = await self.repository.get_papers(
+            skip=0,
+            limit=max(top_papers, 1),
+            paper_ids=paper_ids,
+            load_options=LoadOptions(authors=True, journal=True),
         )
 
-        logger.info(
-            f"Filtered from {len(ctx.papers)} to {len(filtered_papers)} papers "
-            f"based on semantic similarity"
-        )
+        if not papers:
+            return []
 
-        ctx.filtered_papers = filtered_papers
-        return ctx
-
-    def _write_log(self, ctx: RAGPipelineContext):
-        """Writing processed datas for debug
-
-        Args:
-            ctx (RAGPipelineContext): Context containing the data to log
-        """
-        base_dir = Path(__file__).parent
-        logs_dir = base_dir / "logs"
-        logs_dir.mkdir(exist_ok=True)
-
-        timestamp = datetime.now().isoformat().replace(":", "-")
-        filename = logs_dir / f"processed_papers-{timestamp}.json"
-
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(ctx.__dict__, f, ensure_ascii=False, indent=4, default=str)
-
-    def _dedup_chunks(self, chunks: List["ChunkRetrieved"]) -> List["ChunkRetrieved"]:
-        """Deduplicate chunks by chunk_id
-
-        Args:
-            chunks: List of ChunkRetrieved objects to deduplicate
-
-        Returns:
-            Deduplicated list of ChunkRetrieved objects
-        """
-        seen_chunk_ids = set()
-        deduped_chunks = []
+        score_map = {str(p.paper_id): 0.0 for p in papers}
         for chunk in chunks:
-            if chunk.chunk_id not in seen_chunk_ids:
-                seen_chunk_ids.add(chunk.chunk_id)
-                deduped_chunks.append(chunk)
-        return deduped_chunks
+            pid = str(getattr(chunk, "paper_id", ""))
+            if pid in score_map:
+                score_map[pid] += float(getattr(chunk, "relevance_score", 0.0) or 0.0)
+
+        ranked = [
+            RankedPaper(
+                id=int(p.id),
+                paper_id=str(p.paper_id),
+                paper=p,
+                relevance_score=score_map.get(str(p.paper_id), 0.0),
+                ranking_scores={"scoped_chunk_relevance": score_map.get(str(p.paper_id), 0.0)},
+            )
+            for p in papers
+        ]
+
+        ranked.sort(key=lambda x: x.relevance_score, reverse=True)
+        return ranked[:top_papers]
+
+    async def _rewrite_query_lightweight(self, query: str) -> str:
+        """Lightweight query clarification for scoped search."""
+        try:
+            breakdown = await self.llm.decompose_user_query_v2(
+                user_question=query,
+                num_subtopics=1,
+                conversation_history=None,
+            )
+            return breakdown.clarified_question or query
+        except Exception as e:
+            logger.warning(f"Query rewrite failed, using original: {e}")
+            return query
+
+    def _fuse_rankings_rrf(
+        self,
+        rankings: List[List[Tuple[Any, float]]],
+        k: int = 60,
+        limit: int = 100,
+    ) -> List[Tuple[Any, float]]:
+        """Reciprocal Rank Fusion: fuse multiple ranked lists."""
+        return reciprocal_rank_fusion(
+            rankings,
+            key=lambda paper: paper.paper_id,
+            k=k,
+            limit=limit,
+        )

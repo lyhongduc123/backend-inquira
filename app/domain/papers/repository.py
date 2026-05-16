@@ -4,16 +4,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, and_, literal_column, func, desc, bindparam
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload, joinedload
-from datetime import datetime, date
+from datetime import datetime
 from app.models.papers import DBPaper, DBPaperChunk
 from app.models.citations import DBCitation
-from app.models.authors import DBAuthor
 from app.extensions.logger import create_logger
 from app.utils.identifier_normalization import (
     normalize_external_ids,
     external_id_key_candidates,
 )
-from app.utils.search_utils import build_paradedb_query
+from app.search.query_builder import build_paradedb_query
+from app.search.filter_options import SearchFilterOptions
 
 logger = create_logger(__name__)
 
@@ -23,13 +23,14 @@ class LoadOptions:
     """Options for eager loading paper relationships"""
     authors: bool = False
     journal: bool = False
+    conference: bool = False
     citations: bool = False
     institutions: bool = False
     
     @classmethod
     def all(cls) -> 'LoadOptions':
         """Load all relationships"""
-        return cls(authors=True, journal=True, citations=True, institutions=True)
+        return cls(authors=True, journal=True, conference=True, citations=True, institutions=True)
     
     @classmethod
     def with_authors(cls) -> 'LoadOptions':
@@ -40,6 +41,11 @@ class LoadOptions:
     def with_journal(cls) -> 'LoadOptions':
         """Load only journal"""
         return cls(journal=True)
+
+    @classmethod
+    def with_conference(cls) -> 'LoadOptions':
+        """Load only conference"""
+        return cls(conference=True)
     
     @classmethod
     def with_citations(cls) -> 'LoadOptions':
@@ -50,19 +56,6 @@ class LoadOptions:
     def none(cls) -> 'LoadOptions':
         """Load no relationships (default)"""
         return cls()
-
-@dataclass
-class SearchFilterOptions:
-    """Unified filter options for paper search."""
-
-    author_name: Optional[str] = None
-    year_min: Optional[int] = None
-    year_max: Optional[int] = None
-    venue: Optional[str] = None
-    min_citation_count: Optional[int] = None
-    max_citation_count: Optional[int] = None
-    journal_quartile: Optional[str] = None
-    field_of_study: Optional[List[str]] = None
 
 class PaperRepository:
     """Repository for paper database operations"""
@@ -317,6 +310,9 @@ class PaperRepository:
         if load_options.journal:
             from app.models.journals import DBJournal
             query = query.options(joinedload(DBPaper.journal))
+        if getattr(load_options, "conference", False):
+            from app.models.conferences import DBConference
+            query = query.options(joinedload(DBPaper.conference))
         if load_options.citations:
             query = query.options(
                 selectinload(DBPaper.citations),
@@ -364,6 +360,7 @@ class PaperRepository:
             id: Paper ID (internal paper_id) or database ID (if numeric)
             load_options: LoadOptions for eager loading relationships
         """
+        logger.debug(f"Getting paper with id: {id} and load options: {load_options}")
         if load_options is None:
             load_options = LoadOptions()
         
@@ -398,6 +395,9 @@ class PaperRepository:
         if load_options.journal:
             from app.models.journals import DBJournal
             query = query.options(joinedload(DBPaper.journal))
+        if getattr(load_options, "conference", False):
+            from app.models.conferences import DBConference
+            query = query.options(joinedload(DBPaper.conference))
         if load_options.citations:
             query = query.options(
                 selectinload(DBPaper.citations),
@@ -442,7 +442,7 @@ class PaperRepository:
         result = await self.db.execute(query)
         return result.unique().scalar_one_or_none()
     
-    async def get_paper_by_external_ids(self, external_ids: Dict[str, str], source: str) -> Optional[DBPaper]:
+    async def get_paper_by_external_ids(self, external_ids: Dict[str, str]) -> Optional[DBPaper]:
         """Get paper by external IDs and source"""
         from sqlalchemy import func
 
@@ -457,7 +457,6 @@ class PaperRepository:
                     select(DBPaper).where(
                         and_(
                             func.lower(DBPaper.external_ids[doi_key].astext) == str(doi).lower(),
-                            DBPaper.source == source,
                         )
                     )
                 )
@@ -473,7 +472,6 @@ class PaperRepository:
                         select(DBPaper).where(
                             and_(
                                 DBPaper.external_ids[key_candidate].astext == str(value),
-                                DBPaper.source == source,
                             )
                         )
                     )
@@ -482,6 +480,67 @@ class PaperRepository:
                         return paper
         
         return None
+
+    async def get_papers_by_dois(
+        self,
+        dois: List[str],
+        load_options: Optional[LoadOptions] = None,
+    ) -> List[DBPaper]:
+        """Batch load papers whose external_ids contain any DOI in `dois`."""
+        from sqlalchemy import func, or_
+
+        normalized_dois = []
+        seen: set[str] = set()
+        for doi in dois:
+            normalized = normalize_external_ids({"doi": doi}).get("doi")
+            if not normalized or normalized in seen:
+                continue
+            seen.add(str(normalized))
+            normalized_dois.append(str(normalized))
+
+        if not normalized_dois:
+            return []
+
+        if load_options is None:
+            load_options = LoadOptions()
+
+        query = select(DBPaper)
+
+        if load_options.authors:
+            from app.models.authors import DBAuthorPaper
+
+            query = query.options(
+                selectinload(DBPaper.authors).selectinload(DBAuthorPaper.author)
+            )
+        if load_options.journal:
+            query = query.options(joinedload(DBPaper.journal))
+        if getattr(load_options, "conference", False):
+            query = query.options(joinedload(DBPaper.conference))
+        if load_options.citations:
+            query = query.options(
+                selectinload(DBPaper.citations),
+                selectinload(DBPaper.references),
+            )
+
+        doi_conditions = []
+        for doi_key in external_id_key_candidates("doi"):
+            doi_conditions.append(
+                func.lower(DBPaper.external_ids[doi_key].astext).in_(normalized_dois)
+            )
+
+        query = query.where(or_(*doi_conditions))
+
+        result = await self.db.execute(query)
+        papers = list(result.unique().scalars().all())
+
+        doi_order = {doi: index for index, doi in enumerate(normalized_dois)}
+
+        def paper_order(paper: DBPaper) -> int:
+            external_ids = normalize_external_ids(getattr(paper, "external_ids", None))
+            doi = external_ids.get("doi")
+            return doi_order.get(str(doi), len(doi_order))
+
+        return sorted(papers, key=paper_order)
     
     async def update_paper_processing_status(
         self,
@@ -1103,11 +1162,19 @@ class PaperRepository:
 
         query_stmt = query_stmt.order_by(text("semantic_score DESC")).limit(limit)
 
-        if has_author_filter:
-            query_stmt = query_stmt.distinct(DBPaper.paper_id)
-
         result = await self.db.execute(query_stmt)
-        return [(paper, float(score)) for paper, score in result.all()]
+        rows = result.all()
+
+        if not has_author_filter:
+            return [(paper, float(score)) for paper, score in rows]
+
+        deduped: Dict[str, tuple[DBPaper, float]] = {}
+        for paper, score in rows:
+            paper_id = str(paper.paper_id)
+            if paper_id not in deduped:
+                deduped[paper_id] = (paper, float(score))
+
+        return list(deduped.values())[:limit]
     
     async def update_last_accessed(self, paper_id: str):
         """Update last accessed timestamp"""

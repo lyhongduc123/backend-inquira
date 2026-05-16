@@ -1,7 +1,7 @@
 import gc
-from typing import AsyncGenerator, Dict, List, Optional, TYPE_CHECKING, Union, Tuple, Any
+from typing import AsyncGenerator, Dict, List, Optional, TYPE_CHECKING, Union, Tuple, Any, Literal
 import asyncio
-from app.core.dtos.paper import PaperEnrichedDTO
+from app.domain.papers.types import PaperEnrichedDTO
 from app.modules.r2_storage import R2StorageService
 from app.core.singletons import (
     get_extractor_service,
@@ -10,9 +10,10 @@ from app.core.singletons import (
     get_summarizer_service,
 )
 from .services.chunker import ChunkWithMetadata
-from app.domain.papers import PaperRepository, PaperService
+from app.domain.papers.repository import PaperRepository
+from app.domain.papers.service import PaperService
 from app.domain.chunks.repository import ChunkRepository
-from app.domain.authors import AuthorService
+from app.domain.authors.service import AuthorService
 from app.domain.institutions import InstitutionService
 from numpy import dot
 from numpy.linalg import norm
@@ -52,8 +53,13 @@ class PaperProcessor:
             summarizer_service: Optional SummarizerService (singleton if not provided)
         """
         self.repository = repository
-        
-        self.retrieval_service = retrieval_service
+
+        if retrieval_service is None:
+            from app.retriever.service import RetrievalService
+
+            self.retrieval_service = RetrievalService(self.repository.db)
+        else:
+            self.retrieval_service = retrieval_service
         self.paper_service = PaperService(repository, self.retrieval_service)
         
         self.author_service = AuthorService(self.repository.db)
@@ -90,10 +96,16 @@ class PaperProcessor:
         if db_paper and db_paper.is_processed:
             return True
 
+        await self._ensure_and_persist_paper_embeddings_batch([paper])
+
         # Delegate content processing (retrieval, extracting, chunking, embedding)
         # to the centralized `process_content_only` to eliminate duplication.
         semaphore = asyncio.Semaphore(1)
-        _, success = await self.process_content_only(paper, semaphore)
+        _, success = await self.process_content_only(
+            paper,
+            semaphore,
+            pdf_parser="docling",
+        )
         
         return success
 
@@ -144,8 +156,9 @@ class PaperProcessor:
             Dict mapping paper_id to processing success status
         """
         results = {}
-        
-        # Batch check which papers already exist
+
+        await self._ensure_and_persist_paper_embeddings_batch(papers)
+
         paper_ids = [str(p.paper_id) for p in papers]
         existing_papers = await self.paper_service.batch_check_existing_papers(paper_ids)
         
@@ -153,12 +166,8 @@ class PaperProcessor:
             f"Batch check: {sum(existing_papers.values())} already exist, "
             f"{len(papers) - sum(existing_papers.values())} need processing"
         )
-        
-        # Process only papers that don't exist or aren't processed
         for paper in papers:
             paper_id = str(paper.paper_id)
-            
-            # Skip if already exists and processed
             if existing_papers.get(paper_id, False):
                 results[paper_id] = True
                 logger.debug(f"Paper {paper_id} already processed, skipping")
@@ -278,8 +287,6 @@ class PaperProcessor:
             f"Generating embeddings for {len(papers_needing_embedding)} papers "
             f"({len(papers_with_embedding)} cached)"
         )
-
-        # Generate embeddings for papers that need them
         texts = [f"{p.title}\n\n{p.abstract or ''}" for p in papers_needing_embedding]
 
         embeddings = await self.embedding_service.create_embeddings_batch(
@@ -293,6 +300,29 @@ class PaperProcessor:
         logger.info(f"Generated embeddings for {len(papers_needing_embedding)} papers")
 
         return all_papers
+
+    async def _ensure_and_persist_paper_embeddings_batch(
+        self,
+        papers: List[PaperEnrichedDTO],
+    ) -> None:
+        """Generate title+abstract embeddings in batch and persist with one bulk DB call."""
+        if not papers:
+            return
+
+        try:
+            enriched_papers = await self.generate_paper_embeddings(papers)
+            paper_embeddings: Dict[str, List[float]] = {}
+            for paper in enriched_papers:
+                if isinstance(paper.embedding, list) and len(paper.embedding) > 0:
+                    paper_embeddings[str(paper.paper_id)] = paper.embedding
+
+            if not paper_embeddings:
+                return
+
+            updated_count = await self.repository.update_paper_embeddings_bulk(paper_embeddings)
+            logger.info("Bulk updated title+abstract embeddings for %s papers", updated_count)
+        except Exception as e:
+            logger.warning("Batch title+abstract embedding update failed: %s", e)
 
     async def filter_papers_by_similarity(
         self,
@@ -374,6 +404,7 @@ class PaperProcessor:
         papers: List[PaperEnrichedDTO],
         filtered_papers: Optional[List[PaperEnrichedDTO]] = None,
         max_workers: int = 4,
+        pdf_parser: Literal["docling", "pymupdf"] = "docling",
     ) -> Dict[str, bool]:
         """
         Process multiple papers concurrently (PDF → chunk → embed).
@@ -390,6 +421,13 @@ class PaperProcessor:
         Returns:
             Dict mapping paper_id to success status
         """
+        if max_workers > 1:
+            logger.warning(
+                "process_papers_concurrent received max_workers=%s with shared AsyncSession; forcing max_workers=1 to avoid asyncpg operation overlap",
+                max_workers,
+            )
+            max_workers = 1
+
         logger.info(f"Batch creating {len(papers)} paper records with enrichment...")
         paper_ids = [str(p.paper_id) for p in papers]
         processed_papers = await self.paper_service.batch_check_processed_papers(paper_ids)
@@ -452,8 +490,17 @@ class PaperProcessor:
             logger.info("No papers to process after filtering")
             return results
 
+        await self._ensure_and_persist_paper_embeddings_batch(papers_to_process)
+
         logger.info(f"Starting concurrent processing of {len(papers_to_process)} papers with {max_workers} workers...")
-        tasks = [self.process_content_only(paper, semaphore) for paper in papers_to_process]
+        tasks = [
+            self.process_content_only(
+                paper,
+                semaphore,
+                pdf_parser=pdf_parser,
+            )
+            for paper in papers_to_process
+        ]
         completed = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Collect results
@@ -486,8 +533,16 @@ class PaperProcessor:
         papers: List[PaperEnrichedDTO],
         filtered_papers: Optional[List[PaperEnrichedDTO]] = None,
         max_workers: int = 4,
+        pdf_parser: Literal["docling", "pymupdf"] = "docling",
     ) -> Dict[str, bool]:
         """Process a list of papers concurrently."""
+        if max_workers > 1:
+            logger.warning(
+                "process_papers_v2 received max_workers=%s with shared AsyncSession; forcing max_workers=1 to avoid asyncpg InterfaceError",
+                max_workers,
+            )
+            max_workers = 1
+
         if filtered_papers is not None and len(filtered_papers) > 0:
             filtered_ids = {str(p.paper_id) for p in filtered_papers}
             papers = [p for p in papers if str(p.paper_id) in filtered_ids]
@@ -497,8 +552,17 @@ class PaperProcessor:
             logger.info("No papers to process after filtering")
             return {}
 
+        await self._ensure_and_persist_paper_embeddings_batch(papers)
+
         semaphore = asyncio.Semaphore(max_workers)
-        tasks = [self.process_content_only(paper, semaphore) for paper in papers]
+        tasks = [
+            self.process_content_only(
+                paper,
+                semaphore,
+                pdf_parser=pdf_parser,
+            )
+            for paper in papers
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         result_dict = {}
@@ -512,7 +576,10 @@ class PaperProcessor:
         
     
     async def process_content_only(
-        self, paper: PaperEnrichedDTO, semaphore: asyncio.Semaphore
+        self,
+        paper: PaperEnrichedDTO,
+        semaphore: asyncio.Semaphore,
+        pdf_parser: Literal["docling", "pymupdf"] = "docling",
     ) -> Tuple[str, bool]:
         """Process paper content (PDF → chunks → embed) without DB record creation"""
         async with semaphore:
@@ -544,10 +611,16 @@ class PaperProcessor:
                         paper_id=paper_id,
                         pdf_bytes=resolved.content,  # pyright: ignore[reportArgumentType]
                     )
-                    doc_structure = self.extractor_service.extract_pdf_structure(
-                        resolved.content,  # pyright: ignore[reportArgumentType]
-                        paper_id=paper_id,
-                    )
+                    if pdf_parser == "pymupdf":
+                        doc_structure = self.extractor_service.extract_pdf_structure_with_pymupdf(
+                            resolved.content,  # pyright: ignore[reportArgumentType]
+                            paper_id=paper_id,
+                        )
+                    else:
+                        doc_structure = self.extractor_service.extract_pdf_structure(
+                            resolved.content,  # pyright: ignore[reportArgumentType]
+                            paper_id=paper_id,
+                        )
                     chunks = self.chunker_service.chunk_from_docling_structure(
                         doc_structure, paper_id
                     )
@@ -584,7 +657,6 @@ class PaperProcessor:
 
             except Exception as e:
                 logger.error(f"Error processing {paper_id}: {e}")
-                # Rollback any pending transaction
                 try:
                     await self.repository.db.rollback()
                 except Exception as rollback_error:

@@ -2,13 +2,14 @@
 Paper linking service for handling author and institution relationships.
 Separates business logic from repository data access layer.
 """
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, date
 
-from app.domain.papers import PaperRepository
-from app.domain.authors import AuthorService
+from app.domain.papers.repository import PaperRepository
+from app.domain.authors.service import AuthorService
 from app.domain.institutions import InstitutionService
-from app.core.dtos.paper import PaperEnrichedDTO
+from app.domain.papers.types import PaperEnrichedDTO
 from app.extensions.logger import create_logger
 
 logger = create_logger(__name__)
@@ -47,6 +48,65 @@ class PaperLinkingService:
         self.paper_repository = paper_repository or PaperRepository(db)
         self.author_service = author_service or AuthorService(db)
         self.institution_service = institution_service or InstitutionService(db)
+
+    async def link_authors_and_institutions_for_dbpaper(
+        self, db_paper: Any, authors: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Link authors and institutions for an existing DBPaper.
+
+        This method performs the same orchestration previously implemented
+        in `PaperService.link_authors_and_institutions` but centralized here
+        so all linking logic lives in `PaperLinkingService`.
+        """
+        if not authors:
+            logger.debug(f"No authors data for paper {getattr(db_paper, 'paper_id', '<unknown>')}")
+            return
+
+        # Extract publication year for author-institution tracking
+        pub_year = None
+        if getattr(db_paper, "publication_date", None):
+            pd = db_paper.publication_date
+            if isinstance(pd, (datetime, date)):
+                pub_year = pd.year
+            elif isinstance(pd, int):
+                pub_year = pd
+
+        for position, author_data in enumerate(authors, start=1):
+            # Upsert author from merged author data
+            db_author = await self.author_service.ingest_author_profile(author_data)
+            if not db_author:
+                continue
+
+            # Process institutions for this author
+            institutions = author_data.get("institutions", [])
+            institution_id = None
+
+            if institutions:
+                primary_institution = institutions[0]
+                db_institution = await self.institution_service.upsert_from_openalex(
+                    primary_institution
+                )
+
+                if db_institution:
+                    institution_id = db_institution.id
+
+                    # Link author to institution
+                    await self.author_service.link_author_to_institution(
+                        author=db_author,
+                        institution_id=db_institution.id,
+                        year=pub_year,
+                        is_current=False,
+                    )
+
+            # Link author to paper with position
+            await self.author_service.link_author_to_paper(
+                author=db_author,
+                paper_id=db_paper.id,
+                author_data=author_data,
+                institution_id=institution_id,
+                author_position=position,
+            )
     
     async def link_authors_and_institutions(
         self, 

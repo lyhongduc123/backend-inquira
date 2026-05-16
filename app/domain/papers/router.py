@@ -5,17 +5,16 @@ Paper router for CRUD operations
 from fastapi import APIRouter, Query, Depends, Request, Body
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.database import get_db_session
+from app.core.db.database import get_db_session
 from app.core.dependencies import get_container
 from app.core.container import ServiceContainer
 from .repository import LoadOptions
 from app.domain.chunks.schemas import ChunkResponse
 from .schemas import (
-    PaperDetail,
-    PaperUpdate,
     PaginatedCitationsResponse,
     PaginatedReferencesResponse,
     ComputeTagsRequest,
+    PaperDetailResponse,
 )
 from app.domain.conversations.service import ConversationService
 from app.domain.conversations.schemas import ConversationDetail, ConversationSummary
@@ -27,7 +26,7 @@ from app.core.exceptions import NotFoundException
 router = APIRouter()
 
 
-@router.get("", response_model=PaginatedData[PaperDetail])
+@router.get("", response_model=PaginatedData[PaperDetailResponse])
 async def list_papers(
     request: Request,
     page: int = Query(1, ge=1, description="Page number"),
@@ -38,7 +37,7 @@ async def list_papers(
     ),
     container: ServiceContainer = Depends(get_container),
     current_user: DBUser = Depends(get_current_user),
-) -> PaginatedData[PaperDetail]:
+) -> PaginatedData[PaperDetailResponse]:
     """
     List all papers with pagination
 
@@ -66,13 +65,13 @@ async def list_papers(
     )
 
 
-@router.get("/{paper_id}", response_model=PaperDetail)
+@router.get("/{paper_id}", response_model=PaperDetailResponse)
 async def get_paper(
     request: Request,
     paper_id: str,
     container: ServiceContainer = Depends(get_container),
     current_user: DBUser = Depends(get_current_user),
-) -> PaperDetail:
+) -> PaperDetailResponse:
     """
     Get a single paper by paper_id
 

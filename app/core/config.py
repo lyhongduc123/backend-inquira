@@ -4,6 +4,9 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    APP_NAME: str = "Inquira"
+    APP_VERSION: str = "1.1.0"
+    
     DATABASE_URL: str
     DATABASE_SYNC_URL: str
     BEIR_TEST_DATABASE_URL: str | None = None 
@@ -44,11 +47,11 @@ class Settings(BaseSettings):
 
     # LLM Model Configuration
     LLM_MODEL: list[str] = [
-        "gemini/gemma-4-31b-it",
         "gemini/gemini-2.5-flash",
-        "gemini/gemini-2.5-flash-lite",
+        "gemini/gemma-4-31b-it",
+        # "gemini/gemini-2.5-flash-lite",
         "openrouter/google/gemma-4-31b-it:free",
-        "openrouter/minimax/minimax-m2.5:free",
+        # "openrouter/minimax/minimax-m2.5:free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "openrouter/nousresearch/hermes-3-llama-3.1-405b:free",

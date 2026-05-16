@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.logger import create_logger
-from app.db.database import get_db_session as get_db
-from app.core.dtos.paper import PaperEnrichedDTO
+from app.core.db.database import get_db_session as get_db
+from app.domain.papers.types import PaperEnrichedDTO
 from app.retriever.service import RetrievalService
 
 logger = create_logger(__name__)
@@ -83,7 +83,7 @@ async def debug_hybrid_search(
 
         papers, metadata = await retrieval_service.hybrid_search(
             query=query,
-            semantic_limit=semantic_limit,
+            s2_limit=semantic_limit,
             final_limit=final_limit,
             enable_enrichment=enable_enrichment,
         )

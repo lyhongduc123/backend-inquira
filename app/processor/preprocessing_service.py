@@ -18,8 +18,9 @@ import traceback
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extensions.logger import create_logger
-from app.domain.papers import PaperRepository, PaperService
-from app.domain.authors import AuthorService
+from app.domain.papers.repository import PaperRepository
+from app.domain.papers.service import PaperService
+from app.domain.authors.service import AuthorService
 from app.domain.papers.journal_service import JournalService
 from app.domain.papers.conference_service import ConferenceService
 from app.domain.papers.linking_service import PaperLinkingService
@@ -27,7 +28,8 @@ from app.retriever.service import RetrievalService
 from app.processor.paper_processor import PaperProcessor
 from app.processor.preprocessing_repository import PreprocessingRepository
 from app.models.preprocessing_state import DBPreprocessingState
-from app.domain.chunks import ChunkRepository
+from app.domain.chunks.repository import ChunkRepository
+from app.utils.identifier_normalization import normalize_external_ids
 
 logger = create_logger(__name__)
 
@@ -157,6 +159,7 @@ class PreprocessingService:
 
         try:
             continuation_token = state.continuation_token if resume else None
+            citation_batch: List[Tuple[str, List[str]]] = []
 
             # Phase 1: Indexing Loop
             while state.processed_count < target_count:
@@ -170,7 +173,8 @@ class PreprocessingService:
                     return self._state_to_stats(state)
 
                 # Fetch batch from bulk search
-                batch_size = min(100, target_count - state.processed_count)
+                remaining = max(target_count - state.processed_count, 0)
+                batch_size = min(100, remaining)
                 bulk_result = await self._fetch_bulk_search_batch(
                     query=search_query,
                     limit=batch_size,
@@ -194,7 +198,13 @@ class PreprocessingService:
                 )
 
                 # Process batch: Index metadata and link journals/conferences
-                await self._index_metadata_batch(papers_data, state, target_count)
+                citation_batch.extend(
+                    await self._index_metadata_batch(
+                        papers_data,
+                        state,
+                        target_count,
+                    )
+                )
 
                 # Check if we should stop
                 state = await self._refresh_state(job_id)
@@ -213,18 +223,17 @@ class PreprocessingService:
             
             # Phase 2: Link citations/references from the extracted batch
             await self._update_state(state, message="Phase 2: Linking citations...")
-            await self._link_citations_from_batch(state)
+            await self._link_citations_from_batch(state, citation_batch)
 
-            # Phase 3: Embed title and abstract for DB papers missing them
+
             await self._update_state(state, message="Phase 3: Generating metadata embeddings...")
             await self._generate_missing_embeddings(state)
+            state = await self._refresh_state(job_id)
 
-            # Phase 4: Resolve PDF content and embed chunks sequentially
-            await self._update_state(state, message="Phase 4: Resolving content & chunking...")
-            await self._process_pending_content(state)
-            
-            # Process any other unprocessed papers if necessary
-            await self._process_unprocessed_papers(state)
+            # await self._update_state(state, message="Phase 4: Resolving content & chunking...")
+            # await self._process_pending_content(state)
+
+            # await self._process_unprocessed_papers(state)
 
             await self._complete_job(state)
 
@@ -261,6 +270,293 @@ class PreprocessingService:
                 )
             raise
 
+    async def process_selected_papers(
+        self,
+        job_id: str,
+        paper_ids: List[str],
+        resume: bool = True,
+        strict: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Process an explicit list of paper identifiers (Semantic Scholar IDs or DOIs).
+
+        This workflow follows the same high-level phases as ``process_bulk_search``
+        but limits all actions to the requested papers only:
+        1) Index metadata for requested papers
+        2) Link citations/references from the indexed set
+        3) Generate missing metadata embeddings for the indexed set
+        4) Resolve content (PDF -> chunk -> embed) for requested open-access papers
+        5) Retry any still-unprocessed requested papers once
+
+        Args:
+            job_id: Unique job identifier for tracking
+            paper_ids: Explicit list of identifiers (DOIs or Semantic Scholar IDs)
+            resume: Whether to resume existing job state
+            strict: If True, fail immediately when any requested item cannot be synced
+
+        Returns:
+            Statistics for the preprocessing job state
+        """
+        requested_ids = [str(pid).strip() for pid in paper_ids if str(pid).strip()]
+        deduped_ids = list(dict.fromkeys(requested_ids))
+
+        if not deduped_ids:
+            raise ValueError("No valid paper IDs provided")
+
+        logger.info(
+            f"[Preprocessing] Starting selected-paper job {job_id} for {len(deduped_ids)} IDs"
+        )
+
+        state = await self._initialize_job_state(job_id, len(deduped_ids), resume)
+
+        if state.is_completed:
+            logger.info(f"[Preprocessing] Job {job_id} already completed")
+            return self._state_to_stats(state)
+
+        if state.is_running:
+            logger.warning(f"[Preprocessing] Job {job_id} is already running")
+            return self._state_to_stats(state)
+
+        await self._update_state(
+            state, is_running=True, message="Phase 1: Indexing selected metadata..."
+        )
+
+        try:
+            # Phase 1: fetch selected papers in chunks, then index one-by-one.
+            fetched_papers: List[Any] = []
+            fetch_chunk_size = 100
+
+            for i in range(0, len(deduped_ids), fetch_chunk_size):
+                chunk = deduped_ids[i : i + fetch_chunk_size]
+                chunk_papers = await self._fetch_selected_papers_chunk(
+                    requested_ids=chunk,
+                    strict=strict,
+                    chunk_start=i,
+                )
+
+                fetched_papers.extend(chunk_papers)
+
+            if strict and len(fetched_papers) != len(deduped_ids):
+                raise RuntimeError(
+                    "Strict sync failed: not all requested papers were resolved. "
+                    f"requested={len(deduped_ids)}, resolved={len(fetched_papers)}"
+                )
+
+            citation_batch: List[Tuple[str, List[str]]] = []
+            resolved_paper_ids: List[str] = []
+
+            for paper in fetched_papers:
+                state = await self._refresh_state(job_id)
+                if state.is_paused:
+                    logger.info(f"[Preprocessing] Job {job_id} paused by user")
+                    await self._update_state(
+                        state, is_running=False, message="Paused by user"
+                    )
+                    return self._state_to_stats(state)
+
+                prev_error_count = state.error_count
+                await self._index_single_paper(paper, state, len(deduped_ids))
+                state = await self._refresh_state(job_id)
+
+                paper_id = str(getattr(paper, "paper_id", ""))
+                if paper_id:
+                    resolved_paper_ids.append(paper_id)
+
+                    references_data = self._extract_references_from_paper(paper)
+                    if references_data:
+                        citation_batch.append((paper_id, references_data))
+
+                if strict and state.error_count > prev_error_count:
+                    raise RuntimeError(
+                        "Strict sync failed while indexing selected paper "
+                        f"{paper_id or '<unknown>'}"
+                    )
+
+            state = await self._refresh_state(job_id)
+
+            # Phase 2: Link citations for indexed selected papers only.
+            await self._update_state(state, message="Phase 2: Linking citations...")
+            if citation_batch:
+                linked_count = await self.linking_service.batch_link_citations_references(
+                    citation_data=citation_batch
+                )
+                logger.info(
+                    "[Preprocessing] Linked %s citation/reference edges for selected papers",
+                    linked_count,
+                )
+
+
+            await self._update_state(
+                state, message="Phase 3: Generating metadata embeddings..."
+            )
+            await self._generate_missing_embeddings_for_papers(resolved_paper_ids)
+
+
+            # await self._update_state(
+            #     state, message="Phase 4: Resolving content & chunking..."
+            # )
+            # await self._process_pending_content_for_papers(
+            #     paper_ids=resolved_paper_ids,
+            #     strict=strict,
+            # )
+
+            # await self._update_state(
+            #     state, message="Phase 5: Processing remaining unprocessed selected papers..."
+            # )
+            # await self._process_unprocessed_selected_papers(
+            #     paper_ids=resolved_paper_ids,
+            #     state=state,
+            #     strict=strict,
+            # )
+
+            state = await self._refresh_state(job_id)
+            await self._complete_job(state)
+
+            logger.info(
+                f"[Preprocessing] Selected-paper job {job_id} completed: {self._state_to_stats(state)}"
+            )
+            return self._state_to_stats(state)
+
+        except Exception as e:
+            logger.error(
+                f"[Preprocessing] Fatal error in selected-paper job {job_id}: {e}",
+                exc_info=True,
+            )
+            await self._log_error_to_file(
+                job_id=job_id,
+                stage="process_selected_papers",
+                message=f"Fatal error in selected-paper preprocessing job {job_id}",
+                error=e,
+                context={
+                    "requested_count": len(deduped_ids),
+                },
+            )
+            try:
+                await self.db_session.rollback()
+            except Exception as rollback_error:
+                logger.error(
+                    f"[Preprocessing] Rollback failed for selected-paper job {job_id}: {rollback_error}",
+                    exc_info=True,
+                )
+            state = await self._refresh_state(job_id)
+            await self._update_state(
+                state, is_running=False, message=f"Error: {str(e)}"
+            )
+            raise
+
+    async def _fetch_selected_papers_chunk(
+        self,
+        requested_ids: List[str],
+        strict: bool,
+        chunk_start: int,
+    ) -> List[Any]:
+        """
+        Resolve selected IDs/DOIs for a chunk using existing retrieval flow.
+
+        Strategy:
+        1) Fetch with provided IDs as-is
+        2) For unresolved DOI-like inputs, retry with `DOI:<value>` ids
+        3) In strict mode, fail if any requested item remains unresolved
+        """
+        unique_requested = list(dict.fromkeys([rid.strip() for rid in requested_ids if rid.strip()]))
+        if not unique_requested:
+            return []
+
+        collected: List[Any] = []
+        resolved_inputs: set[str] = set()
+
+        first_pass = await self.retriever.get_multiple_papers(unique_requested)
+        collected.extend(first_pass)
+        resolved_inputs.update(self._map_resolved_requested_ids(unique_requested, first_pass))
+
+        unresolved = [rid for rid in unique_requested if rid not in resolved_inputs]
+
+        doi_retry_ids: List[str] = []
+        for rid in unresolved:
+            maybe_doi = self._normalize_possible_doi(rid)
+            if maybe_doi:
+                doi_retry_ids.append(f"DOI:{maybe_doi}")
+
+        if doi_retry_ids:
+            retry_pass = await self.retriever.get_multiple_papers(doi_retry_ids)
+            collected.extend(retry_pass)
+            resolved_inputs.update(self._map_resolved_requested_ids(unique_requested, retry_pass))
+            unresolved = [rid for rid in unique_requested if rid not in resolved_inputs]
+
+        deduped_by_paper_id: Dict[str, Any] = {}
+        for paper in collected:
+            pid = str(getattr(paper, "paper_id", "") or "").strip()
+            if not pid:
+                continue
+            if pid not in deduped_by_paper_id:
+                deduped_by_paper_id[pid] = paper
+
+        resolved_papers = list(deduped_by_paper_id.values())
+
+        if strict and unresolved:
+            preview = unresolved[:10]
+            raise RuntimeError(
+                "Strict sync failed while fetching selected papers: "
+                f"requested={len(unique_requested)}, resolved={len(resolved_papers)}, chunk_start={chunk_start}, "
+                f"unresolved_count={len(unresolved)}, unresolved_preview={preview}"
+            )
+
+        return resolved_papers
+
+    def _map_resolved_requested_ids(
+        self,
+        requested_ids: List[str],
+        papers: List[Any],
+    ) -> set[str]:
+        """Map fetched papers back to requested identifiers (paper_id / DOI)."""
+        requested_set = set(requested_ids)
+        resolved: set[str] = set()
+
+        for paper in papers:
+            paper_id = str(getattr(paper, "paper_id", "") or "").strip()
+            if paper_id and paper_id in requested_set:
+                resolved.add(paper_id)
+
+            external_ids = normalize_external_ids(getattr(paper, "external_ids", None) or {})
+            doi = external_ids.get("doi")
+            if isinstance(doi, str) and doi.strip():
+                normalized_doi = doi.strip().lower().rstrip("/")
+                if normalized_doi in requested_set:
+                    resolved.add(normalized_doi)
+                doi_prefixed = f"DOI:{normalized_doi}"
+                if doi_prefixed in requested_set:
+                    resolved.add(doi_prefixed)
+
+        return resolved
+
+    @staticmethod
+    def _normalize_possible_doi(identifier: str) -> Optional[str]:
+        """Return normalized DOI if input looks like DOI/DOI URL/DOI:prefix, else None."""
+        value = str(identifier).strip()
+        if not value:
+            return None
+
+        lower_value = value.lower()
+        if lower_value.startswith("doi:"):
+            value = value[4:].strip()
+        elif lower_value.startswith("https://doi.org/"):
+            value = value[len("https://doi.org/") :].strip()
+        elif lower_value.startswith("http://doi.org/"):
+            value = value[len("http://doi.org/") :].strip()
+        elif lower_value.startswith("https://dx.doi.org/"):
+            value = value[len("https://dx.doi.org/") :].strip()
+        elif lower_value.startswith("http://dx.doi.org/"):
+            value = value[len("http://dx.doi.org/") :].strip()
+
+        value = value.rstrip("/").strip()
+        if not value:
+            return None
+
+        if value.startswith("10.") and "/" in value:
+            return value.lower()
+
+        return None
+
     # ==================== Batch Processing ====================
 
     async def _index_metadata_batch(
@@ -268,7 +564,7 @@ class PreprocessingService:
         papers_data: List[Dict[str, Any]],
         state: DBPreprocessingState,
         target_count: int,
-    ) -> None:
+    ) -> List[Tuple[str, List[str]]]:
         """
         Index a batch of papers into the database without processing PDF content.
 
@@ -283,13 +579,18 @@ class PreprocessingService:
         oa_papers = self._filter_open_access_papers(papers_data)
         if not oa_papers:
             logger.info("[Preprocessing] No open access papers in batch")
-            return
+            return []
+
+        state = await self._refresh_state(state.job_id)
+        remaining = max(target_count - state.processed_count, 0)
+        if remaining <= 0:
+            return []
 
         # Extract paper IDs
-        paper_ids = self._extract_paper_ids(oa_papers)
+        paper_ids = self._extract_paper_ids(oa_papers)[:remaining]
         if not paper_ids:
             logger.warning("[Preprocessing] No valid paper IDs in batch")
-            return
+            return []
 
         logger.info(f"[Preprocessing] Fetching details for {len(paper_ids)} papers...")
 
@@ -319,7 +620,7 @@ class PreprocessingService:
 
         if not enriched_papers:
             logger.warning("[Preprocessing] No enriched papers returned")
-            return
+            return []
 
         logger.info(
             f"[Preprocessing] Indexing {len(enriched_papers)} enriched papers"
@@ -327,6 +628,7 @@ class PreprocessingService:
 
         # Process each paper
         job_id = state.job_id
+        citation_batch: List[Tuple[str, List[str]]] = []
         for paper in enriched_papers:
             # Always refresh state from DB to avoid detached/expired object access
             state = await self._refresh_state(job_id)
@@ -340,9 +642,13 @@ class PreprocessingService:
             state = await self._refresh_state(cached_job_id)
             if state.is_paused:
                 logger.info(f"[Preprocessing] Job {cached_job_id} paused during batch")
-                return
+                return citation_batch
 
-            await self._index_single_paper(paper, state, target_count)
+            citation_entry = await self._index_single_paper(paper, state, target_count)
+            if citation_entry:
+                citation_batch.append(citation_entry)
+
+        return citation_batch
 
     async def _fetch_and_enrich_papers(
         self,
@@ -376,7 +682,7 @@ class PreprocessingService:
 
     async def _index_single_paper(
         self, paper: Any, state: DBPreprocessingState, target_count: int
-    ) -> None:
+    ) -> Optional[Tuple[str, List[str]]]:
         """
         Index a single schema paper: check cache, create DB paper, link journal/conference, extract refs.
 
@@ -391,25 +697,23 @@ class PreprocessingService:
         """
         try:
             paper_id = str(paper.paper_id)
+            references_data = self._extract_references_from_paper(paper)
 
-            # Check if already exists (skip if exists)
             if await self.preprocessing_repo.paper_exists(paper_id):
                 state.skipped_count += 1
                 state.current_index += 1
                 logger.info(f"[Preprocessing] Paper {paper_id} already exists, skipping")
-                return
+                return (paper_id, references_data) if references_data else None
 
-            # Create paper in database. This creates authors and institutions right away.
             db_paper = await self.paper_service.ingest_paper_metadata(paper)
             if not db_paper:
                 logger.warning(f"Failed to create paper {paper_id}")
                 state.error_count += 1
                 state.current_index += 1
-                return
+                return None
 
             logger.info(f"Created paper {paper_id}")
 
-            # Link to journal if ISSN/Venue available
             if db_paper.issn or db_paper.issn_l or db_paper.venue:
                 try:
                     journal = await self.journal_service.link_journal_to_paper(
@@ -439,7 +743,6 @@ class PreprocessingService:
                         context={"paper_id": paper_id},
                     )
 
-            # Link to conference if venue available
             if db_paper.venue:
                 try:
                     conference = (
@@ -464,14 +767,6 @@ class PreprocessingService:
                         context={"paper_id": paper_id},
                     )
 
-            # Extract references for later citation linking
-            references_data = self._extract_references_from_paper(paper)
-            if references_data:
-                if not hasattr(state, "_citation_batch"):
-                    state._citation_batch = []  # type: ignore 
-                state._citation_batch.append((paper_id, references_data))  # type: ignore
-
-            # We consider the paper successfully indexed since schema is created
             state.processed_count += 1
             logger.info(f"[Preprocessing] Successfully indexed schema for {paper_id}")
             state.current_index += 1
@@ -480,15 +775,14 @@ class PreprocessingService:
             processed_count = state.processed_count
             job_id = state.job_id
 
-            # Commit and free memory
+
             await self._commit_and_clear_session()
             state = await self._refresh_state(job_id)
-
-            # Log progress
             if processed_count % 5 == 0:
                 logger.info(
                     f"[Preprocessing] Indexing Progress: {processed_count}/{target_count}"
                 )
+            return (paper_id, references_data) if references_data else None
 
         except Exception as e:
             logger.error(f"[Preprocessing] Error indexing paper template: {e}")
@@ -506,23 +800,22 @@ class PreprocessingService:
                     f"[Preprocessing] Rollback failed while handling indexing error: {rollback_error}",
                     exc_info=True,
                 )
-            # Cache values before operations
+ 
             try:
                 error_count = state.error_count + 1
                 current_index = state.current_index + 1
                 job_id = state.job_id
             except Exception:
-                # If state is already detached, refresh it first
                 logger.warning("State detached, refreshing before update")
-                return
-            
-            # Update through fresh state
+                return None
+ 
             await self.db_session.commit()
             self.db_session.expunge_all()
             state = await self._refresh_state(job_id)
             state.error_count = error_count
             state.current_index = current_index
             await self.db_session.commit()
+            return None
 
     async def _process_pending_content(self, state: DBPreprocessingState) -> None:
         """
@@ -531,7 +824,7 @@ class PreprocessingService:
         """
         try:
             logger.info("[Preprocessing] Phase 4: Checking for pending open-access papers...")
-            from app.core.dtos.paper import PaperEnrichedDTO
+            from app.domain.papers.types import PaperEnrichedDTO
             
             limit = 50
             total_resolved = 0
@@ -598,7 +891,7 @@ class PreprocessingService:
         Returns:
             Stats dict with `processed`, `failed`, `total` counts.
         """
-        from app.core.dtos.paper import PaperEnrichedDTO
+        from app.domain.papers.types import PaperEnrichedDTO
 
         stats = {"total": 0, "processed": 0, "failed": 0}
 
@@ -624,7 +917,7 @@ class PreprocessingService:
                         open_access_pdf=p.open_access_pdf,
                         pdf_url=p.pdf_url,
                         external_ids=p.external_ids,
-                        source=p.source or "SemanticScholar",
+                        source=p.source,
                         is_processed=bool(p.is_processed),
                         processing_status=p.processing_status or "pending",
                         authors=[],  # not needed for content processing
@@ -671,6 +964,152 @@ class PreprocessingService:
                 f"[Preprocessing] RAG pipeline error for {paper_id}: {e}", exc_info=True
             )
             return False
+
+    async def _generate_missing_embeddings_for_papers(
+        self,
+        paper_ids: List[str],
+    ) -> None:
+        """
+        Generate missing title+abstract embeddings for a specific set of papers only.
+        """
+        if not paper_ids:
+            logger.info("[Preprocessing] No selected papers provided for embedding generation")
+            return
+
+        unique_ids = list(dict.fromkeys([str(pid).strip() for pid in paper_ids if str(pid).strip()]))
+        target_papers = []
+
+        for paper_id in unique_ids:
+            paper = await self.repository.get_paper_by_id(paper_id)
+            if paper and paper.embedding is None and paper.abstract:
+                target_papers.append(paper)
+
+        if not target_papers:
+            logger.info("[Preprocessing] Selected papers already have embeddings or no abstract")
+            return
+
+        texts = [f"Title: {p.title}\n\nAbstract: {p.abstract or ''}" for p in target_papers]
+        embeddings = await self.processor.embedding_service.create_embeddings_batch(
+            texts,
+            batch_size=20,
+            task="search_document",
+        )
+
+        paper_embeddings = {
+            str(p.paper_id): emb
+            for p, emb in zip(target_papers, embeddings)
+            if emb is not None
+        }
+        if paper_embeddings:
+            await self.repository.bulk_update_paper_embeddings(paper_embeddings)
+            logger.info(
+                "[Preprocessing] Generated selected-paper embeddings for %s papers",
+                len(paper_embeddings),
+            )
+
+    async def _process_pending_content_for_papers(
+        self,
+        paper_ids: List[str],
+        strict: bool = True,
+    ) -> None:
+        """
+        Run content-processing phase for selected papers only.
+        """
+        from app.domain.papers.types import PaperEnrichedDTO
+
+        unique_ids = list(dict.fromkeys([str(pid).strip() for pid in paper_ids if str(pid).strip()]))
+        if not unique_ids:
+            return
+
+        for paper_id in unique_ids:
+            db_paper = await self.repository.get_paper_by_id(paper_id)
+            if not db_paper:
+                if strict:
+                    raise RuntimeError(f"Selected paper not found in DB: {paper_id}")
+                continue
+
+            if not bool(db_paper.is_open_access):
+                logger.info(
+                    "[Preprocessing] Skipping content phase for non-open-access paper %s",
+                    paper_id,
+                )
+                continue
+
+            if bool(db_paper.is_processed):
+                continue
+
+            dto = PaperEnrichedDTO(
+                paper_id=str(db_paper.paper_id),
+                title=db_paper.title or "",
+                abstract=db_paper.abstract,
+                is_open_access=bool(db_paper.is_open_access),
+                open_access_pdf=db_paper.open_access_pdf,
+                pdf_url=db_paper.pdf_url,
+                external_ids=db_paper.external_ids,
+                source=db_paper.source,
+                is_processed=bool(db_paper.is_processed),
+                processing_status=db_paper.processing_status or "pending",
+                authors=[],
+            )
+
+            success = await self._run_rag_pipeline(dto, paper_id)
+            if not success:
+                await self.repository.update_paper_processing_status(paper_id, "failed")
+                if strict:
+                    raise RuntimeError(
+                        f"Strict sync failed during content processing for paper {paper_id}"
+                    )
+
+    async def _process_unprocessed_selected_papers(
+        self,
+        paper_ids: List[str],
+        state: DBPreprocessingState,
+        strict: bool = True,
+    ) -> None:
+        """
+        Retry pass for selected papers that are still unprocessed after content phase.
+        """
+        unresolved_open_access = []
+        unique_ids = list(dict.fromkeys([str(pid).strip() for pid in paper_ids if str(pid).strip()]))
+
+        for paper_id in unique_ids:
+            db_paper = await self.repository.get_paper_by_id(paper_id)
+            if db_paper and bool(db_paper.is_open_access) and not bool(db_paper.is_processed):
+                unresolved_open_access.append(paper_id)
+
+        if not unresolved_open_access:
+            logger.info("[Preprocessing] No remaining selected unprocessed papers")
+            return
+
+        logger.info(
+            "[Preprocessing] Retrying %s selected unprocessed papers",
+            len(unresolved_open_access),
+        )
+        await self._process_pending_content_for_papers(
+            paper_ids=unresolved_open_access,
+            strict=strict,
+        )
+
+        if strict:
+            still_unprocessed = []
+            for paper_id in unresolved_open_access:
+                db_paper = await self.repository.get_paper_by_id(paper_id)
+                if db_paper and bool(db_paper.is_open_access) and not bool(db_paper.is_processed):
+                    still_unprocessed.append(paper_id)
+
+            if still_unprocessed:
+                error = RuntimeError(
+                    "Strict sync failed: selected open-access papers remain unprocessed "
+                    f"after retry: {still_unprocessed}"
+                )
+                await self._log_error_to_file(
+                    job_id=state.job_id,
+                    stage="process_unprocessed_selected_papers",
+                    message="Selected papers still unprocessed after retry",
+                    error=error,
+                    context={"paper_ids": still_unprocessed},
+                )
+                raise error
 
     async def _log_error_to_file(
         self,
@@ -739,14 +1178,18 @@ class PreprocessingService:
 
         try:
             # Use get_bulk_paper method from semantic provider
-            results = await semantic_provider.get_bulk_paper(
-                query, token=token, fields_of_study=fields_of_study
+            result = await semantic_provider.get_bulk_paper(
+                query,
+                limit=limit,
+                token=token,
+                fields_of_study=fields_of_study,
             )
+            results = result.get("data", [])
 
             # Package in expected format
             return {
-                "total": len(results),
-                "token": token,  # Note: Need to extract continuation token properly
+                "total": result.get("total", len(results)),
+                "token": result.get("token"),
                 "data": results,
             }
         except Exception as e:
@@ -792,11 +1235,7 @@ class PreprocessingService:
                 f"[Preprocessing] Generating embeddings for {len(papers)} papers"
             )
 
-            # Generate embeddings directly without DTO conversion to avoid lazy-loading 'authors'
-            texts = [
-                f"{p.title}\n\n{p.abstract or ''}"
-                for p in papers
-            ]
+            texts = [self._metadata_embedding_text(p) for p in papers]
             
             embeddings = await self.processor.embedding_service.create_embeddings_batch(
                 texts, batch_size=20, task="search_document"
@@ -826,6 +1265,16 @@ class PreprocessingService:
                 message="Failed generating missing embeddings",
                 error=e,
             )
+
+    @staticmethod
+    def _metadata_embedding_text(paper: Any, max_chars: int = 6000) -> str:
+        """Build bounded title/abstract text for metadata embedding."""
+        title = str(getattr(paper, "title", "") or "").strip()
+        abstract = str(getattr(paper, "abstract", "") or "").strip()
+        text = f"Title: {title}\n\nAbstract: {abstract}".strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars]
 
     async def compute_all_author_metrics(
         self,
@@ -870,7 +1319,7 @@ class PreprocessingService:
             author_oa_ids: list[str] = []
             for author in authors:
                 raw = author.external_ids or {}
-                oa_raw = raw.get("OpenAlex") or author.openalex_id
+                oa_raw = raw.get("openalex") or raw.get("OpenAlex") or author.openalex_id
                 if oa_raw:
                     author_oa_ids.append(self._normalize_openalex_id(str(oa_raw)))
                     
@@ -889,7 +1338,7 @@ class PreprocessingService:
                 try:
                     # Resolve this author's OA entry from the pre-fetched map
                     raw = author.external_ids or {}
-                    oa_raw = raw.get("OpenAlex") or author.openalex_id
+                    oa_raw = raw.get("openalex") or raw.get("OpenAlex") or author.openalex_id
                     oa_data = oa_map.get(self._normalize_openalex_id(str(oa_raw))) if oa_raw else None
 
                     # Use DB-cached S2 fields — no external API call needed here
@@ -1132,7 +1581,7 @@ class PreprocessingService:
             for db_paper in papers:
                 try:
                     # Convert to enriched DTO for processing
-                    from app.core.dtos.paper import PaperEnrichedDTO
+                    from app.domain.papers.types import PaperEnrichedDTO
 
                     paper_dto = PaperEnrichedDTO.from_db_model(db_paper)
 
@@ -1183,7 +1632,11 @@ class PreprocessingService:
                 exc_info=True,
             )
 
-    async def _link_citations_from_batch(self, state: DBPreprocessingState) -> None:
+    async def _link_citations_from_batch(
+        self,
+        state: DBPreprocessingState,
+        citation_data: Optional[List[Tuple[str, List[str]]]] = None,
+    ) -> None:
         """
         Link citations/references between papers using collected data.
 
@@ -1192,17 +1645,12 @@ class PreprocessingService:
         for papers that exist, which is the expected behavior.
 
         Args:
-            state: Preprocessing state with accumulated citation data
+            state: Preprocessing state for logging
+            citation_data: Accumulated `(paper_id, referenced_paper_ids)` pairs
         """
-        # Check if we have collected citation data
-        if not hasattr(state, "_citation_batch") or not state._citation_batch:  # type: ignore
-            logger.info("[Preprocessing] No citations to link")
-            return
-
-        citation_data = state._citation_batch  # type: ignore
-
+        citation_data = citation_data or []
         if not citation_data:
-            logger.info("[Preprocessing] Citation batch is empty")
+            logger.info("[Preprocessing] No citations to link")
             return
 
         logger.info(
@@ -1334,7 +1782,7 @@ class PreprocessingService:
             state.is_running = is_running
         if message is not None:
             state.status_message = message  # type: ignore
-        await self.preprocessing_repo.save_state(state)
+        await self.preprocessing_repo.save_state(state, refresh=True)
 
     async def _complete_job(self, state: DBPreprocessingState) -> None:
         """Mark job as completed."""
@@ -1344,7 +1792,7 @@ class PreprocessingService:
         state.status_message = (
             f"Completed: {state.processed_count} papers processed"
         )  # type: ignore
-        await self.preprocessing_repo.save_state(state)
+        await self.preprocessing_repo.save_state(state, refresh=True)
 
     async def _commit_and_clear_session(self) -> None:
         """Commit changes and clear session to free memory."""

@@ -8,18 +8,17 @@ Skips query decomposition and uses a lightweight query rewrite, then:
 3) ranks papers from the same scope
 """
 
-from datetime import datetime
 from typing import AsyncGenerator, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.container import ServiceContainer
-from app.domain.chunks.schemas import ChunkRetrieved
-from app.domain.papers import LoadOptions
+from app.domain.papers.repository import LoadOptions
 from app.llm import get_llm_service
-from app.processor.schemas import RankedPaper
+from app.search.types import RankedPaper
 from app.rag_pipeline.schemas import RAGEventType, RAGPipelineEvent, RAGResult
 from app.extensions.logger import create_logger
+from app.search import append_missing_abstract_chunks
 
 logger = create_logger(__name__)
 
@@ -85,39 +84,17 @@ class ScopedPipeline:
             semantic_weight=0.6,
         )
 
-        papers_with_chunks = {str(chunk.paper_id) for chunk in chunks}
         scoped_papers, _ = await self.repository.get_papers(
             skip=0,
             limit=max(len(normalized_paper_ids), 1),
             paper_ids=normalized_paper_ids,
             load_options=LoadOptions(),
         )
-        papers_without_chunks = [
-            paper
-            for paper in scoped_papers
-            if str(paper.paper_id) not in papers_with_chunks and paper.abstract
-        ]
-
-        for paper in papers_without_chunks:
-            virtual_chunk = ChunkRetrieved(
-                chunk_id=f"{paper.paper_id}_abstract",
-                paper_id=str(paper.paper_id),
-                text=paper.abstract,
-                token_count=len(paper.abstract.split()),
-                chunk_index=0,
-                section_title="Abstract",
-                page_number=None,
-                label="abstract",
-                level=0,
-                id=int(paper.id),
-                char_start=None,
-                char_end=None,
-                docling_metadata=None,
-                embedding=None,
-                created_at=datetime.now(),
-                relevance_score=0.0,
-            )
-            chunks.append(virtual_chunk)
+        append_missing_abstract_chunks(
+            chunks,
+            [(paper, 0.0) for paper in scoped_papers],
+            score_multiplier=0.0,
+        )
 
         if enable_reranking and chunks:
             try:

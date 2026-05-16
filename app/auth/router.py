@@ -35,7 +35,7 @@ from app.auth.oauth_service import (
 from app.auth.email_otp_service import create_email_otp, send_otp_email, verify_email_otp
 from app.auth.service import create_access_token, get_user_by_email, get_user_by_id
 from app.auth.dependencies import get_current_user
-from app.db.database import get_db_session
+from app.core.db.database import get_db_session
 from app.models.users import DBUser
 from app.core.config import settings
 from app.core.exceptions import BadRequestException, UnauthorizedException, InternalServerException

@@ -7,7 +7,7 @@ import datetime
 import time
 from typing import AsyncGenerator, Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.database import db_session_context
+from app.core.db.database import db_session_context
 from app.core.exceptions import BadRequestException
 from app.domain.authors.schemas import AuthorMetadata
 from app.domain.conversations.schemas import (
@@ -27,22 +27,20 @@ from app.extensions.prompt_filter import is_gibberish
 from app.domain.chat.query_router import route_query
 from app.llm.schemas.chat import GeneratedQueryPlanResponse, QuestionBreakdownResponse
 from app.rag_pipeline.pipeline import Pipeline as RAGPipeline
-from app.rag_pipeline.hybrid_pipeline import HybridPipeline
-from app.rag_pipeline.database_pipeline import DatabasePipeline
-from app.rag_pipeline.scoped_pipeline import ScopedPipeline
 from app.rag_pipeline.schemas import RAGResult, SearchWorkflowConfig
 from app.domain.conversations.service import ConversationService
 from app.domain.messages.service import MessageService
 
 from app.extensions.citation_extractor import CitationExtractor
-from app.validation.schemas import ValidationRequest
+from app.domain.validation.schemas import ValidationRequest
 from app.domain.conversations.context_manager import ConversationContextManager
 from app.domain.conversations.summarization_service import (
     ConversationSummarizationService,
 )
 from .event_emitter import ChatEventEmitter
-from .response_builder import ChatResponseBuilder
+from ...extensions.context_builder import ContextBuilder
 from .background_tasks import ChatBackgroundTaskService
+from .conversation_setup import resolve_conversation_for_user
 from .error_handlers import ChatErrorHandler
 
 logger = create_logger(__name__)
@@ -55,9 +53,6 @@ class ChatService:
         self,
         db_session: AsyncSession,
         rag_pipeline: RAGPipeline,
-        hybrid_pipeline: HybridPipeline,
-        database_pipeline: DatabasePipeline,
-        scoped_pipeline: ScopedPipeline,
         message_service: "MessageService",
         context_manager: "ConversationContextManager",
         summarization_service: "ConversationSummarizationService",
@@ -69,12 +64,9 @@ class ChatService:
         Args:
             db_session: Database session
             rag_pipeline: Standard RAG pipeline
-            hybrid_pipeline: Hybrid RAG pipeline
-            database_pipeline: Database-only pipeline
             message_service: Message service for database operations
             context_manager: Conversation context manager
             summarization_service: Conversation summarization service
-            response_builder: Chat response builder
             background_tasks: Background task service
             error_handler: Error handler
             llm_service: LLM service (optional, singleton if not provided)
@@ -82,13 +74,9 @@ class ChatService:
         self.db_session = db_session
         self.llm_service = llm_service or get_llm_service()
         self.rag_pipeline = rag_pipeline
-        self.hybrid_pipeline = hybrid_pipeline
-        self.database_pipeline = database_pipeline
-        self.scoped_pipeline = scoped_pipeline
         self.message_service = message_service
         self.context_manager = context_manager
         self.summarization_service = summarization_service
-        self.response_builder = ChatResponseBuilder()
         self.background_tasks = background_tasks
         self.error_handler = ChatErrorHandler()
 
@@ -221,30 +209,21 @@ class ChatService:
         scoped_ids: List[str],
     ) -> AsyncGenerator[tuple[Any, Dict], None]:
         """Dynamically select and execute the correct pipeline, mapping events cleanly."""
-        # 1. Select the correct pipeline iterator
         if pipeline_type == "scoped" or (scoped_ids and len(scoped_ids) > 0):
-            iterator = self.scoped_pipeline.run_scoped_search_workflow(
+            iterator = self.rag_pipeline.run_scoped_search_workflow(
                 query=config.query,
                 paper_ids=scoped_ids,
                 enable_reranking=True,
             )
         elif pipeline_type in ["database", "research"]:
-            iterator = self.database_pipeline.run_database_search_workflow(
+            iterator = self.rag_pipeline.run_database_search_workflow(
                 config=config
-            )
-        elif pipeline_type == "hybrid":
-            iterator = self.hybrid_pipeline.run_hybrid_rag_workflow(
-                query=config.query,
-                max_subtopics=2,
-                per_subtopic_limit=20,
-                filters=config.filters,
-                conversation_id=conv_id,
             )
         else:
             logger.warning(
                 f"NO VALID PIPELINE SELECTED FOR TYPE: {pipeline_type}, defaulting to database pipeline"
             )
-            iterator = self.database_pipeline.run_database_search_workflow(
+            iterator = self.rag_pipeline.run_database_search_workflow(
                 config=config
             )
 
@@ -317,23 +296,25 @@ class ChatService:
         self, service: ConversationService, conv_id: Optional[str], user_id: int
     ) -> tuple[Any, bool]:
         """Fetch existing or create new conversation."""
-        if conv_id:
-            conversation, was_cloned = await service.get_or_clone_conversation_for_user(
-                conversation_id=conv_id,
-                user_id=user_id,
-            )
-            if not conversation:
-                logger.warning(f"Invalid conversation_id: {conv_id}")
-                raise BadRequestException("Conversation does not exist.")
-            if was_cloned:
-                logger.info(
-                    "Conversation was shared from another user; deep-cloned for isolated follow-up.",
-                    extra={"source_conversation_id": conv_id, "cloned_conversation_id": conversation.conversation_id},
-                )
-            return conversation, False
+        setup_result = await resolve_conversation_for_user(
+            conversation_service=service,
+            user_id=user_id,
+            conversation_id=conv_id,
+        )
+        if not setup_result:
+            logger.warning(f"Invalid conversation_id: {conv_id}")
+            raise BadRequestException("Conversation does not exist.")
 
-        conversation = await service.create_conversation(user_id=user_id)
-        return conversation, True
+        if setup_result.was_cloned and conv_id:
+            logger.info(
+                "Conversation was shared from another user; deep-cloned for isolated follow-up.",
+                extra={
+                    "source_conversation_id": conv_id,
+                    "cloned_conversation_id": setup_result.conversation_id,
+                },
+            )
+
+        return setup_result.conversation, setup_result.is_new
 
     def _determine_pipeline(self, request: ChatMessageRequest) -> tuple[str, Any]:
         """Determine which RAG pipeline to use based on request."""
@@ -395,10 +376,9 @@ class ChatService:
             conv_context, _ = await self.context_manager.get_conversation_context(
                 conv_id, context_session, include_current_query=True
             )
-        context_string, _ = self.response_builder.build_context_from_results(results)
-        enhanced_query = self.response_builder.build_enhanced_query(
+        context_string, _ = ContextBuilder.build_context_from_results(results)
+        enhanced_query = ContextBuilder.build_enhanced_query(
             request.query,
-            conversation_history=conv_context,
             context_string=context_string,
         )
 
@@ -410,6 +390,7 @@ class ChatService:
         response_chunks = []
         reasoning_chunks = []
         async for chunk_text in self.llm_service.stream_citation_based_response(
+            history_messages=conv_context,
             context=enhanced_query
         ):
             text = get_stream_response_content(chunk_text)
@@ -439,8 +420,8 @@ class ChatService:
                     role="assistant",
                     pipeline_type=pipeline_type,
                     completion_time_ms=int((time.time() - start_time) * 1000),
-                    paper_ids=self.response_builder.get_retrieved_paper_ids(results),
-                    paper_snapshots=self.response_builder.extract_metadata_from_results(
+                    paper_ids=ContextBuilder.get_retrieved_paper_ids(results),
+                    paper_snapshots=ContextBuilder.extract_metadata_from_results(
                         results
                     ),
                     progress_events=event_emitter.get_collected_events(),
@@ -455,7 +436,7 @@ class ChatService:
                 query=request.query,
                 context=context_string,
                 enhanced_query=enhanced_query,
-                context_chunks=self.response_builder.extract_context_chunks_from_results(
+                context_chunks=ContextBuilder.extract_context_chunks_from_results(
                     results
                 ),
                 generated_answer=full_response,
@@ -560,7 +541,6 @@ class ChatService:
                     influential_citation_count=2,
                     reference_count=10,
                     author_trust_score=0.8,
-                    institutional_trust_score=0.7,
                     fields_of_study=["Computer Science", "Artificial Intelligence"],
                     fwci=1.2,
                     is_open_access=True,
@@ -582,7 +562,6 @@ class ChatService:
                     influential_citation_count=1,
                     reference_count=5,
                     author_trust_score=0.6,
-                    institutional_trust_score=0.5,
                     fields_of_study=["Computer Science"],
                     fwci=0.9,
                     is_open_access=False,
@@ -601,21 +580,38 @@ class ChatService:
         ):
             yield evt
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(10)
 
-        async for evt in event_emitter.emit_chunk_event(
-            "This is a test response chunk."
-        ):
-            yield evt
-            
-        async for evt in event_emitter.emit_chunk_event(
-            "This is another test response chunk."
-        ):
-            yield evt
-        async for evt in event_emitter.emit_chunk_event(
-            "This is the final test response chunk."
-        ):
-            yield evt
+        msg = ("This is a test response chunk."
+               " It is being streamed token by token to simulate the LLM response generation process."
+                " The final response will be a combination of all these chunks."
+                " This allows the frontend to display the response in real-time as it is generated."
+                " (cite:1), (cite:2), and (cite:3) are the papers that support this answer."
+                " The reasoning chunk provides insight into how the answer was derived from the retrieved papers."
+                " This is useful for debugging and understanding the model's behavior."
+                " The response builder formats the final answer and extracts relevant metadata for saving to the database."
+                " The background tasks will run validation and summarization after the response is saved."
+                " data mermaid"
+                "graph TD;"
+                "A[User Query] --> B[LLM Decomposition];"
+                "B --> C{Pipeline Selection};"
+                "C -->|Database| D[Database Pipeline];"
+                "C -->|Hybrid| E[Hybrid Pipeline];"
+                "C -->|Scoped| F[Scoped Pipeline];"
+                "D --> G[Retrieval Results];"
+                "E --> G[Retrieval Results];"
+                "F --> G[Retrieval Results];"
+                "G --> H[Response Synthesis];"
+                "H --> I[Save to DB];"
+                "I --> J[Background Tasks];"
+                "This flowchart illustrates the overall architecture of the chat service, showing how a user query is processed through decomposition, pipeline selection, retrieval, response synthesis, saving, and background tasks."
+                "Tagging (cite:1) indicates that Paper 1 was cited in the response, (cite:2) indicates Paper 2, and (cite:3) indicates Paper 3. The reasoning chunk explains how the retrieved papers contributed to the final answer."
+                )
+        for i in range(0, len(msg), 12):
+            chunk = msg[i:i+12]
+            async for evt in event_emitter.emit_chunk_event(chunk):
+                yield evt
+            await asyncio.sleep(0.02)
 
         async for evt in event_emitter.emit_done_event():
             yield evt

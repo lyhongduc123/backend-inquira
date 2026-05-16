@@ -101,7 +101,7 @@ class Message(CamelModel):
     created_at: datetime
 
     @field_serializer(
-        "paper_snapshots", "sources", "progress_events", "scoped_quote_refs"
+        "paper_snapshots", "progress_events", "scoped_quote_refs"
     )
     def serialize_metadata(
         self, value: Optional[List[Dict[str, Any]]]

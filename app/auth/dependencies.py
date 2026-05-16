@@ -6,7 +6,7 @@ from fastapi import Depends, Cookie
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.auth.service import decode_access_token, get_user_by_id
 from app.models.users import DBUser
-from app.db.database import db_session_context
+from app.core.db.database import db_session_context
 from app.core.exceptions import UnauthorizedException, ForbiddenException
 from app.extensions.logger import create_logger
 
@@ -48,21 +48,16 @@ async def get_current_user(
     if not token and credentials:
         token = credentials.credentials
     
-    logger.debug(f"Access token cookie: {access_token_cookie[:20] if access_token_cookie else 'None'}...")
-    
     if not token:
         raise UnauthorizedException("No authentication token provided")
-    
-    logger.debug(f"Validating token: {token[:20]}...")
+
     token_data = decode_access_token(token)
-    logger.debug(f"Decoded token data for user_id: {token_data.user_id if token_data else None}")
-    
     if token_data is None or token_data.user_id is None:
         raise UnauthorizedException("Could not validate credentials")
     
     async with db_session_context() as db:
         user = await get_user_by_id(db, user_id=token_data.user_id)
-    
+        
     if user is None:
         raise UnauthorizedException("User not found")
     

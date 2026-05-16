@@ -173,10 +173,10 @@ class ConversationService:
         user_id: Optional[int] = None,
     ) -> Optional[ConversationDetail]:
         """Get conversation by ID with all messages"""
-        if user_id is None:
-            db_conversation = await self.repo.get(conversation_id)
-        else:
-            db_conversation = await self.repo.get_by_id(conversation_id, user_id)
+        # if user_id is None:
+        db_conversation = await self.repo.get(conversation_id)
+        # else:
+        #     db_conversation = await self.repo.get_by_id(conversation_id, user_id)
         if not db_conversation:
             return None
 
@@ -280,14 +280,6 @@ class ConversationService:
         message_responses: Optional[List] = None,
     ) -> ConversationDetail:
         """Convert DB model to detail schema using MessageWithPapersResponse"""
-        logger.debug(
-            f"Converting conversation to detail",
-            extra={
-                "conversation_id": db_conversation.conversation_id,
-                "has_messages": message_responses is not None,
-            },
-        )
-        
         message_list = []
         if message_responses:
             for msg_resp in message_responses:
@@ -322,13 +314,6 @@ class ConversationService:
         messages: Optional[List[DBMessage]] = None,
     ) -> ConversationDetail:
         """Convert DB model to detail schema"""
-        logger.debug(
-            f"Converting conversation to detail",
-            extra={
-                "conversation_id": db_conversation.conversation_id,
-                "has_messages": messages is not None,
-            },
-        )
         message_list = []
         if messages:
             message_list = []
@@ -357,7 +342,7 @@ class ConversationService:
                     else:
                         # Papers already loaded, safe to access
                         if msg.papers:
-                            from app.core.dtos.paper import PaperDTO
+                            from app.domain.papers.types import PaperDTO
                             papers_dto = PaperDTO.batch_from_db_models(msg.papers)
                             sources = [paper.model_dump(mode='json', by_alias=True) for paper in papers_dto]
 
