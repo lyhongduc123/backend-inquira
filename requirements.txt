@@ -16,8 +16,11 @@ ollama
 litellm
 python-jose[cryptography]
 httpx
+playwright
+playwright-stealth
 python-multipart
 beir
 numpy
 redis
 boto3
+langgraph
