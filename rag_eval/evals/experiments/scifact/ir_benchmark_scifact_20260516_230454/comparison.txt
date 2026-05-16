@@ -1,0 +1,149 @@
+========================================================================================================================
+Benchmark Results: scifact
+Timestamp: 2026-05-16T23:04:54.982095
+========================================================================================================================
+
+AGGREGATE METRICS SUMMARY
+------------------------------------------------------------------------------------------------------------------------
+Variant                   NDCG@10      Recall@20    F1@20        MRR          Latency      Queries   
+------------------------------------------------------------------------------------------------------------------------
+decomposed_after_rerank   0.6780 (+0.0361, +5.6%) 0.8813       0.0934       0.6507       3943         300       
+decomposed_before_rerank  0.6202 (-0.0217, -3.4%) 0.8149       0.0857       0.5932       3943         300       
+original_after_rerank     0.6679 (+0.0260, +4.1%) 0.8558       0.0909       0.6395       4055         300       
+original_before_rerank    0.6419       0.8089       0.0848       0.6171       4055         300       
+
+========================================================================================================================
+
+DETAILED COMPONENT BREAKDOWN
+
+decomposed_after_rerank
+------------------------------------------------------------------------------------------------------------------------
+  Paper Retrieval Metrics:
+    NDCG@10:  0.677982
+    NDCG@20:  0.698481
+    Precision@10: 0.089333
+    Precision@20: 0.049833
+    Recall@10: 0.805611
+    Recall@20: 0.881333
+    F1@10:    0.158669
+    F1@20:    0.093411
+    MRR:      0.650705
+  Chunk Retrieval Metrics:
+    NDCG@5:   0.000000
+    NDCG@10:  0.000000
+    Recall@5: 0.250000
+    Recall@10: 0.500000
+  Component Timings (ms):
+    Query Decomposition:      0.04
+    Retrieval:              526.00
+    RRF Fusion:             525.97
+    Paper Ranking:            0.00
+    Chunk Retrieval:          0.01
+    Chunk Reranking:       3417.20
+    Total:                 4469.21
+  Query Aggregates:
+    Avg Latency:           3943.27 ms
+    Papers Retrieved:          100
+    Papers After RRF:          100
+    Chunks Retrieved:          100
+    Chunks After Rerank:        20
+    Avg Subqueries:              2
+
+decomposed_before_rerank
+------------------------------------------------------------------------------------------------------------------------
+  Paper Retrieval Metrics:
+    NDCG@10:  0.620219
+    NDCG@20:  0.637706
+    Precision@10: 0.083667
+    Precision@20: 0.045667
+    Recall@10: 0.748167
+    Recall@20: 0.814944
+    F1@10:    0.148126
+    F1@20:    0.085656
+    MRR:      0.593183
+  Chunk Retrieval Metrics:
+    NDCG@5:   0.000000
+    NDCG@10:  0.000000
+    Recall@5: 0.250000
+    Recall@10: 0.500000
+  Component Timings (ms):
+    Query Decomposition:      0.04
+    Retrieval:              526.00
+    RRF Fusion:             525.97
+    Paper Ranking:            0.00
+    Chunk Retrieval:          0.01
+    Chunk Reranking:          0.00
+    Total:                 1052.02
+  Query Aggregates:
+    Avg Latency:           3943.27 ms
+    Papers Retrieved:          100
+    Papers After RRF:          100
+    Chunks Retrieved:          100
+    Chunks After Rerank:        20
+    Avg Subqueries:              2
+
+original_after_rerank
+------------------------------------------------------------------------------------------------------------------------
+  Paper Retrieval Metrics:
+    NDCG@10:  0.667938
+    NDCG@20:  0.685444
+    Precision@10: 0.088000
+    Precision@20: 0.048500
+    Recall@10: 0.791167
+    Recall@20: 0.855778
+    F1@10:    0.156237
+    F1@20:    0.090898
+    MRR:      0.639519
+  Chunk Retrieval Metrics:
+    NDCG@5:   0.000000
+    NDCG@10:  0.000000
+    Recall@5: 0.250000
+    Recall@10: 0.500000
+  Component Timings (ms):
+    Query Decomposition:      0.00
+    Retrieval:              129.34
+    RRF Fusion:             129.32
+    Paper Ranking:            0.00
+    Chunk Retrieval:          0.04
+    Chunk Reranking:       3925.67
+    Total:                 4184.37
+  Query Aggregates:
+    Avg Latency:           4055.16 ms
+    Papers Retrieved:          100
+    Papers After RRF:          100
+    Chunks Retrieved:          100
+    Chunks After Rerank:        20
+    Avg Subqueries:              1
+
+original_before_rerank
+------------------------------------------------------------------------------------------------------------------------
+  Paper Retrieval Metrics:
+    NDCG@10:  0.641906
+    NDCG@20:  0.655675
+    Precision@10: 0.083333
+    Precision@20: 0.045167
+    Recall@10: 0.759000
+    Recall@20: 0.808889
+    F1@10:    0.148516
+    F1@20:    0.084803
+    MRR:      0.617075
+  Chunk Retrieval Metrics:
+    NDCG@5:   0.000000
+    NDCG@10:  0.000000
+    Recall@5: 0.250000
+    Recall@10: 0.500000
+  Component Timings (ms):
+    Query Decomposition:      0.00
+    Retrieval:              129.34
+    RRF Fusion:             129.32
+    Paper Ranking:            0.00
+    Chunk Retrieval:          0.04
+    Chunk Reranking:          0.00
+    Total:                  258.70
+  Query Aggregates:
+    Avg Latency:           4055.16 ms
+    Papers Retrieved:          100
+    Papers After RRF:          100
+    Chunks Retrieved:          100
+    Chunks After Rerank:        20
+    Avg Subqueries:              1

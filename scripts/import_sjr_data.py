@@ -28,7 +28,7 @@ import logging
 from sqlalchemy import select, delete, text
 from sqlalchemy.dialects.postgresql import insert
 
-from app.db.database import get_db_session, init_db
+from app.core.db.database import get_db_session, init_db
 from app.models.journals import DBJournal
 
 logging.basicConfig(

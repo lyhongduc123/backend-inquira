@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from sqlalchemy.dialects.postgresql import insert
 
-from app.db.database import get_db_session, init_db
+from app.core.db.database import get_db_session, init_db
 from app.models.conferences import DBConference # Nhớ đổi path cho đúng
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

@@ -1,0 +1,5 @@
+Variant,Query Decomposition (ms),Retrieval (ms),RRF (ms),Paper Ranking (ms),Chunk Retrieval (ms),Chunk Reranking (ms),Total Time (ms)
+decomposed_before_rerank,0.04,526.00,525.97,0.00,0.01,0.00,1052.02
+decomposed_after_rerank,0.04,526.00,525.97,0.00,0.01,3417.20,4469.21
+original_before_rerank,0.00,129.34,129.32,0.00,0.04,0.00,258.70
+original_after_rerank,0.00,129.34,129.32,0.00,0.04,3925.67,4184.37

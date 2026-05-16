@@ -28,6 +28,22 @@ def calculate_recall_at_k(retrieved: Iterable[str], relevant: Set[str]) -> float
     return len(retrieved_set & relevant) / len(relevant)
 
 
+def calculate_precision_at_k(retrieved: Iterable[str], relevant: Set[str]) -> float:
+    """Calculate Precision@k for retrieved IDs and relevant set."""
+    retrieved_list = list(retrieved)
+    if not retrieved_list:
+        return 0.0
+    return len(set(retrieved_list) & relevant) / len(retrieved_list)
+
+
+def calculate_f1(precision: float, recall: float) -> float:
+    """Calculate F1 from precision and recall."""
+    denominator = precision + recall
+    if denominator == 0:
+        return 0.0
+    return 2 * precision * recall / denominator
+
+
 def calculate_mrr(retrieved: Iterable[str], relevant: Set[str]) -> float:
     """Calculate Mean Reciprocal Rank."""
     for idx, item in enumerate(retrieved, start=1):
