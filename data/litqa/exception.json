@@ -1,0 +1,79 @@
+{
+  "except": [
+    {
+      "doi": "10.1016/j.cell.2024.04.015",
+      "ver_doi": null,
+      "title": "Circadian tumor infiltration and function of CD8+ T cells dictate immunotherapy efficacy"
+    },
+    {
+      "doi": "10.1101/2023.05.21.541555",
+      "ver_doi": "10.1016/j.cell.2023.05.041",
+      "title": "Discovery of new deaminase functions by structure-based protein clustering"
+    },
+    {
+      "doi": "10.7554/elife.76630",
+      "ver_doi": "10.1101/2022.01.14.476317",
+      "title": "Structural and thermodynamic analyses of the β-to-α transformation in RfaH reveal principles of fold-switching proteins"
+    },
+    {
+      "doi": "10.1016/j.celrep.2021.109967",
+      "ver_doi": "10.1101/2021.05.12.443709",
+      "title": "Mechanistic insights into the regulation of circadian rhythms by transcription factors"
+    },
+    {
+      "doi": "10.1101/2022.12.01.518682",
+      "ver_doi": "10.1038/s41586-023-06728-8",
+      "title": "Illuminating protein space with a programmable generative model"
+    },
+    {
+      "doi": "10.1038/s41467-023-40173-5",
+      "ver_doi": "10.1101/2022.05.18.491687",
+      "title": "Guided construction of single cell reference for human and mouse lung"
+    },
+    {
+      "doi": "10.1242/jcs.259535",
+      "ver_doi": "10.1101/2021.08.26.457815",
+      "title": "Kif9 is an active kinesin motor required for ciliary beating and proximodistal patterning of motile axonemes"
+    },
+    {
+      "doi": "10.7554/elife.91357.3",
+      "ver_doi": "10.7554/eLife.91357",
+      "title": "Post-transcriptional splicing can occur in a slow-moving zone around the gene"
+    },
+    {
+      "doi": "10.1101/2023.12.19.572360",
+      "ver_doi": "10.1038/s44319-024-00137-2",
+      "title": "The dual role of Spn-E in supporting heterotypic ping-pong piRNA amplification in silkworms"
+    },
+    {
+        "doi": "10.1101/2024.05.07.593022",
+        "ver_doi": "10.1186/s12870-025-06045-4",
+        "title": "Population genomics of a natural Cannabis sativa L. collection from Iran identifies novel genetic loci for flowering time, morphology, sex and chemotyping"
+    },
+    {
+        "doi": "10.1111/nph.19360",
+        "ver_doi": "10.1101/2023.03.05.531139",
+        "title": "Nodule-specific Cu+-chaperone NCC1 is required for symbiotic nitrogen fixation in Medicago truncatula root nodules"
+    },
+    {
+        "doi": "10.1101/2023.12.13.571462",
+        "ver_doi": "10.1038/s41467-024-51844-2",
+        "title": "Fine-tuning protein language models boosts predictions across diverse tasks"
+    },
+    {
+        "doi": "10.1101/2024.02.20.581217",
+        "ver_doi": "10.7554/elife.96933",
+        "title": "Saccharomyces cerevisiae Rev7 regulates DSB repair pathway choice through binding and blocking Mre11 nuclease and Rad50 ATPase activities"
+    },
+    {
+        "doi": "10.1093/nar/gkae167",
+        "ver_doi": "10.1101/2023.11.24.568546",
+        "title": "CRISPR antiphage defence mediated by the cyclic nucleotide-binding membrane protein Csx23"
+    },
+    {
+        "doi": "10.1101/2024.05.13.593936",
+        "ver_doi": "10.1093/genetics/iyaf153",
+        "title": "Residues Neighboring an SH3-Binding Motif Participate in the Interaction In Vivo"
+    }
+  ]
+}
